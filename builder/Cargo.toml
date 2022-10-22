@@ -1,0 +1,32 @@
+[package]
+name = "trou-sample-builder"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+# capnpc = "0.14"
+
+[dependencies]
+# capnp = "0.14"
+# wasm-bindgen = "0.2"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1"
+
+
+# log = "0.4"
+# env_logger = "0.9"
+# walkdir = "2"
+# itertools = "0.10"
+# memmap2 = "0.5"
+# nix-nar = "0.2"
+# filetime = "0.2"
+# fd-lock = "3"
+#
+# [dependencies.reqwest]
+# default-features = false
+# version = "0.11"
+# features = [ "blocking", "rustls-tls" ]

@@ -1,0 +1,50 @@
+{
+    "fenix": {
+        "branch": "main",
+        "description": "Rust toolchains and rust analyzer nightly for nix [maintainer=@figsoda]",
+        "homepage": "",
+        "owner": "nix-community",
+        "repo": "fenix",
+        "rev": "dca822b67ddf0af52f9b63feaeefc1668c8635c0",
+        "sha256": "07qnvv42h6ri1vv4rczc4ys2nll4n0l13x19jrgxn065hip3nfiy",
+        "type": "tarball",
+        "url": "https://github.com/nix-community/fenix/archive/dca822b67ddf0af52f9b63feaeefc1668c8635c0.tar.gz",
+        "url_template": "https://github.com/<owner>/<repo>/archive/<rev>.tar.gz"
+    },
+    "fetlock": {
+        "branch": "master",
+        "description": "Convert any lockfile to a nix expression",
+        "homepage": "",
+        "owner": "timbertson",
+        "repo": "fetlock",
+        "rev": "a66cc86ce240575ddba6fbb70621bdec167361d9",
+        "sha256": "0nvgqckabn7b41230274vj1wd0lh3lmqxhzrd70bjn53dpk40d8n",
+        "type": "tarball",
+        "url": "https://github.com/timbertson/fetlock/archive/a66cc86ce240575ddba6fbb70621bdec167361d9.tar.gz",
+        "url_template": "https://github.com/<owner>/<repo>/archive/<rev>.tar.gz"
+    },
+    "gup": {
+        "branch": "master",
+        "description": "A better make, inspired by djb's redo.",
+        "homepage": null,
+        "owner": "timbertson",
+        "repo": "gup",
+        "rev": "version-0.8.3",
+        "sha256": "0yprgqwrjq8kvcgkwy80h5497f4b6zgl1pa8nh8zcjv2xhnnn0gs",
+        "type": "tarball",
+        "url": "https://github.com/timbertson/gup/archive/version-0.8.3.tar.gz",
+        "url_template": "https://github.com/<owner>/<repo>/archive/<rev>.tar.gz"
+    },
+    "nixpkgs": {
+        "branch": "release-22.05",
+        "description": "Nix Packages collection",
+        "homepage": "",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "e9bd3d0616382fdf7a3b4d1416935c5dbdf366f8",
+        "sha256": "05gw1xfzm2pi2pqak0g3dj8cmqz8i9aiwk3gy1bil0r3if1pgq1a",
+        "type": "tarball",
+        "url": "https://github.com/NixOS/nixpkgs/archive/e9bd3d0616382fdf7a3b4d1416935c5dbdf366f8.tar.gz",
+        "url_template": "https://github.com/<owner>/<repo>/archive/<rev>.tar.gz"
+    }
+}

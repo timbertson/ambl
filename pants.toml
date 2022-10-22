@@ -1,0 +1,20 @@
+[GLOBAL]
+pants_version = "2.13.0"
+use_deprecated_directory_cli_args_semantics = false
+pythonpath = ["%(buildroot)s/pants-plugins"]
+
+backend_packages.add = [
+  "trou",
+  "pants.backend.python",
+  "pants.backend.plugin_development",
+]
+
+
+[source]
+root_patterns = [
+  "pants-plugins",
+]
+
+[anonymous-telemetry]
+enabled = false
+
