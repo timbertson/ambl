@@ -66,6 +66,33 @@ I don't know if dune projects can refer to each other aside from package depende
 
 Pants makes everything a goal, and you can pass targets to goals. I'm not sure about this, most things can likely get by just being file targets.
 
+## Namespace spec:
+
+Pick a buildroot. Say .trou/
+.trou/meta contains all the build DB / lockfiles etc
+.trou/target contains the built files
+
+All targets by default go in here.
+
+### Promotion:
+Some targets might want to end up in the real source tree, so have some kind of promote flag. After build, copy them. Any buildable target will ignore the source version, overwriting with built version.
+
+Cleanup: if a target becomes unbuildable, we remove the source version _if_ it's unchanged. If it's changed, we print a warning because it might have been promoted to source and then manually edited.
+
+### Symlinks:
+
+symlinks in .trou/target won't naturally work. Options:
+ - make them all absolute? This doesn't work if they're made from an exec'd command
+  - we could rewrite them post-build? And if we're promoting them, _don't_ rewrite those versions.
+ - install a symlink tree / copy of source files. I think this is what dune does, it seems rather heavy.
+
+### Multiple outputs:
+
+If a target produces multiple files, we can declare them upfront.
+But what if they're dynamically done? Perhaps after execing something, we can dynamically register additional files as a side effect? You won't be able to build those individually, but we can track them.
+
+Since we execute things hermetically, you'd have to do something to get trou to persist them anyway.
+
 # Pants fine-grained targets:
 
 Pants has super fine targets. How are they all named? Pants doesn't seem to support out-of-project dependencies, which is a big lack.

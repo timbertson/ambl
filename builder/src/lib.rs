@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_variables)]
+
 use anyhow::*;
 
 
@@ -103,23 +105,41 @@ use anyhow::*;
 	}
 
 	const PROTOCOL_VERSION: usize = 1;
-	type BuildFn = Box<dyn FnOnce(&Ctx) -> Result<()>>;
-	type TargetFn = Box<dyn FnOnce(&mut Ctx) -> Result<Vec<Target>>>;
+	// type BuildFn = Box<dyn FnOnce(&Ctx) -> Result<()>>;
+	// type TargetFn = Box<dyn FnOnce(&mut Ctx) -> Result<Vec<Target>>>;
 	pub type TargetsFFI = Vec<u8>;
 	
-	#[repr(C)]
-	pub struct Ctx {
-		target: String,
-		build_fns: Vec<BuildFn>,
-		target_fns: Vec<TargetFn>,
+	pub struct BaseCtx {
+	}
+	impl BaseCtx {
+		pub fn new() -> Self { Self {} }
+
+		pub fn encode_targets(&mut self, t: Result<Vec<Target>>, mut out: SizedPtrRef) -> Result<()> {
+			// TODO handle Err
+			let ser: Vec<TargetSerialize> = t.unwrap().into_iter().map(|t| {
+				TargetSerialize::convert(self, t)
+			}).collect();
+			let bytes = serde_json::to_vec(&ser).unwrap();
+			debug(&serde_json::to_string(&ser).unwrap());
+			out.write_and_leak(bytes)
+		}
+
 	}
 
-	impl Ctx {
+	#[repr(C)]
+	pub struct TargetCtx {
+		target: String,
+		// build_dir: String,
+		// build_fns: Vec<BuildFn>,
+		// target_fns: Vec<TargetFn>,
+	}
+
+	impl TargetCtx {
 		pub fn new(target: String) -> Self {
 			Self {
 				target,
-				build_fns: Default::default(),
-				target_fns: Default::default(),
+				// build_fns: Default::default(),
+				// target_fns: Default::default(),
 			}
 		}
 
@@ -135,29 +155,19 @@ use anyhow::*;
 			Ok(serde_json::from_str(response_str)?)
 		}
 
-		pub fn encode_targets(&mut self, t: Result<Vec<Target>>, mut out: SizedPtrRef) -> Result<()> {
-			// TODO handle Err
-			let ser: Vec<TargetSerialize> = t.unwrap().into_iter().map(|t| {
-				TargetSerialize::convert(self, t)
-			}).collect();
-			let bytes = serde_json::to_vec(&ser).unwrap();
-			debug(&serde_json::to_string(&ser).unwrap());
-			out.write_and_leak(bytes)
-		}
+		// fn register_into<T>(dest: &mut Vec<T>, value: T) -> usize {
+		// 	let idx = dest.len();
+		// 	dest.push(value);
+		// 	idx
+		// }
 
-		fn register_into<T>(dest: &mut Vec<T>, value: T) -> usize {
-			let idx = dest.len();
-			dest.push(value);
-			idx
-		}
+		// fn register_build_fn(&mut self, f: BuildFn) -> usize {
+		// 	Self::register_into(&mut self.build_fns, f)
+		// }
 
-		fn register_build_fn(&mut self, f: BuildFn) -> usize {
-			Self::register_into(&mut self.build_fns, f)
-		}
-
-		fn register_target_fn(&mut self, f: TargetFn) -> usize {
-			Self::register_into(&mut self.target_fns, f)
-		}
+		// fn register_target_fn(&mut self, f: TargetFn) -> usize {
+		// 	Self::register_into(&mut self.target_fns, f)
+		// }
 		
 		// invoke shortcuts
 
@@ -205,11 +215,16 @@ use anyhow::*;
 		names: Vec<String>,
 		build: BuildRuleSerialize,
 	}
+	
+	pub struct Entrypoint {
+		module: Option<String>,
+		entrypoint: Option<String>,
+		args: Option<String>,
+	}
 
 	pub enum BuildRule {
-		WasmDelegate(String),
-		Defer(TargetFn),
-		Direct(BuildFn),
+		Run(Entrypoint),
+		Delegate(Entrypoint), // TODO it makes no sense to pass args to a delegate
 	}
 
 	#[derive(Serialize)]
@@ -220,7 +235,7 @@ use anyhow::*;
 	}
 	
 	impl TargetSerialize {
-		fn convert(ctx: &mut Ctx, base: Target) -> Self {
+		fn convert(ctx: &mut BaseCtx, base: Target) -> Self {
 			match base {
 				Target::Nested(t) => TargetSerialize::Nested(t.into_iter().map(|t| {
 					TargetSerialize::convert(ctx, t)
@@ -233,31 +248,31 @@ use anyhow::*;
 	}
 
 	impl BuildRuleSerialize {
-		fn convert(ctx: &mut Ctx, base: BuildRule) -> Self {
-			match base {
-				BuildRule::Direct(f) => BuildRuleSerialize::Direct(ctx.register_build_fn(f)),
-				BuildRule::Defer(f) => BuildRuleSerialize::Defer(ctx.register_target_fn(f)),
-				BuildRule::WasmDelegate(s) => BuildRuleSerialize::WasmDelegate(s),
-			}
+		fn convert(ctx: &mut BaseCtx, base: BuildRule) -> Self {
+			todo!()
+			// match base {
+			// 	BuildRule::Direct(f) => BuildRuleSerialize::Direct(ctx.register_build_fn(f)),
+			// 	BuildRule::Defer(f) => BuildRuleSerialize::Defer(ctx.register_target_fn(f)),
+			// 	BuildRule::WasmDelegate(s) => BuildRuleSerialize::WasmDelegate(s),
+			// }
 		}
 	}
 
 	// host <-> guest API
 
 	#[no_mangle]
-	pub extern "C" fn trou_init_ctx(target: *mut u8, len: u32) -> *const Ctx {
-		unsafe { leak_opaque(Ctx::new(SizedPtr::wrap(target, len).to_str().to_owned())) }
+	pub extern "C" fn trou_init_base_ctx() -> *const BaseCtx {
+		unsafe { leak_opaque(BaseCtx::new()) }
 	}
 
 	#[no_mangle]
-	pub extern "C" fn trou_deinit_ctx(ctx: &'static mut Ctx) {
+	pub extern "C" fn trou_init_target_ctx(target: *mut u8, len: u32) -> *const TargetCtx {
+		unsafe { leak_opaque(TargetCtx::new(SizedPtr::wrap(target, len).to_str().to_owned())) }
+	}
+
+	#[no_mangle]
+	pub extern "C" fn trou_deinit_base_ctx(ctx: &'static mut BaseCtx) {
 		drop(unsafe { Box::from_raw(ctx) })
-	}
-
-	#[no_mangle]
-	pub extern "C" fn trou_reset_ctx(c: &mut Ctx) {
-		let target = c.target.clone(); // TODO can we mem::swap or something?
-		*c = Ctx::new(target)
 	}
 
 	#[no_mangle]
@@ -271,33 +286,33 @@ use anyhow::*;
 	}
 
 	// target builder functions
-	pub fn target<S: Into<String>, F: FnOnce(&Ctx) -> Result<()> + 'static>(s: S, f: F) -> Target {
+	pub fn target<S: Into<String>, S2: Into<String>>(s: S, entrypoint: S2) -> Target {
 		Target::Single(NamedTarget {
 			names: vec!(s.into()),
-			build: BuildRule::Direct(Box::new(f)),
+			build: BuildRule::Run(Entrypoint { module: None, entrypoint: Some(entrypoint.into()), args: None, }),
 		})
 	}
 
-	pub fn targets<S: Into<String>, F: FnOnce(&Ctx) -> Result<()> + 'static>(s: Vec<S>, f: F) -> Target {
+	pub fn targets<S: Into<String>, S2: Into<String>>(s: Vec<S>, entrypoint: S2) -> Target {
 		Target::Single(NamedTarget {
 			names: s.into_iter().map(|s| s.into()).collect(),
-			build: BuildRule::Direct(Box::new(f)),
+			build: BuildRule::Run(Entrypoint { module: None, entrypoint: Some(entrypoint.into()), args: None, }),
 		})
 	}
 
-	pub fn lazy_targets<F: FnOnce(&mut Ctx) -> Result<Vec<Target>> + 'static>(f: F) -> Target {
-		Target::Single(NamedTarget {
-			names: Vec::new(),
-			build: BuildRule::Defer(Box::new(f)),
-		})
-	}
+	// pub fn lazy_targets<S: Into<String>>(entrypoint: S) -> Target {
+	// 	Target::Single(NamedTarget {
+	// 		names: Vec::new(),
+	// 		build: BuildRule::Delegate(Entrypoint { module: None, entrypoint: Some(entrypoint.into()), args: None, }),
+	// 	})
+	// }
 
-	pub fn lazy<S: Into<String>, F: FnOnce(&mut Ctx) -> Result<Vec<Target>> + 'static>(s: S, f: F) -> Target {
-		Target::Single(NamedTarget {
-			names: vec!(s.into()),
-			build: BuildRule::Defer(Box::new(f)),
-		})
-	}
+	// pub fn lazy<S: Into<String>, S2: Into<String>>(s: S, entrypoint: S) -> Target {
+	// 	Target::Single(NamedTarget {
+	// 		names: vec!(s.into()),
+	// 		build: BuildRule::Delegate(Entrypoint { module: None, entrypoint: Some(entrypoint.into()), args: None, }),
+	// 	})
+	// }
 	
 	pub fn debug(s: &str) {
 		unsafe { trou_debug(s.as_ptr(), s.len() as u32) };
@@ -307,41 +322,62 @@ use anyhow::*;
 
 use api::*;
 
-// TODO: boilerplate
+// TODO: boilerplate via macro / derive?
 #[no_mangle]
-pub extern "C" fn targets_ffi(c: &mut Ctx, out: &mut *mut u8, len: &mut u32) {
+pub extern "C" fn targets_ffi(c: &mut BaseCtx, out: &mut *mut u8, len: &mut u32) {
 	debug("HI!");
 	let inner = targets_inner(c);
 	c.encode_targets(inner, SizedPtrRef::wrap(out, len)).unwrap()
 }
 
-pub fn targets_inner(_: &mut Ctx) -> Result<Vec<Target>> {
+
+pub extern "C" fn build_all(c: &mut TargetCtx) -> Result<()> {
+	debug(&format!("Building {}", c.target()));
+	c.build("a")?;
+	Ok(())
+}
+
+// pub extern "C" fn platform_targets(c: &mut TargetCtx) -> Result<Vec<Target>> {
+// 	Ok(vec!(
+// 		targets(vec!("x86", "aarch64"), |c: &Ctx| {
+// 			println!("you built: {}", c.target());
+// 			Ok(())
+// 		}),
+// 	))
+// }
+
+pub fn targets_inner(_: &mut BaseCtx) -> Result<Vec<Target>> {
 	Ok(vec!(
-		target("all", |c: &Ctx| {
-			c.build("a")?;
-			Ok(())
-		}),
-		targets(vec!("a", "b", "c"), |c: &Ctx| {
-			println!("you built: {}", c.target());
-			Ok(())
-		}),
+		target("all", "build_all"),
+		targets(vec!("a", "b", "c"), "build_all"),
 
-		lazy("platform", |_: &mut Ctx| {
-			Ok(vec!(
-				targets(vec!("x86", "aarch64"), |c: &Ctx| {
-					println!("you built: {}", c.target());
-					Ok(())
-				}),
-			))
-		}),
+		// lazy("platform", |_: &mut Ctx| {
+		// 	Ok(vec!(
+		// 		targets(vec!("x86", "aarch64"), |c: &Ctx| {
+		// 			println!("you built: {}", c.target());
+		// 			Ok(())
+		// 		}),
+		// 	))
+		// }),
 
-		lazy_targets(|_: &mut Ctx| {
-			Ok(vec!(
-				targets(vec!("d", "e", "f"), |c: &Ctx| {
-					println!("you built: {}", c.target());
-					Ok(())
-				}),
-			))
-		}),
+		// lazy_targets(|_: &mut Ctx| {
+		// 	Ok(vec!(
+		// 		targets(vec!("d", "e", "f"), |c: &Ctx| {
+		// 			println!("you built: {}", c.target());
+		// 			Ok(())
+		// 		}),
+		// 	))
+		// }),
 	))
+}
+
+
+// declarative build API
+pub struct SampleOpts {
+	debug: bool,
+}
+
+// TODO wrapper which takes String and invokes with SampleBuild
+pub fn sample_build(ctx: &mut TargetCtx, opts: SampleOpts) -> Result<()> {
+	Ok(())
 }
