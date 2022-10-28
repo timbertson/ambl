@@ -152,9 +152,11 @@ What if you had a gup-like build tool where instead of `gup -u <tool>` it could 
 
 Pants allows gup-style late declaration of dependencies:
 
+(is "monadic build steps" a good description of this?)
+
 https://www.pantsbuild.org/docs/rules-api-concepts#await-get---awaiting-results-in-a-rule-body
 
-Does bazel allow this?
+Does bazel allow this? I don't think so.
 
 # Rule weight:
 

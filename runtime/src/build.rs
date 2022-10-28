@@ -104,7 +104,7 @@ targets:
 		module: exec.wasm
 		
 		# TODO how do we distinguish files we depend on, vs paths?
-		# Maybe that's the job of the wasm impl? Yeah.
+		# Maybe that's the job of the wasm impl?
 
 		args:
 			sources:

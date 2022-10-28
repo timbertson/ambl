@@ -4,8 +4,7 @@ use anyhow::*;
 
 
 pub mod api {
-
-use anyhow::*;
+	use anyhow::*;
 	use serde::{Serialize, de::DeserializeOwned};
 
 	// Used when writing to a sized ptr that the host provides
@@ -111,16 +110,13 @@ use anyhow::*;
 	
 	pub struct BaseCtx {
 	}
+
 	impl BaseCtx {
 		pub fn new() -> Self { Self {} }
 
 		pub fn encode_targets(&mut self, t: Result<Vec<Target>>, mut out: SizedPtrRef) -> Result<()> {
 			// TODO handle Err
-			let ser: Vec<TargetSerialize> = t.unwrap().into_iter().map(|t| {
-				TargetSerialize::convert(self, t)
-			}).collect();
-			let bytes = serde_json::to_vec(&ser).unwrap();
-			debug(&serde_json::to_string(&ser).unwrap());
+			let bytes = serde_json::to_vec(&t.unwrap()).unwrap();
 			out.write_and_leak(bytes)
 		}
 
@@ -193,69 +189,68 @@ use anyhow::*;
 	
 	#[derive(Serialize)]
 	pub struct Dependency<'a> { path: &'a str }
+	
+	// used for delegating target definitions to another module
+	#[derive(Serialize)]
+	pub struct ModuleSpec {
+		name: String,
+		scope: Option<String>,
+		config: Option<String>,
+	}
 
-	pub enum Target {
-		Nested(Vec<Target>),
-		Single(NamedTarget),
+	pub fn module<S: Into<String>>(name: S) -> ModuleSpec {
+		ModuleSpec { name: name.into(), scope: None, config: None }
+	}
+	
+	impl ModuleSpec {
+		pub fn config<S: Into<String>>(mut self, s: S) -> Self {
+			self.config = Some(s.into());
+			self
+		}
+
+		pub fn scope<S: Into<String>>(mut self, s: S) -> Self {
+			self.scope = Some(s.into());
+			self
+		}
 	}
 
 	#[derive(Serialize)]
-	pub enum TargetSerialize {
-		Nested(Vec<TargetSerialize>),
-		Single(NamedTargetSerialize),
-	}
-
-	pub struct NamedTarget {
-		names: Vec<String>,
-		build: BuildRule,
-	}
-	
-	#[derive(Serialize)]
-	pub struct NamedTargetSerialize {
-		names: Vec<String>,
-		build: BuildRuleSerialize,
-	}
-	
-	pub struct Entrypoint {
+	pub struct FunctionSpec {
+		name: String, // TODO can we default this to `build` for modules?
 		module: Option<String>,
-		entrypoint: Option<String>,
-		args: Option<String>,
+		config: Option<String>,
 	}
 
-	pub enum BuildRule {
-		Run(Entrypoint),
-		Delegate(Entrypoint), // TODO it makes no sense to pass args to a delegate
+	pub fn build_fn<S: Into<String>>(name: S) -> FunctionSpec {
+		FunctionSpec { name: name.into(), module: None, config: None }
+	}
+
+	pub fn build_via<S: Into<String>, S2: Into<String>>(module: S, name: S2) -> FunctionSpec {
+		FunctionSpec { name: name.into(), module: Some(module.into()), config: None }
+	}
+	
+	impl FunctionSpec {
+		pub fn config<S: Into<String>>(mut self, s: S) -> Self {
+			self.config = Some(s.into());
+			self
+		}
+
+		pub fn module<S: Into<String>>(mut self, s: S) -> Self {
+			self.module = Some(s.into());
+			self
+		}
 	}
 
 	#[derive(Serialize)]
-	pub enum BuildRuleSerialize {
-		WasmDelegate(String),
-		Defer(usize),
-		Direct(usize),
-	}
-	
-	impl TargetSerialize {
-		fn convert(ctx: &mut BaseCtx, base: Target) -> Self {
-			match base {
-				Target::Nested(t) => TargetSerialize::Nested(t.into_iter().map(|t| {
-					TargetSerialize::convert(ctx, t)
-				}).collect()),
-				Target::Single(NamedTarget { names, build }) => TargetSerialize::Single(NamedTargetSerialize {
-					names, build: BuildRuleSerialize::convert(ctx, build)
-				}),
-			}
-		}
+	pub enum Target {
+		Direct(DirectTarget),
+		Indirect(ModuleSpec),
 	}
 
-	impl BuildRuleSerialize {
-		fn convert(ctx: &mut BaseCtx, base: BuildRule) -> Self {
-			todo!()
-			// match base {
-			// 	BuildRule::Direct(f) => BuildRuleSerialize::Direct(ctx.register_build_fn(f)),
-			// 	BuildRule::Defer(f) => BuildRuleSerialize::Defer(ctx.register_target_fn(f)),
-			// 	BuildRule::WasmDelegate(s) => BuildRuleSerialize::WasmDelegate(s),
-			// }
-		}
+	#[derive(Serialize)]
+	pub struct DirectTarget {
+		names: Vec<String>,
+		build: FunctionSpec,
 	}
 
 	// host <-> guest API
@@ -286,18 +281,22 @@ use anyhow::*;
 	}
 
 	// target builder functions
-	pub fn target<S: Into<String>, S2: Into<String>>(s: S, entrypoint: S2) -> Target {
-		Target::Single(NamedTarget {
+	pub fn target<S: Into<String>>(s: S, entrypoint: FunctionSpec) -> Target {
+		Target::Direct(DirectTarget {
 			names: vec!(s.into()),
-			build: BuildRule::Run(Entrypoint { module: None, entrypoint: Some(entrypoint.into()), args: None, }),
+			build: entrypoint,
 		})
 	}
 
-	pub fn targets<S: Into<String>, S2: Into<String>>(s: Vec<S>, entrypoint: S2) -> Target {
-		Target::Single(NamedTarget {
+	pub fn targets<S: Into<String>>(s: Vec<S>, entrypoint: FunctionSpec) -> Target {
+		Target::Direct(DirectTarget {
 			names: s.into_iter().map(|s| s.into()).collect(),
-			build: BuildRule::Run(Entrypoint { module: None, entrypoint: Some(entrypoint.into()), args: None, }),
+			build: entrypoint,
 		})
+	}
+
+	pub fn include(m: ModuleSpec) -> Target {
+		Target::Indirect(m)
 	}
 
 	// pub fn lazy_targets<S: Into<String>>(entrypoint: S) -> Target {
@@ -348,26 +347,14 @@ pub extern "C" fn build_all(c: &mut TargetCtx) -> Result<()> {
 
 pub fn targets_inner(_: &mut BaseCtx) -> Result<Vec<Target>> {
 	Ok(vec!(
-		target("all", "build_all"),
-		targets(vec!("a", "b", "c"), "build_all"),
+		target("all", build_fn("build_all")),
+		targets(vec!("a", "b", "c"), build_fn("build_all")),
 
-		// lazy("platform", |_: &mut Ctx| {
-		// 	Ok(vec!(
-		// 		targets(vec!("x86", "aarch64"), |c: &Ctx| {
-		// 			println!("you built: {}", c.target());
-		// 			Ok(())
-		// 		}),
-		// 	))
-		// }),
+		target("lint", build_via("builtin:lint.wasm", "build_all").config("...")),
+		
+		include(module("builtin:scala.wasm").config("{ x: 123 }")),
 
-		// lazy_targets(|_: &mut Ctx| {
-		// 	Ok(vec!(
-		// 		targets(vec!("d", "e", "f"), |c: &Ctx| {
-		// 			println!("you built: {}", c.target());
-		// 			Ok(())
-		// 		}),
-		// 	))
-		// }),
+		include(module("builtin:lint.wasm").scope("lint").config("{ src: ./scala }")),
 	))
 }
 
