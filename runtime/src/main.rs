@@ -1,6 +1,7 @@
+#![allow(dead_code, unused_variables)]
 use std::{mem::size_of, ops::Deref};
-mod build;
 
+// use trou_common::*;
 use anyhow::*;
 use wasmtime::*;
 
@@ -89,54 +90,6 @@ impl<T: Sized> State<T> {
 	}
 
 	unsafe fn alias(&self) -> StateAlias<T> { StateAlias(self as *const State<T>) }
-	
-	// fn deinit_ctx<C: AsContextMut<Data=State<T>>>(&self, store: C, value: WasmOffset) -> Result<()> {
-	// 	Ok(self.trou_deinit_ctx.call(store, value.raw)?)
-	// }
-
-	// // can't be a real Drop because it needs access to mut store
-	// fn drop(mut store: Store<Self>) -> Result<()> {
-	// 	unsafe {
-	// 		let data = store.data() as *const State; // alias the store's data unsafely
-	// 		(*data).trou_free.call(&mut store, ((*data).outbox_ptr.raw, U32_SIZE))?;
-	// 		(*data).trou_free.call(&mut store, ((*data).outbox_len.raw, U32_SIZE))?;
-	// 	}
-	// 	drop(store);
-	// 	Ok(())
-	// }
-
-	// fn init_ctx<C: AsContextMut<Data=State<T>>>(&self, mut store: C, target: &str) -> Result<WasmOffset> {
-	// 	// let mut store = store.as_context_mut();
-
-	// 	// make space
-	// 	let strlen = target.len() as u32;
-	// 	let buf_offset = self.trou_alloc.call(store.as_context_mut(), strlen)?;
-	// 	// write the string
-	// 	self.memory.write(store.as_context_mut(), buf_offset as usize, target.as_bytes())?;
-		
-	// 	// init the ctx and get targets
-	// 	let ret = offset(self.trou_init_ctx.call(store.as_context_mut(), (buf_offset, strlen))?);
-	// 	// done with string
-	// 	self.trou_free.call(store.as_context_mut(), (buf_offset, strlen))?;
-	// 	Ok(ret)
-	// }
-
-	// fn get_targets<C: AsContextMut<Data=State<T>>>(self: &State<TargetFunctions>, mut store: C, ctx: WasmOffset) -> Result<()> {
-	// 	let mut store = store.as_context_mut();
-
-	// 	// get targets
-	// 	self.targets_ffi.call(&mut store, (ctx.raw, self.outbox_ptr.raw, self.outbox_len.raw))?;
-
-	// 	// we need to read the u32 pointers via the memory API, interpreting as little-endian (wasm) u32
-	// 	let outbox_offset = offset(read_u32(&mut store, self.outbox_ptr.clone())?);
-	// 	let outbox_len = read_u32(&mut store, self.outbox_len.clone())?;
-
-	// 	let result_bytes = copy_bytes(&mut store, outbox_offset, outbox_len)?;
-	// 	println!("result[{}]: {:?}", outbox_len, String::from_utf8(result_bytes)?);
-
-	// 	// TODO ...
-	// 	Ok(())
-	// }
 }
 
 impl State<TargetFunctions> {

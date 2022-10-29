@@ -1,2 +1,2 @@
 [workspace]
-members = [ "builder", "runtime" ]
+members = [ "common", "api", "builder", "runtime" ]

@@ -2,14 +2,19 @@
 name = "trou-sample-builder"
 version = "0.1.0"
 edition = "2021"
+# requires https://github.com/rust-lang/cargo/issues/9406
+# forced-target = "wasm32-unknown-unknown"
 
 [lib]
 crate-type = ["cdylib"]
 
-[build-dependencies]
-# capnpc = "0.14"
+# [build]
+# rustflags = [
+#   "-Clink-arg=-undefined","-Clink-arg=dynamic_lookup", # allow undefined symbols
+# ]
 
 [dependencies]
+trou-api = { path = "../api" }
 # capnp = "0.14"
 # wasm-bindgen = "0.2"
 serde_json = "1.0"
