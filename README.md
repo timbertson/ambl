@@ -50,9 +50,9 @@ But also, it's just _nice_. Specifying dependencies in one place and using them 
 
 **Like**: nix's import-from-derivation functionality (sort of, if you squint)
 
-***Unlike**: everything?
+**Unlike**: everything?
 
-It should be possible to delegate to the definition of buildable targets to another buildable target. That is, "to build targets under `foo`, first build `./foo-rules` and then extract target definitions from _it_).
+It should be possible to delegate to the definition of buildable targets to another buildable target. That is, "to build targets under `foo`, first build `./foo-rules` and then extract target definitions from _it_.
 
 I don't know if this is possible in any other build system.
 
