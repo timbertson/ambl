@@ -1,4 +1,5 @@
 use anyhow::*;
+use serde::Serialize;
 
 // Used when writing to a sized ptr that the host provides
 pub struct SizedPtrRef<'a> {
@@ -45,25 +46,21 @@ impl SizedPtr {
 	}
 }
 
-#[no_mangle]
-pub extern "C" fn trou_alloc(len: u32) -> *mut u8 {
-	let mut buf = Vec::with_capacity(len as usize);
-	let ptr = buf.as_mut_ptr();
-	std::mem::forget(buf);
-	ptr
-}
-
-#[no_mangle]
-pub extern "C" fn trou_free(ptr: *mut u8, len: u32) {
-	let size = len as usize;
-	let data = unsafe { Vec::from_raw_parts(ptr, size, size) };
-	std::mem::drop(data);
-}
-
 pub unsafe fn leak_opaque<T>(t: T) -> *const T {
 	Box::leak(Box::new(t))
 }
 
-// type BuildFn = Box<dyn FnOnce(&Ctx) -> Result<()>>;
-// type TargetFn = Box<dyn FnOnce(&mut Ctx) -> Result<Vec<Target>>>;
-pub type TargetsFFI = Vec<u8>;
+#[derive(Serialize)]
+pub enum ResultFFI<T: Serialize> {
+	Ok(T),
+	Err(String),
+}
+
+impl<T: Serialize> From<Result<T>> for ResultFFI<T> {
+	fn from(r: Result<T>) -> Self {
+		match r {
+			Result::Ok(t) => ResultFFI::Ok(t),
+			Result::Err(e) => ResultFFI::Err(format!("{}", e)),
+		}
+	}
+}

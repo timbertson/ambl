@@ -2,33 +2,44 @@
 
 use anyhow::*;
 
-use trou_api::*;
+use serde::Serialize;
+use trou_api::{*, BaseCtx};
 
-// TODO: boilerplate via macro / derive?
-#[no_mangle]
-pub extern "C" fn targets_ffi(c: &mut BaseCtx, out: &mut *mut u8, len: &mut u32) {
-	debug("HI!");
-	let inner = targets_inner(c);
-	c.encode_targets(inner, SizedPtrRef::wrap(out, len)).unwrap()
+macro_rules! ffi {
+	($orig:ident, $t: ty) => {
+		// place it in a module to avoid namespace clash, but export it to C unmangled.
+		// I'd rather export as e.g. ${orig}_ffi but I don't think that's possible
+		pub mod $orig {
+			use trou_api::*;
+
+			#[no_mangle]
+			pub extern "C" fn $orig<'a>(c: &mut $t, ptr: &'a mut *mut u8, len: &'a mut u32) {
+				super::wrap_fn_mut1(super::$orig, c, ptr, len)
+			}
+		}
+	}
 }
 
 
-pub extern "C" fn build_all(c: &mut TargetCtx) -> Result<()> {
+ffi!(build_all, TargetCtx);
+fn build_all(c: &mut TargetCtx) -> Result<()> {
 	debug(&format!("Building {}", c.target()));
 	c.build("a")?;
 	Ok(())
 }
 
-// pub extern "C" fn platform_targets(c: &mut TargetCtx) -> Result<Vec<Target>> {
-// 	Ok(vec!(
-// 		targets(vec!("x86", "aarch64"), |c: &Ctx| {
-// 			println!("you built: {}", c.target());
-// 			Ok(())
-// 		}),
-// 	))
-// }
+pub fn wrap_fn_mut1<'a, I, O: Serialize, F: FnOnce(&mut I)
+	-> Result<O>>(f: F, i: &'a mut I, ptr: &'a mut *mut u8, len: &'a mut u32) {
+	let mut out = SizedPtrRef::wrap(ptr, len);
+	let result = ResultFFI::from(f(i));
+	let bytes = serde_json::to_vec(&result).unwrap();
+	// TODO nothing frees this yet!
+	out.write_and_leak(bytes).unwrap()
+}
 
-pub fn targets_inner(_: &mut BaseCtx) -> Result<Vec<Target>> {
+// TODO automate this somehow
+ffi!(targets_ffi, BaseCtx);
+pub fn targets_ffi(_: &mut BaseCtx) -> Result<Vec<Target>> {
 	Ok(vec!(
 		target("all", build_fn("build_all")),
 		targets(vec!("a", "b", "c"), build_fn("build_all")),

@@ -23,6 +23,21 @@ pub fn debug(s: &str) {
 	unsafe { trou_debug(s.as_ptr(), s.len() as u32) };
 }
 
+#[no_mangle]
+pub extern "C" fn trou_alloc(len: u32) -> *mut u8 {
+	let mut buf = Vec::with_capacity(len as usize);
+	let ptr = buf.as_mut_ptr();
+	std::mem::forget(buf);
+	ptr
+}
+
+#[no_mangle]
+pub extern "C" fn trou_free(ptr: *mut u8, len: u32) {
+	let size = len as usize;
+	let data = unsafe { Vec::from_raw_parts(ptr, size, size) };
+	std::mem::drop(data);
+}
+
 // target FFI
 #[no_mangle]
 pub extern "C" fn trou_init_base_ctx() -> *const BaseCtx {
@@ -36,6 +51,11 @@ pub extern "C" fn trou_init_target_ctx(target: *mut u8, len: u32) -> *const Targ
 
 #[no_mangle]
 pub extern "C" fn trou_deinit_base_ctx(ctx: &'static mut BaseCtx) {
+	drop(unsafe { Box::from_raw(ctx) })
+}
+
+#[no_mangle]
+pub extern "C" fn trou_deinit_target_ctx(ctx: &'static mut TargetCtx) {
 	drop(unsafe { Box::from_raw(ctx) })
 }
 

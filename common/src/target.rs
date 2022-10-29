@@ -1,6 +1,4 @@
-use anyhow::*;
 use serde::Serialize;
-use crate::ffi::*;
 
 pub struct BaseCtx {
 }
@@ -8,11 +6,11 @@ pub struct BaseCtx {
 impl BaseCtx {
 	pub fn new() -> Self { Self {} }
 
-	pub fn encode_targets(&mut self, t: Result<Vec<Target>>, mut out: SizedPtrRef) -> Result<()> {
-		// TODO handle Err
-		let bytes = serde_json::to_vec(&t.unwrap()).unwrap();
-		out.write_and_leak(bytes)
-	}
+	// pub fn encode_targets(&mut self, t: Result<Vec<Target>>, mut out: SizedPtrRef) -> Result<()> {
+	// 	// TODO handle Err
+	// 	let bytes = serde_json::to_vec(&t.unwrap()).unwrap();
+	// 	out.write_and_leak(bytes)
+	// }
 }
 
 // used for delegating target definitions to another module
