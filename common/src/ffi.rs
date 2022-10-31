@@ -1,5 +1,5 @@
 use anyhow::*;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 
 // Used when writing to a sized ptr that the host provides
 pub struct SizedPtrRef<'a> {
@@ -50,13 +50,22 @@ pub unsafe fn leak_opaque<T>(t: T) -> *const T {
 	Box::leak(Box::new(t))
 }
 
-#[derive(Serialize)]
-pub enum ResultFFI<T: Serialize> {
+#[derive(Serialize, Deserialize)]
+pub enum ResultFFI<T> {
 	Ok(T),
 	Err(String),
 }
 
-impl<T: Serialize> From<Result<T>> for ResultFFI<T> {
+impl<T> ResultFFI<T> {
+	pub fn into_result(self) -> Result<T> {
+		match self {
+			ResultFFI::Ok(t) => Result::Ok(t),
+			ResultFFI::Err(e) => Result::Err(Error::msg(e)),
+		}
+	}
+}
+
+impl<T> From<Result<T>> for ResultFFI<T> {
 	fn from(r: Result<T>) -> Self {
 		match r {
 			Result::Ok(t) => ResultFFI::Ok(t),

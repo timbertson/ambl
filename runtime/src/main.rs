@@ -3,6 +3,7 @@ use std::{mem::size_of, ops::Deref};
 
 // use trou_common::*;
 use anyhow::*;
+use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI};
 use wasmtime::*;
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
@@ -16,6 +17,15 @@ impl<'a, T> StoreData<'a, T> for StoreContext<'a, Option<T>> {
 	}
 }
 
+trait StoreDataMut<'a, T> {
+	fn store_data_mut(&'a mut self) -> Result<&'a mut T>;
+}
+impl<'a, T> StoreDataMut<'a, T> for StoreContextMut<'a, Option<T>> {
+	fn store_data_mut(&'a mut self) -> Result<&'a mut T> {
+		self.data_mut().as_mut().ok_or_else(||anyhow!("store data not initialized"))
+	}
+}
+
 fn copy_bytes<T, C: AsContext<Data = Option<State<T>>>>(store: C, offset: WasmOffset, len: u32) -> Result<Vec<u8>> {
 	let mut buf = Vec::with_capacity(len as usize);
 	buf.resize(len as usize, 0); // `read` looks at len(), not capacity
@@ -24,10 +34,19 @@ fn copy_bytes<T, C: AsContext<Data = Option<State<T>>>>(store: C, offset: WasmOf
 	Ok(buf)
 }
 
-fn read_u32<T, C: AsContext<Data = Option<State<T>>>>(store: C, offset: WasmOffset) -> Result<u32> { let mut buf: [u8; size_of::<u32>()] = [0; 4];
+fn read_u32<T, C: AsContext<Data = Option<State<T>>>>(store: C, offset: WasmOffset) -> Result<u32> {
+	let mut buf: [u8; size_of::<u32>()] = [0; 4];
 	let ctx = store.as_context();
 	ctx.store_data()?.memory.read(&ctx, offset.raw as usize, &mut buf)?;
 	Ok(u32::from_le_bytes(buf))
+}
+
+fn write_u32<T, C: AsContextMut<Data = Option<State<T>>>>(mut store: C, offset: WasmOffset, value: u32) -> Result<()> {
+	let mut ctx = store.as_context_mut();
+	let bytes = value.to_le_bytes();
+	let state = unsafe { store.as_context().data().as_ref().unwrap().alias() };
+	state.memory.write(&mut ctx, offset.raw as usize, &bytes)?;
+	Ok(())
 }
 
 // Only safe if we never modify store.data after construction
@@ -40,7 +59,7 @@ impl<T> Deref for StateAlias<T> {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 #[repr(transparent)]
 struct WasmOffset {
 	raw: u32
@@ -86,6 +105,20 @@ struct State<T: Sized> {
 
 impl<T: Sized> State<T> {
 	unsafe fn alias(&self) -> StateAlias<T> { StateAlias(self as *const State<T>) }
+}
+
+impl<T> State<T> {
+	fn write_string<C: AsContextMut<Data=Option<State<T>>>>
+		(mut store: C, s: &str, offset_out: WasmOffset, len_out: WasmOffset) -> Result<()> {
+		let state = store.as_context_mut().store_data_mut()?;
+		let strlen = s.len() as u32;
+
+		let buf_offset = WasmOffset::new(state.trou_alloc.call(store.as_context_mut(), strlen)?);
+		state.memory.write(store.as_context_mut(), buf_offset.raw as usize, s.as_bytes())?;
+		write_u32(store, offset_out, buf_offset.raw)?;
+		write_u32(store, len_out, strlen)?;
+		Ok(())
+	}
 }
 
 impl State<TargetFunctions> {
@@ -176,14 +209,24 @@ impl WasmModule {
 		Ok(Module::from_file(&engine, &path)?)
 	}
 	
+	fn invoke<T>(caller: Caller<'_, Option<State<T>>>, request: DependencyRequest) -> Result<DependencyResponse> {
+		todo!()
+	}
+	
 	fn load<T, F: FnOnce(&Instance, &mut Store<Option<State<T>>>) -> Result<T>>(engine: &Engine, module: &Module, build_functions: F) -> Result<Store<Option<State<T>>>> {
 		let mut linker = Linker::<Option<State<T>>>::new(&engine);
 		
 		linker.func_wrap("env", "trou_invoke", |mut caller: Caller<'_, Option<State<T>>>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
 			// TODO return result
-			let data_bytes = copy_bytes(&mut caller, offset(data), data_len).unwrap();
-			let s = String::from_utf8(data_bytes).unwrap();
-			println!("Got {} from WebAssembly", &s);
+			let response: Result<DependencyResponse> = (|| {
+				let data_bytes = copy_bytes(&mut caller, offset(data), data_len)?;
+				let s = String::from_utf8(data_bytes)?;
+				println!("Got {} from WebAssembly", &s);
+				let request = serde_json::from_str(&s)?;
+				Ok(todo!())
+			})();
+			let response = serde_json::to_string(&ResultFFI::from(response)).unwrap();
+			State::write_string(caller, &response, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset)).unwrap()
 		})?;
 
 		linker.func_wrap("env", "trou_debug", |mut caller: Caller<'_, Option<State<T>>>, data: u32, data_len: u32| {

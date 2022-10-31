@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 
 pub struct BaseCtx {
 }
@@ -37,7 +37,7 @@ impl ModuleSpec {
 	}
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct FunctionSpec {
 	name: String, // TODO can we default this to `build` for modules?
 	module: Option<String>,

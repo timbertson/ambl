@@ -86,8 +86,8 @@ impl TargetCtx {
 			trou_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
 			response.to_str()
 		};
-		// TODO error?
-		Ok(serde_json::from_str(response_str)?)
+		let response: ResultFFI<Response> = serde_json::from_str(response_str)?;
+		response.into_result()
 	}
 
 	// invoke shortcuts
