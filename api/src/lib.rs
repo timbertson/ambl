@@ -1,5 +1,6 @@
 // extern shims required by guests, plus a reexport of trou_common
 
+use serde::{Serialize, Deserialize};
 pub use trou_common::build::*;
 pub use trou_common::target::*;
 pub use trou_common::ffi::*;
@@ -38,44 +39,14 @@ pub extern "C" fn trou_free(ptr: *mut u8, len: u32) {
 	std::mem::drop(data);
 }
 
-// target FFI
-#[no_mangle]
-pub extern "C" fn trou_init_base_ctx() -> *const BaseCtx {
-	unsafe { leak_opaque(BaseCtx::new()) }
-}
-
-#[no_mangle]
-pub extern "C" fn trou_init_target_ctx(target: *mut u8, len: u32) -> *const TargetCtx {
-	unsafe { leak_opaque(TargetCtx::new(SizedPtr::wrap(target, len).to_str().to_owned())) }
-}
-
-#[no_mangle]
-pub extern "C" fn trou_deinit_base_ctx(ctx: &'static mut BaseCtx) {
-	drop(unsafe { Box::from_raw(ctx) })
-}
-
-#[no_mangle]
-pub extern "C" fn trou_deinit_target_ctx(ctx: &'static mut TargetCtx) {
-	drop(unsafe { Box::from_raw(ctx) })
-}
-
-
-#[repr(C)]
-pub struct TargetCtx {
-	target: String,
-	// build_dir: String,
-	// build_fns: Vec<BuildFn>,
-	// target_fns: Vec<TargetFn>,
-}
+#[derive(Serialize, Deserialize)]
+#[repr(transparent)]
+pub struct TargetCtx(RawTargetCtx);
 
 // needs to be in this crate to depend on trou_invoke
 impl TargetCtx {
 	pub fn new(target: String) -> Self {
-		Self {
-			target,
-			// build_fns: Default::default(),
-			// target_fns: Default::default(),
-		}
+		Self(RawTargetCtx::new(target))
 	}
 
 	pub fn target(&self) -> &str { todo!() }

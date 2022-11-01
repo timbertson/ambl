@@ -1,45 +1,51 @@
 #![allow(dead_code, unused_variables)]
 
+use core::slice;
+
 use anyhow::*;
 
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use trou_api::{*, BaseCtx};
 
 macro_rules! ffi {
-	($orig:ident, $t: ty) => {
+	($orig:ident) => {
 		// place it in a module to avoid namespace clash, but export it to C unmangled.
 		// I'd rather export as e.g. ${orig}_ffi but I don't think that's possible
 		pub mod $orig {
-			use trou_api::*;
+			// use trou_api::*;
 
 			#[no_mangle]
-			pub extern "C" fn $orig<'a>(c: &mut $t, ptr: &'a mut *mut u8, len: &'a mut u32) {
-				super::wrap_fn_mut1(super::$orig, c, ptr, len)
+			pub extern "C" fn $orig<'a>(ptr_in: *const u8, len_in: u32, ptr_out: &'a mut *mut u8, len_out: &'a mut u32) {
+				super::wrap_fn_mut1(super::$orig, ptr_in, len_in, ptr_out, len_out)
 			}
 		}
 	}
 }
 
 
-ffi!(build_all, TargetCtx);
-fn build_all(c: &mut TargetCtx) -> Result<()> {
+ffi!(build_all);
+fn build_all(c: &TargetCtx) -> Result<()> {
 	debug(&format!("Building {}", c.target()));
 	c.build("a")?;
 	Ok(())
 }
 
-pub fn wrap_fn_mut1<'a, I, O: Serialize, F: FnOnce(&mut I)
-	-> Result<O>>(f: F, i: &'a mut I, ptr: &'a mut *mut u8, len: &'a mut u32) {
-	let mut out = SizedPtrRef::wrap(ptr, len);
-	let result = ResultFFI::from(f(i));
-	let bytes = serde_json::to_vec(&result).unwrap();
+pub fn wrap_fn_mut1<'a, I: DeserializeOwned, O: Serialize, F: FnOnce(&I)
+	-> Result<O>>(f: F, ptr_in: *const u8, len_in: u32, ptr_out: &'a mut *mut u8, len_out: &'a mut u32) {
+	let mut out = SizedPtrRef::wrap(ptr_out, len_out);
+	let in_bytes = unsafe { slice::from_raw_parts(ptr_in, len_in as usize) };
+	let result: Result<O> = (|| {
+		let input = serde_json::from_slice::<I>(in_bytes)?;
+		f(&input)
+	})();
+	let bytes = serde_json::to_vec(&ResultFFI::from(result)).unwrap();
 	// TODO nothing frees this yet!
 	out.write_and_leak(bytes).unwrap()
 }
 
 // TODO automate this somehow
-ffi!(targets_ffi, BaseCtx);
-pub fn targets_ffi(_: &mut BaseCtx) -> Result<Vec<Target>> {
+ffi!(targets_ffi);
+pub fn targets_ffi(_: &BaseCtx) -> Result<Vec<Target>> {
 	Ok(vec!(
 		target("all", build_fn("build_all")),
 		targets(vec!("a", "b", "c"), build_fn("build_all")),

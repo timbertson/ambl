@@ -1,9 +1,10 @@
 #![allow(dead_code, unused_variables, unused_imports)]
-use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard}};
+use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard}, env};
 use log::*;
 
 use anyhow::*;
-use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI};
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx}};
 use wasmtime::*;
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
@@ -21,22 +22,23 @@ impl WasmOffset {
 }
 fn offset(raw: u32) -> WasmOffset { WasmOffset::new(raw) }
 
+type StringInOutFFI =TypedFunc<(
+		u32, u32, // in str
+		u32, u32, // out str
+	), ()>;
+
 struct TargetFunctions {
-	trou_init_base_ctx: TypedFunc<(), u32>,
-	trou_deinit_base_ctx: TypedFunc<u32, ()>,
+	// trou_init_base_ctx: TypedFunc<(), u32>,
+	// trou_deinit_base_ctx: TypedFunc<u32, ()>,
 
-	trou_init_target_ctx: TypedFunc<(u32, u32), u32>,
-	trou_deinit_target_ctx: TypedFunc<u32, ()>,
-
-	targets_ffi: TypedFunc<(u32, u32, u32), ()>,
+	targets_ffi: StringInOutFFI,
 }
 
 struct RuleFunctions {
-	rule_fn: TypedFunc<(
-		u32, // ctx pointer
-		u32, u32, // in str
-		u32, u32, // out str
-	), ()>,
+	// trou_init_target_ctx: TypedFunc<(u32, u32), u32>,
+	// trou_deinit_target_ctx: TypedFunc<u32, ()>,
+
+	rule_fn: StringInOutFFI,
 }
 
 struct State<T: Sized + Send> {
@@ -143,22 +145,48 @@ impl<T: Send + Sync + Sync> StateRef<T> {
 		Ok(())
 	}
 
-	fn write_string<C: AsContextMut>
+	// return a string by writing its coorinates into the provided out and len pointers
+	fn return_string<C: AsContextMut>
 		(&mut self, mut store: C, s: &str, offset_out: WasmOffset, len_out: WasmOffset) -> Result<()> {
-		debug!("write_string");
+		debug!("return_string");
+		let (buf_offset, len) = self.send_string(store.as_context_mut(), s)?;
+		self.write_u32(store.as_context_mut(), offset_out, buf_offset.raw)?;
+		self.write_u32(store.as_context_mut(), len_out, len)?;
+		debug!("return_string wrote u32s");
+		Ok(())
+	}
+
+	// send a string, returning the pointer + length to be passed as arguments
+	fn send_string<C: AsContextMut>
+		(&self, mut store: C, s: &str) -> Result<(WasmOffset, u32)> {
+		debug!("send_string");
 		let mut write = self.write();
 		let state = write.as_ref()?;
 		let strlen = s.len() as u32;
 
 		let buf_offset = WasmOffset::new(state.trou_alloc.call(store.as_context_mut(), strlen)?);
 		state.memory.write(store.as_context_mut(), buf_offset.raw as usize, s.as_bytes())?;
-		debug!("write_string wrote bytes");
-		drop(write); // let us reborrow self as mut
+		debug!("send_string complete");
+		Ok((buf_offset, strlen))
+	}
+	
+	// serialize an argument and call a guest function taking (buf, len, buf_out, len_out). Return the deserialized output
+	fn call_serde<I: Serialize, O: DeserializeOwned, C: AsContextMut>(&self, mut store: C, f: TypedFunc<(u32, u32, u32, u32), ()>, arg: &I) -> Result<O> {
+		let (buf, len) = self.send_string(store.as_context_mut(), &serde_json::to_string(arg)?)?;
+		let read = self.read();
 
-		self.write_u32(store.as_context_mut(), offset_out, buf_offset.raw)?;
-		self.write_u32(store.as_context_mut(), len_out, strlen)?;
-		debug!("write_string wrote u32s");
-		Ok(())
+		let state = read.as_ref()?;
+		f.call(store.as_context_mut(), (buf.raw, len, state.outbox_ptr.raw, state.outbox_len.raw))?;
+		
+		let ret_offset = WasmOffset::new(self.read_u32(store.as_context(), state.outbox_ptr)?);
+
+		// we need to read the u32 pointers via the memory API, interpreting as little-endian (wasm) u32
+		let ret_len = self.read_u32(store.as_context(), state.outbox_len)?;
+		let ret_bytes = self.copy_bytes(store.as_context(), ret_offset, ret_len)?;
+
+		let ret: ResultFFI<O> = serde_json::from_slice(&ret_bytes)?;
+		// TODO free ret_bytes from guest memory
+		ret.into_result()
 	}
 
 	// can't be a real Drop because it needs access to mut store
@@ -173,55 +201,24 @@ impl<T: Send + Sync + Sync> StateRef<T> {
 }
 
 impl StateRef<TargetFunctions> {
-	fn deinit_base_ctx<C: AsContextMut>(&self, store: C, value: WasmOffset) -> Result<()> {
-		Ok(self.read().as_ref()?.functions.trou_deinit_base_ctx.call(store, value.raw)?)
-	}
-
-	fn deinit_target_ctx<C: AsContextMut>(&self, store: C, value: WasmOffset) -> Result<()> {
-		Ok(self.read().as_ref()?.functions.trou_deinit_target_ctx.call(store, value.raw)?)
-	}
-
-	fn init_base_ctx<C: AsContextMut>(&self, mut store: C) -> Result<WasmOffset> {
-		Ok(offset(self.read().as_ref()?.functions.trou_init_base_ctx.call(store.as_context_mut(), ())?))
-	}
-
-	fn init_target_ctx<C: AsContextMut>(&self, mut store: C, target: &str) -> Result<WasmOffset> {
-		// make space
-		debug!("init_target_ctx");
-		let mut write = self.write();
-		let state = write.as_ref()?;
-		let strlen = target.len() as u32;
-		let buf_offset = state.trou_alloc.call(store.as_context_mut(), strlen)?;
-		// write the string
-		state.memory.write(store.as_context_mut(), buf_offset as usize, target.as_bytes())?;
-		
-		// init the ctx and get targets
-		let ret = offset(state.functions.trou_init_target_ctx.call(store.as_context_mut(), (buf_offset, strlen))?);
-		// done with string
-		state.trou_free.call(store.as_context_mut(), (buf_offset, strlen))?;
-		debug!("init_target_ctx complete");
-		Ok(ret)
-	}
-
-	fn get_targets<C: AsContextMut>(&self, mut store: C, ctx: WasmOffset) -> Result<()> {
+	fn get_targets<C: AsContextMut>(&self, store: C) -> Result<Vec<Target>> {
 		debug!("get_targets");
-		let mut store = store.as_context_mut();
 		let read = self.read();
 		let state = read.as_ref()?;
+		let targets_ffi = state.functions.targets_ffi;
+		drop(read);
+		self.call_serde(store, targets_ffi, &BaseCtx::new())
+	}
+}
 
-		// get targets
-		state.functions.targets_ffi.call(&mut store, (ctx.raw, state.outbox_ptr.raw, state.outbox_len.raw))?;
-
-		// we need to read the u32 pointers via the memory API, interpreting as little-endian (wasm) u32
-		let outbox_offset = offset(self.read_u32(&mut store, state.outbox_ptr.clone())?);
-		let outbox_len = self.read_u32(&mut store, state.outbox_len.clone())?;
-
-		let result_bytes = self.copy_bytes(&mut store, outbox_offset, outbox_len)?;
-		println!("result[{}]: {:?}", outbox_len, String::from_utf8(result_bytes)?);
-
-		// TODO ...
-		debug!("get_targets complete");
-		Ok(())
+impl StateRef<RuleFunctions> {
+	fn run_builder<C: AsContextMut>(&self, store: C, target: &str, builder: &DirectTarget) -> Result<()> {
+		let read = self.read();
+		let state = read.as_ref()?;
+		let f = state.functions.rule_fn;
+		let target = RawTargetCtx::new(target.to_owned());
+		drop(read);
+		self.call_serde(store, f, &target)
 	}
 }
 
@@ -232,20 +229,15 @@ impl WasmModule {
 	fn load_target(engine: &Engine, module: &Module) -> Result<(StateRef<TargetFunctions>, Store<()>)> {
 		Self::load(engine, module, |instance: &Instance, store: &mut Store<()>| {
 			Ok(TargetFunctions {
-				// TODO &mut *store is weird...
-				trou_init_base_ctx: instance.get_typed_func::<(), u32, _>(&mut *store, "trou_init_base_ctx")?,
-				trou_deinit_base_ctx: instance.get_typed_func::<u32, (), _>(&mut *store, "trou_deinit_base_ctx")?,
-				trou_init_target_ctx: instance.get_typed_func::<(u32, u32), u32, _>(&mut *store, "trou_init_target_ctx")?,
-				trou_deinit_target_ctx: instance.get_typed_func::<u32, (), _>(&mut *store, "trou_deinit_target_ctx")?,
-
-				targets_ffi: instance.get_typed_func::<(u32, u32, u32), (), _>(&mut *store, "targets_ffi")?,
+				targets_ffi: instance.get_typed_func::<(u32, u32, u32, u32), (), _>(&mut *store, "targets_ffi")?,
 			})
 		})
 	}
 
-	fn load_rule<T>(engine: &Engine, module: &Module, entrypoint: &str) -> Result<(StateRef<RuleFunctions>, Store<()>)> {
+	fn load_rule(engine: &Engine, module: &Module, entrypoint: &str) -> Result<(StateRef<RuleFunctions>, Store<()>)> {
 		Self::load(engine, module, |instance, store| Ok(RuleFunctions {
-			rule_fn: instance.get_typed_func::<(u32, u32, u32, u32, u32), (), _>(store, entrypoint)?,
+			// TODO bind rule_fn lazily? Then this result can be resused for many builds
+			rule_fn: instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store, entrypoint)?,
 		}))
 	}
 
@@ -277,7 +269,7 @@ impl WasmModule {
 			})();
 			let response = serde_json::to_string(&ResultFFI::from(response)).unwrap();
 			debug!("trou_invoke: returning..");
-			state.write_string(caller, &response, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset)).unwrap()
+			state.return_string(caller, &response, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset)).unwrap()
 		})?;
 
 		let state_debug = state.clone(); // to move into closure
@@ -327,13 +319,26 @@ fn main() -> Result<()> {
 
 	let (state, mut store) = WasmModule::load_target(&engine, &module)?;
 
-	let ctx = state.init_base_ctx(&mut store)?;
+	let targets = state.get_targets(&mut store)?;
+	debug!("targets: {:?}", targets);
 
-	state.get_targets(&mut store, ctx.clone())?;
+	let args: Vec<String> = env::args().skip(1).collect();
+	for arg in args {
+		let target = targets.iter().find(|t| match t {
+			Target::Indirect(x) => { debug!("skipping indirect... {:?}", x); false },
+			Target::Direct(t) => t.names.iter().any(|n| n == &arg),
+		}).ok_or_else(|| anyhow!("Not a buildable target: {}", &arg))?;
 
-	// free it
-	println!("freeing...");
-	state.deinit_base_ctx(&mut store, ctx)?;
+		info!("found target for {}: {:?}", &arg, target);
+		match target {
+			Target::Indirect(x) => todo!(),
+			// TODO this only supports a single module
+			Target::Direct(t) => {
+				let (state, mut store) = WasmModule::load_rule(&engine, &module, &t.build.name)?;
+				state.run_builder(&mut store, &arg, t)?
+			},
+		}
+	}
 
 	state.drop(store)?;
 	

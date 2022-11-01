@@ -1,5 +1,7 @@
 use serde::{Serialize, Deserialize};
 
+// TODO is there any point to this?
+#[derive(Serialize, Deserialize)]
 pub struct BaseCtx {
 }
 
@@ -13,8 +15,25 @@ impl BaseCtx {
 	// }
 }
 
+
+#[derive(Serialize, Deserialize)]
+pub struct RawTargetCtx {
+	pub target: String,
+	// build_dir: String,
+	// build_fns: Vec<BuildFn>,
+	// target_fns: Vec<TargetFn>,
+}
+
+impl RawTargetCtx {
+	pub fn new(target: String) -> Self {
+		Self {
+			target,
+		}
+	}
+}
+
 // used for delegating target definitions to another module
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModuleSpec {
 	name: String,
 	scope: Option<String>,
@@ -37,11 +56,11 @@ impl ModuleSpec {
 	}
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FunctionSpec {
-	name: String, // TODO can we default this to `build` for modules?
-	module: Option<String>,
-	config: Option<String>,
+	pub name: String, // TODO can we default this to `build` for modules?
+	pub module: Option<String>,
+	pub config: Option<String>,
 }
 
 pub fn build_fn<S: Into<String>>(name: S) -> FunctionSpec {
@@ -64,16 +83,16 @@ impl FunctionSpec {
 	}
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Target {
 	Direct(DirectTarget),
 	Indirect(ModuleSpec),
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DirectTarget {
-	names: Vec<String>,
-	build: FunctionSpec,
+	pub names: Vec<String>,
+	pub build: FunctionSpec,
 }
 
 // target builder functions
