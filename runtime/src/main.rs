@@ -1,63 +1,12 @@
-#![allow(dead_code, unused_variables)]
-use std::{mem::size_of, ops::Deref};
+#![allow(dead_code, unused_variables, unused_imports)]
+use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard}};
+use log::*;
 
-// use trou_common::*;
 use anyhow::*;
 use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI};
 use wasmtime::*;
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
-
-trait StoreData<'a, T> {
-	fn store_data(&'a self) -> Result<&'a T>;
-}
-impl<'a, T> StoreData<'a, T> for StoreContext<'a, Option<T>> {
-	fn store_data(&'a self) -> Result<&'a T> {
-		self.data().as_ref().ok_or_else(||anyhow!("store data not initialized"))
-	}
-}
-
-trait StoreDataMut<'a, T> {
-	fn store_data_mut(&'a mut self) -> Result<&'a mut T>;
-}
-impl<'a, T> StoreDataMut<'a, T> for StoreContextMut<'a, Option<T>> {
-	fn store_data_mut(&'a mut self) -> Result<&'a mut T> {
-		self.data_mut().as_mut().ok_or_else(||anyhow!("store data not initialized"))
-	}
-}
-
-fn copy_bytes<T, C: AsContext<Data = Option<State<T>>>>(store: C, offset: WasmOffset, len: u32) -> Result<Vec<u8>> {
-	let mut buf = Vec::with_capacity(len as usize);
-	buf.resize(len as usize, 0); // `read` looks at len(), not capacity
-	let ctx = store.as_context();
-	ctx.store_data()?.memory.read(&ctx, offset.raw as usize, &mut buf)?;
-	Ok(buf)
-}
-
-fn read_u32<T, C: AsContext<Data = Option<State<T>>>>(store: C, offset: WasmOffset) -> Result<u32> {
-	let mut buf: [u8; size_of::<u32>()] = [0; 4];
-	let ctx = store.as_context();
-	ctx.store_data()?.memory.read(&ctx, offset.raw as usize, &mut buf)?;
-	Ok(u32::from_le_bytes(buf))
-}
-
-fn write_u32<T, C: AsContextMut<Data = Option<State<T>>>>(mut store: C, offset: WasmOffset, value: u32) -> Result<()> {
-	let mut ctx = store.as_context_mut();
-	let bytes = value.to_le_bytes();
-	let state = unsafe { store.as_context().data().as_ref().unwrap().alias() };
-	state.memory.write(&mut ctx, offset.raw as usize, &bytes)?;
-	Ok(())
-}
-
-// Only safe if we never modify store.data after construction
-struct StateAlias<T>(*const State<T>);
-impl<T> Deref for StateAlias<T> {
-	type Target = State<T>;
-
-	fn deref(&self) -> &Self::Target {
-		unsafe { &(*self.0) }
-	}
-}
 
 #[derive(Copy, Clone)]
 #[repr(transparent)]
@@ -90,7 +39,7 @@ struct RuleFunctions {
 	), ()>,
 }
 
-struct State<T: Sized> {
+struct State<T: Sized + Send> {
 	memory: Memory,
 
 	trou_alloc: TypedFunc<u32, u32>,
@@ -103,79 +52,175 @@ struct State<T: Sized> {
 	outbox_len: WasmOffset,
 }
 
-impl<T: Sized> State<T> {
-	unsafe fn alias(&self) -> StateAlias<T> { StateAlias(self as *const State<T>) }
+// rwlock*ref provides a convenient wrapper to pretend StateRef contains a State<T> instead of Option<State<T>>
+struct RwLockReadRef<'a, T: Send>(LockResult<RwLockReadGuard<'a, Option<State<T>>>>);
+impl<'a, T: Send> RwLockReadRef<'a, T> {
+	fn as_ref(&self) -> Result<&State<T>> {
+		self.0.as_ref()
+			.map_err(|_| anyhow!("Can't acquire lock"))?
+			.as_ref().ok_or_else(||anyhow!("Uninitialized store"))
+	}
 }
 
-impl<T> State<T> {
-	fn write_string<C: AsContextMut<Data=Option<State<T>>>>
-		(mut store: C, s: &str, offset_out: WasmOffset, len_out: WasmOffset) -> Result<()> {
-		let state = store.as_context_mut().store_data_mut()?;
+#[cfg(debug_assertions)]
+impl<'a, T: Send> Drop for RwLockReadRef<'a, T> {
+	fn drop(&mut self) {
+		debug!("readLock: drop");
+	}
+}
+
+struct RwLockWriteRef<'a, T: Send>(LockResult<RwLockWriteGuard<'a, Option<State<T>>>>);
+impl<'a, T: Send> RwLockWriteRef<'a, T> {
+	fn as_ref(&mut self) -> Result<&mut State<T>> {
+		self.0.as_mut()
+			.map_err(|_| anyhow!("Can't acquire lock"))?
+			.as_mut().ok_or_else(||anyhow!("Uninitialized store"))
+	}
+}
+
+#[cfg(debug_assertions)]
+impl<'a, T: Send> Drop for RwLockWriteRef<'a, T> {
+	fn drop(&mut self) {
+		debug!("writeLock: drop");
+	}
+}
+
+// State stores a cell for dynamic borrowing.
+// This means we can share it between closures,
+// as long as we promise not to violate borrowing rules
+// at runtime
+struct StateRef<T: Send + Sync + Sync>(Arc<RwLock<Option<State<T>>>>);
+impl<T: Send + Sync + Sync> StateRef<T> {
+	fn empty() -> Self {
+		Self(Arc::new(RwLock::new(None)))
+	}
+	
+	fn set(&mut self, inner: State<T>) -> Result<()> {
+		let mut mut_ref = self.0.write().map_err(|_| anyhow!("StateRef.set() failed"))?;
+		*mut_ref = Some(inner);
+		Ok(())
+	}
+
+	fn clone(&self) -> Self {
+		Self(Arc::clone(&self.0))
+	}
+	
+	fn read(&self) -> RwLockReadRef<T> {
+		debug!("read");
+		RwLockReadRef(self.0.read())
+	}
+
+	fn write(&self) -> RwLockWriteRef<T> {
+		debug!("write");
+		RwLockWriteRef(self.0.write())
+	}
+
+	fn copy_bytes<C: AsContext>(&self, store: C, offset: WasmOffset, len: u32) -> Result<Vec<u8>> {
+		debug!("copy_bytes");
+		let mut buf = Vec::with_capacity(len as usize);
+		buf.resize(len as usize, 0); // `read` looks at len(), not capacity
+		let ctx = store.as_context();
+		self.read().as_ref()?.memory.read(&ctx, offset.raw as usize, &mut buf)?;
+		debug!("copy_bytes complete");
+		Ok(buf)
+	}
+
+	fn read_u32<C: AsContext>(&self, store: C, offset: WasmOffset) -> Result<u32> {
+		debug!("read_u32");
+		let mut buf: [u8; size_of::<u32>()] = [0; 4];
+		let ctx = store.as_context();
+		self.read().as_ref()?.memory.read(&ctx, offset.raw as usize, &mut buf)?;
+		debug!("read_u32 complete");
+		Ok(u32::from_le_bytes(buf))
+	}
+
+	fn write_u32<C: AsContextMut>(&mut self, mut store: C, offset: WasmOffset, value: u32) -> Result<()> {
+		debug!("write_u32");
+		let mut ctx = store.as_context_mut();
+		let bytes = value.to_le_bytes();
+		self.write().as_ref()?.memory.write(&mut ctx, offset.raw as usize, &bytes)?;
+		debug!("write_u32 complete");
+		Ok(())
+	}
+
+	fn write_string<C: AsContextMut>
+		(&mut self, mut store: C, s: &str, offset_out: WasmOffset, len_out: WasmOffset) -> Result<()> {
+		debug!("write_string");
+		let mut write = self.write();
+		let state = write.as_ref()?;
 		let strlen = s.len() as u32;
 
 		let buf_offset = WasmOffset::new(state.trou_alloc.call(store.as_context_mut(), strlen)?);
 		state.memory.write(store.as_context_mut(), buf_offset.raw as usize, s.as_bytes())?;
-		write_u32(store, offset_out, buf_offset.raw)?;
-		write_u32(store, len_out, strlen)?;
+		debug!("write_string wrote bytes");
+		drop(write); // let us reborrow self as mut
+
+		self.write_u32(store.as_context_mut(), offset_out, buf_offset.raw)?;
+		self.write_u32(store.as_context_mut(), len_out, strlen)?;
+		debug!("write_string wrote u32s");
+		Ok(())
+	}
+
+	// can't be a real Drop because it needs access to mut store
+	fn drop<R>(&self, mut store: Store<R>) -> Result<()> {
+		let read = self.read();
+		let state = read.as_ref()?;
+		state.trou_free.call(&mut store, (state.outbox_ptr.raw, U32_SIZE))?;
+		state.trou_free.call(&mut store, (state.outbox_len.raw, U32_SIZE))?;
+		drop(store);
 		Ok(())
 	}
 }
 
-impl State<TargetFunctions> {
-	fn deinit_base_ctx<C: AsContextMut<Data=Option<State<TargetFunctions>>>>(&self, store: C, value: WasmOffset) -> Result<()> {
-		Ok(self.functions.trou_deinit_base_ctx.call(store, value.raw)?)
+impl StateRef<TargetFunctions> {
+	fn deinit_base_ctx<C: AsContextMut>(&self, store: C, value: WasmOffset) -> Result<()> {
+		Ok(self.read().as_ref()?.functions.trou_deinit_base_ctx.call(store, value.raw)?)
 	}
 
-	fn deinit_target_ctx<C: AsContextMut<Data=Option<State<TargetFunctions>>>>(&self, store: C, value: WasmOffset) -> Result<()> {
-		Ok(self.functions.trou_deinit_target_ctx.call(store, value.raw)?)
+	fn deinit_target_ctx<C: AsContextMut>(&self, store: C, value: WasmOffset) -> Result<()> {
+		Ok(self.read().as_ref()?.functions.trou_deinit_target_ctx.call(store, value.raw)?)
 	}
 
-	// can't be a real Drop because it needs access to mut store
-	fn drop(mut store: Store<Option<Self>>) -> Result<()> {
-		unsafe {
-			// let data_ref = &(*store.data())?;
-			let data = store.as_context().store_data()? as *const Self; // alias the store's data unsafely
-			(*data).trou_free.call(&mut store, ((*data).outbox_ptr.raw, U32_SIZE))?;
-			(*data).trou_free.call(&mut store, ((*data).outbox_len.raw, U32_SIZE))?;
-		}
-		drop(store);
-		Ok(())
+	fn init_base_ctx<C: AsContextMut>(&self, mut store: C) -> Result<WasmOffset> {
+		Ok(offset(self.read().as_ref()?.functions.trou_init_base_ctx.call(store.as_context_mut(), ())?))
 	}
 
-	fn init_base_ctx<C: AsContextMut<Data=Option<State<TargetFunctions>>>>(&self, mut store: C) -> Result<WasmOffset> {
-		Ok(offset(self.functions.trou_init_base_ctx.call(store.as_context_mut(), ())?))
-	}
-
-	fn init_target_ctx<C: AsContextMut<Data=Option<State<TargetFunctions>>>>(&self, mut store: C, target: &str) -> Result<WasmOffset> {
-		// let mut store = store.as_context_mut();
-
+	fn init_target_ctx<C: AsContextMut>(&self, mut store: C, target: &str) -> Result<WasmOffset> {
 		// make space
+		debug!("init_target_ctx");
+		let mut write = self.write();
+		let state = write.as_ref()?;
 		let strlen = target.len() as u32;
-		let buf_offset = self.trou_alloc.call(store.as_context_mut(), strlen)?;
+		let buf_offset = state.trou_alloc.call(store.as_context_mut(), strlen)?;
 		// write the string
-		self.memory.write(store.as_context_mut(), buf_offset as usize, target.as_bytes())?;
+		state.memory.write(store.as_context_mut(), buf_offset as usize, target.as_bytes())?;
 		
 		// init the ctx and get targets
-		let ret = offset(self.functions.trou_init_target_ctx.call(store.as_context_mut(), (buf_offset, strlen))?);
+		let ret = offset(state.functions.trou_init_target_ctx.call(store.as_context_mut(), (buf_offset, strlen))?);
 		// done with string
-		self.trou_free.call(store.as_context_mut(), (buf_offset, strlen))?;
+		state.trou_free.call(store.as_context_mut(), (buf_offset, strlen))?;
+		debug!("init_target_ctx complete");
 		Ok(ret)
 	}
 
-	fn get_targets<C: AsContextMut<Data=Option<State<TargetFunctions>>>>(&self, mut store: C, ctx: WasmOffset) -> Result<()> {
+	fn get_targets<C: AsContextMut>(&self, mut store: C, ctx: WasmOffset) -> Result<()> {
+		debug!("get_targets");
 		let mut store = store.as_context_mut();
+		let read = self.read();
+		let state = read.as_ref()?;
 
 		// get targets
-		self.functions.targets_ffi.call(&mut store, (ctx.raw, self.outbox_ptr.raw, self.outbox_len.raw))?;
+		state.functions.targets_ffi.call(&mut store, (ctx.raw, state.outbox_ptr.raw, state.outbox_len.raw))?;
 
 		// we need to read the u32 pointers via the memory API, interpreting as little-endian (wasm) u32
-		let outbox_offset = offset(read_u32(&mut store, self.outbox_ptr.clone())?);
-		let outbox_len = read_u32(&mut store, self.outbox_len.clone())?;
+		let outbox_offset = offset(self.read_u32(&mut store, state.outbox_ptr.clone())?);
+		let outbox_len = self.read_u32(&mut store, state.outbox_len.clone())?;
 
-		let result_bytes = copy_bytes(&mut store, outbox_offset, outbox_len)?;
+		let result_bytes = self.copy_bytes(&mut store, outbox_offset, outbox_len)?;
 		println!("result[{}]: {:?}", outbox_len, String::from_utf8(result_bytes)?);
 
 		// TODO ...
+		debug!("get_targets complete");
 		Ok(())
 	}
 }
@@ -184,8 +229,8 @@ struct WasmModule {
 }
 
 impl WasmModule {
-	fn load_target(engine: &Engine, module: &Module) -> Result<Store<Option<State<TargetFunctions>>>> {
-		Self::load(engine, module, |instance: &Instance, store: &mut Store<Option<State<TargetFunctions>>>| {
+	fn load_target(engine: &Engine, module: &Module) -> Result<(StateRef<TargetFunctions>, Store<()>)> {
+		Self::load(engine, module, |instance: &Instance, store: &mut Store<()>| {
 			Ok(TargetFunctions {
 				// TODO &mut *store is weird...
 				trou_init_base_ctx: instance.get_typed_func::<(), u32, _>(&mut *store, "trou_init_base_ctx")?,
@@ -198,47 +243,53 @@ impl WasmModule {
 		})
 	}
 
-	fn load_rule<T>(engine: &Engine, module: &Module, entrypoint: &str) -> Result<Store<Option<State<RuleFunctions>>>> {
+	fn load_rule<T>(engine: &Engine, module: &Module, entrypoint: &str) -> Result<(StateRef<RuleFunctions>, Store<()>)> {
 		Self::load(engine, module, |instance, store| Ok(RuleFunctions {
 			rule_fn: instance.get_typed_func::<(u32, u32, u32, u32, u32), (), _>(store, entrypoint)?,
 		}))
 	}
 
 	fn compile(engine: &Engine, path: &str) -> Result<Module> {
-		println!("Loading {}", path);
+		debug!("Loading {}", path);
 		Ok(Module::from_file(&engine, &path)?)
 	}
 	
-	fn invoke<T>(caller: Caller<'_, Option<State<T>>>, request: DependencyRequest) -> Result<DependencyResponse> {
+	fn invoke<T>(caller: Caller<'_, ()>, request: DependencyRequest) -> Result<DependencyResponse> {
 		todo!()
 	}
 	
-	fn load<T, F: FnOnce(&Instance, &mut Store<Option<State<T>>>) -> Result<T>>(engine: &Engine, module: &Module, build_functions: F) -> Result<Store<Option<State<T>>>> {
-		let mut linker = Linker::<Option<State<T>>>::new(&engine);
-		
-		linker.func_wrap("env", "trou_invoke", |mut caller: Caller<'_, Option<State<T>>>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
-			// TODO return result
+	fn load<T: Send + Sync +'static, F: FnOnce(&Instance, &mut Store<()>) -> Result<T>>
+		(engine: &Engine, module: &Module, build_functions: F) -> Result<(StateRef<T>, Store<()>)> {
+		let mut linker = Linker::new(&engine);
+
+		let mut state = StateRef::<T>::empty();
+
+		let state_invoke = state.clone(); // to move into closure
+		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, ()>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
+			debug!("trou_invoke");
+			let mut state = state_invoke.clone();
 			let response: Result<DependencyResponse> = (|| {
-				let data_bytes = copy_bytes(&mut caller, offset(data), data_len)?;
+				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
 				let s = String::from_utf8(data_bytes)?;
 				println!("Got {} from WebAssembly", &s);
 				let request = serde_json::from_str(&s)?;
-				Ok(todo!())
+				todo!()
 			})();
 			let response = serde_json::to_string(&ResultFFI::from(response)).unwrap();
-			State::write_string(caller, &response, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset)).unwrap()
+			debug!("trou_invoke: returning..");
+			state.write_string(caller, &response, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset)).unwrap()
 		})?;
 
-		linker.func_wrap("env", "trou_debug", |mut caller: Caller<'_, Option<State<T>>>, data: u32, data_len: u32| {
-			let data_bytes = copy_bytes(&mut caller, offset(data), data_len).unwrap();
+		let state_debug = state.clone(); // to move into closure
+		linker.func_wrap("env", "trou_debug", move |mut caller: Caller<'_, ()>, data: u32, data_len: u32| {
+			let state = state_debug.clone();
+			let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len).unwrap();
 			let s = String::from_utf8(data_bytes).unwrap();
 			println!("debug: {}", &s);
 		})?;
 
-		// Awkward: we need to embed an optional `T` in store.data() because we can't populate the data field
-		// until we have a store.
-		let mut store = Store::<Option<State<T>>>::new(&engine, None);
-		println!("instantiating...");
+		let mut store = Store::new(&engine, ());
+		debug!("instantiating...");
 		let instance = linker.instantiate(&mut store, &module)?;
 
 		let trou_alloc = instance.get_typed_func::<u32, u32, _>(&mut store, "trou_alloc")?;
@@ -246,7 +297,7 @@ impl WasmModule {
 		let outbox_ptr = offset(trou_alloc.call(&mut store, U32_SIZE)?);
 		let outbox_len = offset(trou_alloc.call(&mut store, U32_SIZE)?);
 
-		let state = State {
+		let inner = State {
 			memory: instance
 				.get_memory(&mut store, "memory")
 				.ok_or(anyhow!("failed to find `memory` export"))?,
@@ -258,20 +309,23 @@ impl WasmModule {
 			outbox_ptr,
 			outbox_len,
 		};
-		*store.data_mut() = Some(state);
+
+		state.set(inner)?;
 
 		let trou_api_version: TypedFunc<(), u32> = instance.get_typed_func::<(), u32, _>(&mut store, "trou_api_version")?;
 		println!("API version: {}", trou_api_version.call(&mut store, ())?);
-		Ok(store)
+		Ok((state, store))
 	}
 }
 
 fn main() -> Result<()> {
+	env_logger::init_from_env(
+		env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"));
+
 	let engine = Engine::default();
 	let module = WasmModule::compile(&engine, "target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm")?;
-	let mut store = WasmModule::load_target(&engine, &module)?;
 
-	let state = unsafe { store.as_context().store_data()?.alias() };
+	let (state, mut store) = WasmModule::load_target(&engine, &module)?;
 
 	let ctx = state.init_base_ctx(&mut store)?;
 
@@ -281,7 +335,7 @@ fn main() -> Result<()> {
 	println!("freeing...");
 	state.deinit_base_ctx(&mut store, ctx)?;
 
-	State::drop(store)?;
+	state.drop(store)?;
 	
 	Ok(())
 }
