@@ -7,21 +7,12 @@ pub struct BaseCtx {
 
 impl BaseCtx {
 	pub fn new() -> Self { Self {} }
-
-	// pub fn encode_targets(&mut self, t: Result<Vec<Target>>, mut out: SizedPtrRef) -> Result<()> {
-	// 	// TODO handle Err
-	// 	let bytes = serde_json::to_vec(&t.unwrap()).unwrap();
-	// 	out.write_and_leak(bytes)
-	// }
 }
 
 
 #[derive(Serialize, Deserialize)]
 pub struct RawTargetCtx {
 	pub target: String,
-	// build_dir: String,
-	// build_fns: Vec<BuildFn>,
-	// target_fns: Vec<TargetFn>,
 }
 
 impl RawTargetCtx {

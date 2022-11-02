@@ -38,8 +38,8 @@ pub fn wrap_fn_mut1<'a, I: DeserializeOwned, O: Serialize, F: FnOnce(&I)
 		let input = serde_json::from_slice::<I>(in_bytes)?;
 		f(&input)
 	})();
-	let bytes = ResultFFI::serialize(result).unwrap().into_bytes();
-	out.write_and_leak(bytes).unwrap()
+	let bytes = ResultFFI::serialize(result).expect("serialization failed").into_bytes();
+	out.write_and_leak(bytes).expect("write_and_leak failed")
 }
 
 // TODO automate this somehow

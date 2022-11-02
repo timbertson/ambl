@@ -1,2 +1,5 @@
 [workspace]
 members = [ "common", "api", "builder", "runtime" ]
+
+[profile.release]
+panic = "abort"

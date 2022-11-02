@@ -1,5 +1,5 @@
 #![allow(dead_code, unused_variables, unused_imports)]
-use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard}, env};
+use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult}, env};
 use log::*;
 
 use anyhow::*;
@@ -55,11 +55,11 @@ struct State<T: Sized + Send> {
 }
 
 // rwlock*ref provides a convenient wrapper to pretend StateRef contains a State<T> instead of Option<State<T>>
-struct RwLockReadRef<'a, T: Send>(LockResult<RwLockReadGuard<'a, Option<State<T>>>>);
+struct RwLockReadRef<'a, T: Send>(TryLockResult<RwLockReadGuard<'a, Option<State<T>>>>);
 impl<'a, T: Send> RwLockReadRef<'a, T> {
 	fn as_ref(&self) -> Result<&State<T>> {
 		self.0.as_ref()
-			.map_err(|_| anyhow!("Can't acquire lock"))?
+			.map_err(|e| anyhow!("Can't acquire lock: {:?}", e))?
 			.as_ref().ok_or_else(||anyhow!("Uninitialized store"))
 	}
 }
@@ -71,11 +71,11 @@ impl<'a, T: Send> Drop for RwLockReadRef<'a, T> {
 	}
 }
 
-struct RwLockWriteRef<'a, T: Send>(LockResult<RwLockWriteGuard<'a, Option<State<T>>>>);
+struct RwLockWriteRef<'a, T: Send>(TryLockResult<RwLockWriteGuard<'a, Option<State<T>>>>);
 impl<'a, T: Send> RwLockWriteRef<'a, T> {
 	fn as_ref(&mut self) -> Result<&mut State<T>> {
 		self.0.as_mut()
-			.map_err(|_| anyhow!("Can't acquire lock"))?
+			.map_err(|e| anyhow!("Can't acquire lock: {:?}", e))?
 			.as_mut().ok_or_else(||anyhow!("Uninitialized store"))
 	}
 }
@@ -109,12 +109,12 @@ impl<T: Send + Sync + Sync> StateRef<T> {
 	
 	fn read(&self) -> RwLockReadRef<T> {
 		debug!("read");
-		RwLockReadRef(self.0.read())
+		RwLockReadRef(self.0.try_read())
 	}
 
 	fn write(&self) -> RwLockWriteRef<T> {
 		debug!("write");
-		RwLockWriteRef(self.0.write())
+		RwLockWriteRef(self.0.try_write())
 	}
 
 	fn copy_bytes<C: AsContext>(&self, store: C, offset: WasmOffset, len: u32) -> Result<Vec<u8>> {
@@ -173,15 +173,21 @@ impl<T: Send + Sync + Sync> StateRef<T> {
 	// serialize an argument and call a guest function taking (buf, len, buf_out, len_out). Return the deserialized output
 	fn call_serde<I: Serialize, O: DeserializeOwned, C: AsContextMut>(&self, mut store: C, f: TypedFunc<(u32, u32, u32, u32), ()>, arg: &I) -> Result<O> {
 		let (buf, len) = self.send_string(store.as_context_mut(), &serde_json::to_string(arg)?)?;
-		let read = self.read();
 
+		let read = self.read();
+		// Grab a few things from state and then drop read before calling.
+		// Calling the function could reentrantly invoke anything, we need to leave state unlocked
 		let state = read.as_ref()?;
-		f.call(store.as_context_mut(), (buf.raw, len, state.outbox_ptr.raw, state.outbox_len.raw))?;
+		let outbox_ptr = state.outbox_ptr;
+		let outbox_len = state.outbox_len;
+		drop(read);
+
+		f.call(store.as_context_mut(), (buf.raw, len, outbox_ptr.raw, outbox_len.raw))?;
 		
-		let ret_offset = WasmOffset::new(self.read_u32(store.as_context(), state.outbox_ptr)?);
+		let ret_offset = WasmOffset::new(self.read_u32(store.as_context(), outbox_ptr)?);
 
 		// we need to read the u32 pointers via the memory API, interpreting as little-endian (wasm) u32
-		let ret_len = self.read_u32(store.as_context(), state.outbox_len)?;
+		let ret_len = self.read_u32(store.as_context(), outbox_len)?;
 		let ret_bytes = self.copy_bytes(store.as_context(), ret_offset, ret_len)?;
 
 		ResultFFI::deserialize(&ret_bytes)
@@ -212,11 +218,13 @@ impl StateRef<TargetFunctions> {
 
 impl StateRef<RuleFunctions> {
 	fn run_builder<C: AsContextMut>(&self, store: C, target: &str, builder: &DirectTarget) -> Result<()> {
+		debug!("run_builder");
 		let read = self.read();
 		let state = read.as_ref()?;
 		let f = state.functions.rule_fn;
 		let target = RawTargetCtx::new(target.to_owned());
 		drop(read);
+		debug!("run_builder call_serde");
 		self.call_serde(store, f, &target)
 	}
 }
@@ -262,21 +270,27 @@ impl WasmModule {
 			let response: Result<()> = (|| { // TODO: return DependencyResponse
 				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
 				let s = String::from_utf8(data_bytes)?;
-				let request = serde_json::from_str(&s)?;
+				debug!("Got string from wasm: {}", &s);
+				let request: DependencyRequest = serde_json::from_str(&s)?;
 				println!("Got dep request: {:?} from WebAssembly", &request);
 				Ok(())
 			})();
 			debug!("trou_invoke: returning {:?}", response);
-			let response_str = ResultFFI::serialize(response).unwrap();
-			state.return_string(caller, &response_str, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset)).unwrap()
+			let result: Result<()> = (|| {
+				let response_str = ResultFFI::serialize(response)?;
+				state.return_string(caller, &response_str, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset))
+			})();
+			result.expect("trou_invoke couldn't send return value")
 		})?;
 
 		let state_debug = state.clone(); // to move into closure
 		linker.func_wrap("env", "trou_debug", move |mut caller: Caller<'_, ()>, data: u32, data_len: u32| {
 			let state = state_debug.clone();
-			let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len).unwrap();
-			let s = String::from_utf8(data_bytes).unwrap();
-			println!("debug: {}", &s);
+			let s: Result<String> = (||{
+				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
+				Ok(String::from_utf8(data_bytes)?)
+			})();
+			println!("debug: {}", &s.expect("failed to decode debug string"));
 		})?;
 
 		let mut store = Store::new(&engine, ());
@@ -304,7 +318,7 @@ impl WasmModule {
 		state.set(inner)?;
 
 		let trou_api_version: TypedFunc<(), u32> = instance.get_typed_func::<(), u32, _>(&mut store, "trou_api_version")?;
-		println!("API version: {}", trou_api_version.call(&mut store, ())?);
+		debug!("API version: {}", trou_api_version.call(&mut store, ())?);
 		Ok((state, store))
 	}
 }
@@ -323,12 +337,14 @@ fn main() -> Result<()> {
 
 	let args: Vec<String> = env::args().skip(1).collect();
 	for arg in args {
+		debug!("Processing: {:?}", arg);
 		let target = targets.iter().find(|t| match t {
 			Target::Indirect(x) => { debug!("skipping indirect... {:?}", x); false },
 			Target::Direct(t) => t.names.iter().any(|n| n == &arg),
 		}).ok_or_else(|| anyhow!("Not a buildable target: {}", &arg))?;
 
-		info!("found target for {}: {:?}", &arg, target);
+		debug!("found target for {}: {:?}", &arg, target);
+		println!("# {}", &arg);
 		match target {
 			Target::Indirect(x) => todo!(),
 			// TODO this only supports a single module

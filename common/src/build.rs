@@ -4,7 +4,7 @@ use crate::target::FunctionSpec;
 
 // A request, which can be turned into a Dependency by resolving
 // the requested resource.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DependencyRequest<'a> {
 	FileDependency(&'a str),
 	

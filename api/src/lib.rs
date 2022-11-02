@@ -58,20 +58,12 @@ impl TargetCtx {
 			trou_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
 			response.to_slice()
 		};
-		ResultFFI::deserialize(response_slice)
+		let result = ResultFFI::deserialize(response_slice);
+		// debug(format!("invoke result: {:?}", result));
+		result
 	}
 
 	// invoke shortcuts
-
-	// TODO: include / exclude filters, and distinguish file / dirs?
-	// pub fn listdir(&self, path: &str) -> Result<Vec<String>> {
-	// 	Self::invoke::<Listdir, Vec<String>>(Listdir{ path })
-	// }
-
-	// pub fn getenv(&self, key: &str) -> Option<String> {
-	// 	Self::invoke::<Getenv, Option<String>>(Getenv{ key }).unwrap()
-	// }
-
 	pub fn build(&self, path: &str) -> Result<()> {
 		Self::invoke::<()>(DependencyRequest::FileDependency(path))
 	}
