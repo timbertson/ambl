@@ -184,9 +184,8 @@ impl<T: Send + Sync + Sync> StateRef<T> {
 		let ret_len = self.read_u32(store.as_context(), state.outbox_len)?;
 		let ret_bytes = self.copy_bytes(store.as_context(), ret_offset, ret_len)?;
 
-		let ret: ResultFFI<O> = serde_json::from_slice(&ret_bytes)?;
+		ResultFFI::deserialize(&ret_bytes)
 		// TODO free ret_bytes from guest memory
-		ret.into_result()
 	}
 
 	// can't be a real Drop because it needs access to mut store
@@ -260,16 +259,16 @@ impl WasmModule {
 		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, ()>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
 			debug!("trou_invoke");
 			let mut state = state_invoke.clone();
-			let response: Result<DependencyResponse> = (|| {
+			let response: Result<()> = (|| { // TODO: return DependencyResponse
 				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
 				let s = String::from_utf8(data_bytes)?;
-				println!("Got {} from WebAssembly", &s);
 				let request = serde_json::from_str(&s)?;
-				todo!()
+				println!("Got dep request: {:?} from WebAssembly", &request);
+				Ok(())
 			})();
-			let response = serde_json::to_string(&ResultFFI::from(response)).unwrap();
-			debug!("trou_invoke: returning..");
-			state.return_string(caller, &response, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset)).unwrap()
+			debug!("trou_invoke: returning {:?}", response);
+			let response_str = ResultFFI::serialize(response).unwrap();
+			state.return_string(caller, &response_str, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset)).unwrap()
 		})?;
 
 		let state_debug = state.clone(); // to move into closure

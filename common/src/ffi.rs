@@ -1,5 +1,5 @@
 use anyhow::*;
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 // Used when writing to a sized ptr that the host provides
 pub struct SizedPtrRef<'a> {
@@ -40,9 +40,8 @@ impl SizedPtr {
 	// 	SizedPtrRef::wrap(&mut (self.ptr as *const u8), &mut self.len)
 	// }
 
-	pub unsafe fn to_str<'a>(&'a self) -> &'a str {
-		let slice = std::slice::from_raw_parts::<'a>(self.ptr, self.len as usize);
-		std::str::from_utf8(slice).unwrap()
+	pub unsafe fn to_slice<'a>(&'a self) -> &'a [u8] {
+		std::slice::from_raw_parts::<'a>(self.ptr, self.len as usize)
 	}
 }
 
@@ -62,6 +61,15 @@ impl<T> ResultFFI<T> {
 			ResultFFI::Ok(t) => Result::Ok(t),
 			ResultFFI::Err(e) => Result::Err(Error::msg(e)),
 		}
+	}
+	
+	// TODO: return Vec instead of String?
+	pub fn serialize(r: Result<T>) -> Result<String, serde_json::Error> where T: Serialize {
+		serde_json::to_string(&Self::from(r))
+	}
+
+	pub fn deserialize(s: &[u8]) -> Result<T> where T: DeserializeOwned {
+		serde_json::from_slice::<Self>(s)?.into_result()
 	}
 }
 

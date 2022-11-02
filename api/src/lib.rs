@@ -49,16 +49,16 @@ impl TargetCtx {
 		Self(RawTargetCtx::new(target))
 	}
 
-	pub fn target(&self) -> &str { todo!() }
+	pub fn target(&self) -> &str { &self.0.target }
+
 	pub fn invoke<'de, Response: DeserializeOwned>(call: DependencyRequest) -> Result<Response> {
 		let buf = serde_json::to_vec(&call)?;
 		let mut response = SizedPtr::empty();
-		let response_str = unsafe {
+		let response_slice = unsafe {
 			trou_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
-			response.to_str()
+			response.to_slice()
 		};
-		let response: ResultFFI<Response> = serde_json::from_str(response_str)?;
-		response.into_result()
+		ResultFFI::deserialize(response_slice)
 	}
 
 	// invoke shortcuts

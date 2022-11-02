@@ -38,8 +38,7 @@ pub fn wrap_fn_mut1<'a, I: DeserializeOwned, O: Serialize, F: FnOnce(&I)
 		let input = serde_json::from_slice::<I>(in_bytes)?;
 		f(&input)
 	})();
-	let bytes = serde_json::to_vec(&ResultFFI::from(result)).unwrap();
-	// TODO nothing frees this yet!
+	let bytes = ResultFFI::serialize(result).unwrap().into_bytes();
 	out.write_and_leak(bytes).unwrap()
 }
 
