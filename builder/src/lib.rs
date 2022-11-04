@@ -1,11 +1,7 @@
 #![allow(dead_code, unused_variables)]
 
-use core::slice;
-
 use anyhow::*;
-
-use serde::{Serialize, de::DeserializeOwned};
-use trou_api::{*, BaseCtx};
+use trou_api::*;
 
 macro_rules! ffi {
 	($orig:ident) => {
@@ -30,19 +26,7 @@ fn build_all(c: &TargetCtx) -> Result<()> {
 	Ok(())
 }
 
-pub fn wrap_fn_mut1<'a, I: DeserializeOwned, O: Serialize, F: FnOnce(&I)
-	-> Result<O>>(f: F, ptr_in: *const u8, len_in: u32, ptr_out: &'a mut *mut u8, len_out: &'a mut u32) {
-	let mut out = SizedPtrRef::wrap(ptr_out, len_out);
-	let in_bytes = unsafe { slice::from_raw_parts(ptr_in, len_in as usize) };
-	let result: Result<O> = (|| {
-		let input = serde_json::from_slice::<I>(in_bytes)?;
-		f(&input)
-	})();
-	let bytes = ResultFFI::serialize(result).expect("serialization failed").into_bytes();
-	out.write_and_leak(bytes).expect("write_and_leak failed")
-}
-
-// TODO automate this somehow
+// TODO clean up this macro invocation
 ffi!(targets_ffi);
 pub fn targets_ffi(_: &BaseCtx) -> Result<Vec<Target>> {
 	Ok(vec!(

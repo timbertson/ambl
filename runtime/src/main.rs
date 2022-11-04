@@ -1,9 +1,10 @@
 #![allow(dead_code, unused_variables, unused_imports)]
-use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult}, env};
+use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult}, env, collections::{HashMap, hash_map::Entry}};
 use log::*;
 
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use serde_json::map::OccupiedEntry;
 use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx}};
 use wasmtime::*;
 
@@ -41,23 +42,22 @@ struct RuleFunctions {
 	rule_fn: StringInOutFFI,
 }
 
-struct State<T: Sized + Send> {
+struct State {
+	instance: Instance,
 	memory: Memory,
 
 	trou_alloc: TypedFunc<u32, u32>,
 	trou_free: TypedFunc<(u32, u32), ()>,
 
-	functions: T,
-	
 	// outbox for receiving dynamically-sized results from a call
 	outbox_ptr: WasmOffset,
 	outbox_len: WasmOffset,
 }
 
-// rwlock*ref provides a convenient wrapper to pretend StateRef contains a State<T> instead of Option<State<T>>
-struct RwLockReadRef<'a, T: Send>(TryLockResult<RwLockReadGuard<'a, Option<State<T>>>>);
-impl<'a, T: Send> RwLockReadRef<'a, T> {
-	fn as_ref(&self) -> Result<&State<T>> {
+// rwlock*ref provides a convenient wrapper to pretend StateRef contains a State instead of Option<State>
+struct RwLockReadRef<'a>(TryLockResult<RwLockReadGuard<'a, Option<State>>>);
+impl<'a> RwLockReadRef<'a> {
+	fn as_ref(&self) -> Result<&State> {
 		self.0.as_ref()
 			.map_err(|e| anyhow!("Can't acquire lock: {:?}", e))?
 			.as_ref().ok_or_else(||anyhow!("Uninitialized store"))
@@ -65,15 +65,15 @@ impl<'a, T: Send> RwLockReadRef<'a, T> {
 }
 
 #[cfg(debug_assertions)]
-impl<'a, T: Send> Drop for RwLockReadRef<'a, T> {
+impl<'a> Drop for RwLockReadRef<'a> {
 	fn drop(&mut self) {
 		debug!("readLock: drop");
 	}
 }
 
-struct RwLockWriteRef<'a, T: Send>(TryLockResult<RwLockWriteGuard<'a, Option<State<T>>>>);
-impl<'a, T: Send> RwLockWriteRef<'a, T> {
-	fn as_ref(&mut self) -> Result<&mut State<T>> {
+struct RwLockWriteRef<'a>(TryLockResult<RwLockWriteGuard<'a, Option<State>>>);
+impl<'a> RwLockWriteRef<'a> {
+	fn as_ref(&mut self) -> Result<&mut State> {
 		self.0.as_mut()
 			.map_err(|e| anyhow!("Can't acquire lock: {:?}", e))?
 			.as_mut().ok_or_else(||anyhow!("Uninitialized store"))
@@ -81,7 +81,7 @@ impl<'a, T: Send> RwLockWriteRef<'a, T> {
 }
 
 #[cfg(debug_assertions)]
-impl<'a, T: Send> Drop for RwLockWriteRef<'a, T> {
+impl<'a> Drop for RwLockWriteRef<'a> {
 	fn drop(&mut self) {
 		debug!("writeLock: drop");
 	}
@@ -91,13 +91,13 @@ impl<'a, T: Send> Drop for RwLockWriteRef<'a, T> {
 // This means we can share it between closures,
 // as long as we promise not to violate borrowing rules
 // at runtime
-struct StateRef<T: Send + Sync + Sync>(Arc<RwLock<Option<State<T>>>>);
-impl<T: Send + Sync + Sync> StateRef<T> {
+struct StateRef(Arc<RwLock<Option<State>>>);
+impl StateRef {
 	fn empty() -> Self {
 		Self(Arc::new(RwLock::new(None)))
 	}
 	
-	fn set(&mut self, inner: State<T>) -> Result<()> {
+	fn set(&mut self, inner: State) -> Result<()> {
 		let mut mut_ref = self.0.write().map_err(|_| anyhow!("StateRef.set() failed"))?;
 		*mut_ref = Some(inner);
 		Ok(())
@@ -107,12 +107,12 @@ impl<T: Send + Sync + Sync> StateRef<T> {
 		Self(Arc::clone(&self.0))
 	}
 	
-	fn read(&self) -> RwLockReadRef<T> {
+	fn read(&self) -> RwLockReadRef {
 		debug!("read");
 		RwLockReadRef(self.0.try_read())
 	}
 
-	fn write(&self) -> RwLockWriteRef<T> {
+	fn write(&self) -> RwLockWriteRef {
 		debug!("write");
 		RwLockWriteRef(self.0.try_write())
 	}
@@ -203,51 +203,35 @@ impl<T: Send + Sync + Sync> StateRef<T> {
 		drop(store);
 		Ok(())
 	}
-}
 
-impl StateRef<TargetFunctions> {
-	fn get_targets<C: AsContextMut>(&self, store: C) -> Result<Vec<Target>> {
+	fn get_targets<C: AsContextMut>(&self, mut store: C) -> Result<Vec<Target>> {
 		debug!("get_targets");
-		let read = self.read();
-		let state = read.as_ref()?;
-		let targets_ffi = state.functions.targets_ffi;
-		drop(read);
+		let mut write = self.write();
+		let state = write.as_ref()?;
+		let targets_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(
+			store.as_context_mut(), "targets_ffi")?;
+		drop(write);
 		self.call_serde(store, targets_ffi, &BaseCtx::new())
 	}
-}
 
-impl StateRef<RuleFunctions> {
-	fn run_builder<C: AsContextMut>(&self, store: C, target: &str, builder: &DirectTarget) -> Result<()> {
+	fn run_builder<C: AsContextMut>(&self, mut store: C, target: &str, builder: &DirectTarget) -> Result<()> {
 		debug!("run_builder");
-		let read = self.read();
-		let state = read.as_ref()?;
-		let f = state.functions.rule_fn;
+		let mut write = self.write();
+		let state = write.as_ref()?;
+		let f = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store.as_context_mut(), &builder.build.name)?;
 		let target = RawTargetCtx::new(target.to_owned());
-		drop(read);
+		drop(write);
 		debug!("run_builder call_serde");
 		self.call_serde(store, f, &target)
 	}
 }
 
 struct WasmModule {
+	state: StateRef,
+	store: Store<()>,
 }
 
 impl WasmModule {
-	fn load_target(engine: &Engine, module: &Module) -> Result<(StateRef<TargetFunctions>, Store<()>)> {
-		Self::load(engine, module, |instance: &Instance, store: &mut Store<()>| {
-			Ok(TargetFunctions {
-				targets_ffi: instance.get_typed_func::<(u32, u32, u32, u32), (), _>(&mut *store, "targets_ffi")?,
-			})
-		})
-	}
-
-	fn load_rule(engine: &Engine, module: &Module, entrypoint: &str) -> Result<(StateRef<RuleFunctions>, Store<()>)> {
-		Self::load(engine, module, |instance, store| Ok(RuleFunctions {
-			// TODO bind rule_fn lazily? Then this result can be resused for many builds
-			rule_fn: instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store, entrypoint)?,
-		}))
-	}
-
 	fn compile(engine: &Engine, path: &str) -> Result<Module> {
 		debug!("Loading {}", path);
 		Ok(Module::from_file(&engine, &path)?)
@@ -257,11 +241,10 @@ impl WasmModule {
 		todo!()
 	}
 	
-	fn load<T: Send + Sync +'static, F: FnOnce(&Instance, &mut Store<()>) -> Result<T>>
-		(engine: &Engine, module: &Module, build_functions: F) -> Result<(StateRef<T>, Store<()>)> {
+	fn load(engine: &Engine, module: &Module) -> Result<WasmModule> {
 		let mut linker = Linker::new(&engine);
 
-		let mut state = StateRef::<T>::empty();
+		let mut state = StateRef::empty();
 
 		let state_invoke = state.clone(); // to move into closure
 		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, ()>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
@@ -303,6 +286,7 @@ impl WasmModule {
 		let outbox_len = offset(trou_alloc.call(&mut store, U32_SIZE)?);
 
 		let inner = State {
+			instance,
 			memory: instance
 				.get_memory(&mut store, "memory")
 				.ok_or(anyhow!("failed to find `memory` export"))?,
@@ -310,7 +294,6 @@ impl WasmModule {
 			trou_alloc,
 			trou_free: instance.get_typed_func::<(u32, u32), (), _>(&mut store, "trou_free")?,
 
-			functions: build_functions(&instance, &mut store)?,
 			outbox_ptr,
 			outbox_len,
 		};
@@ -319,7 +302,69 @@ impl WasmModule {
 
 		let trou_api_version: TypedFunc<(), u32> = instance.get_typed_func::<(), u32, _>(&mut store, "trou_api_version")?;
 		debug!("API version: {}", trou_api_version.call(&mut store, ())?);
-		Ok((state, store))
+		Ok(WasmModule { state, store })
+	}
+}
+
+struct Workspace {
+	engine: Engine,
+	modules: HashMap<String, Module>,
+	root_module: String,
+	targets: Vec<Target>,
+}
+
+impl Workspace {
+	fn new(root_module: String) -> Result<Self> {
+		let engine = Engine::default();
+		let mut modules = HashMap::new();
+		let mut module = Self::load_module_from(&engine, &mut modules, root_module.clone())?;
+
+		let targets = module.state.get_targets(&mut module.store)?;
+		Ok(Self { engine, modules, root_module, targets })
+	}
+
+	fn load_module_from(engine: &Engine, modules: &mut HashMap<String, Module>, path: String) -> Result<WasmModule> {
+		// TODO can we get away with not cloning yet?
+		let cached = modules.entry(path.clone());
+		let module = match cached {
+			Entry::Occupied(entry) => {
+				// https://stackoverflow.com/questions/60129097/entryoccupied-get-returns-a-value-referencing-data-owned-by-the-current-func
+				entry.into_mut()
+			},
+			Entry::Vacant(dest) => {
+				let loaded = WasmModule::compile(engine, &path)?;
+				dest.insert(loaded)
+			},
+		};
+		// TODO we make a new store each time we reference a module.
+		// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
+		WasmModule::load(engine, &module)
+	}
+
+	fn load_module(&mut self, path: String) -> Result<WasmModule> {
+		Self::load_module_from(&self.engine, &mut self.modules, path)
+	}
+
+	fn build(&mut self, name: &str) -> Result<()> {
+		debug!("Processing: {:?}", name);
+		let target = self.targets.iter().find(|t| match t {
+			Target::Indirect(x) => { debug!("skipping indirect... {:?}", x); false },
+			Target::Direct(t) => t.names.iter().any(|n| n == name),
+		}).ok_or_else(|| anyhow!("Not a buildable target: {}", name))?;
+
+		debug!("found target for {}: {:?}", name, target);
+		println!("# {}", name);
+		match target {
+			Target::Indirect(x) => todo!(),
+			Target::Direct(direct) => {
+				let direct = direct.clone(); // relive borrow on self since we got this from self.targets.iter()
+				
+				// TODO don't use root_module after an indirect target
+				let build_module_path = direct.build.module.clone().unwrap_or_else(|| self.root_module.to_owned());
+				let mut wasm_module = self.load_module(build_module_path)?;
+				wasm_module.state.run_builder(&mut wasm_module.store, name, &direct)
+			},
+		}
 	}
 }
 
@@ -327,35 +372,12 @@ fn main() -> Result<()> {
 	env_logger::init_from_env(
 		env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"));
 
-	let engine = Engine::default();
-	let module = WasmModule::compile(&engine, "target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm")?;
-
-	let (state, mut store) = WasmModule::load_target(&engine, &module)?;
-
-	let targets = state.get_targets(&mut store)?;
-	debug!("targets: {:?}", targets);
-
+	let mut workspace = Workspace::new(
+		"target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm".to_owned()
+	)?;
 	let args: Vec<String> = env::args().skip(1).collect();
 	for arg in args {
-		debug!("Processing: {:?}", arg);
-		let target = targets.iter().find(|t| match t {
-			Target::Indirect(x) => { debug!("skipping indirect... {:?}", x); false },
-			Target::Direct(t) => t.names.iter().any(|n| n == &arg),
-		}).ok_or_else(|| anyhow!("Not a buildable target: {}", &arg))?;
-
-		debug!("found target for {}: {:?}", &arg, target);
-		println!("# {}", &arg);
-		match target {
-			Target::Indirect(x) => todo!(),
-			// TODO this only supports a single module
-			Target::Direct(t) => {
-				let (state, mut store) = WasmModule::load_rule(&engine, &module, &t.build.name)?;
-				state.run_builder(&mut store, &arg, t)?
-			},
-		}
+		workspace.build(&arg)?;
 	}
-
-	state.drop(store)?;
-	
 	Ok(())
 }

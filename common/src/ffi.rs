@@ -1,3 +1,5 @@
+use std::slice;
+
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
@@ -80,4 +82,16 @@ impl<T> From<Result<T>> for ResultFFI<T> {
 			Result::Err(e) => ResultFFI::Err(format!("{}", e)),
 		}
 	}
+}
+
+pub fn wrap_fn_mut1<'a, I: DeserializeOwned, O: Serialize, F: FnOnce(&I)
+	-> Result<O>>(f: F, ptr_in: *const u8, len_in: u32, ptr_out: &'a mut *mut u8, len_out: &'a mut u32) {
+	let mut out = SizedPtrRef::wrap(ptr_out, len_out);
+	let in_bytes = unsafe { slice::from_raw_parts(ptr_in, len_in as usize) };
+	let result: Result<O> = (|| {
+		let input = serde_json::from_slice::<I>(in_bytes)?;
+		f(&input)
+	})();
+	let bytes = ResultFFI::serialize(result).expect("serialization failed").into_bytes();
+	out.write_and_leak(bytes).expect("write_and_leak failed")
 }
