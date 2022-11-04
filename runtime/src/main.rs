@@ -1,5 +1,5 @@
 #![allow(dead_code, unused_variables, unused_imports)]
-use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult}, env, collections::{HashMap, hash_map::Entry}};
+use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult, Mutex}, env, collections::{HashMap, hash_map::Entry}};
 use log::*;
 
 use anyhow::*;
@@ -237,11 +237,7 @@ impl WasmModule {
 		Ok(Module::from_file(&engine, &path)?)
 	}
 	
-	fn invoke<T>(caller: Caller<'_, ()>, request: DependencyRequest) -> Result<DependencyResponse> {
-		todo!()
-	}
-	
-	fn load(engine: &Engine, module: &Module) -> Result<WasmModule> {
+	fn load(engine: &Engine, module: &Module, project: Arc<Mutex<Project>>) -> Result<WasmModule> {
 		let mut linker = Linker::new(&engine);
 
 		let mut state = StateRef::empty();
@@ -250,13 +246,13 @@ impl WasmModule {
 		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, ()>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
 			debug!("trou_invoke");
 			let mut state = state_invoke.clone();
-			let response: Result<()> = (|| { // TODO: return DependencyResponse
+			let response: Result<DependencyResponse> = (|| { // TODO: return DependencyResponse
 				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
 				let s = String::from_utf8(data_bytes)?;
 				debug!("Got string from wasm: {}", &s);
 				let request: DependencyRequest = serde_json::from_str(&s)?;
 				println!("Got dep request: {:?} from WebAssembly", &request);
-				Ok(())
+				Project::build(&project, request)
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {
@@ -306,64 +302,102 @@ impl WasmModule {
 	}
 }
 
-struct Workspace {
+struct ModuleCache {
 	engine: Engine,
 	modules: HashMap<String, Module>,
-	root_module: String,
+	// root_module: String,
+	// targets: Vec<Target>,
+	// root_project: Project,
+}
+
+impl ModuleCache {
+	fn new() -> Arc<Mutex<Self>> {
+		let engine = Engine::default();
+		let modules = HashMap::new();
+		Arc::new(Mutex::new(Self { engine, modules }))
+	}
+}
+
+// Represents buildable targets for some subtree of a workspace
+struct Project {
+	cache: Arc<Mutex<ModuleCache>>,
+	module_path: String,
 	targets: Vec<Target>,
 }
 
-impl Workspace {
-	fn new(root_module: String) -> Result<Self> {
-		let engine = Engine::default();
-		let mut modules = HashMap::new();
-		let mut module = Self::load_module_from(&engine, &mut modules, root_module.clone())?;
+fn lock_failed(desc: &str) -> Error {
+	anyhow!("Failed to acquire lock: {}", desc)
+}
 
-		let targets = module.state.get_targets(&mut module.store)?;
-		Ok(Self { engine, modules, root_module, targets })
+impl Project {
+	fn new(cache: Arc<Mutex<ModuleCache>>, module_path: String) -> Result<Arc<Mutex<Self>>> {
+		let project = Arc::new(Mutex::new(Project {
+			// CORRECTNESS: we must populate `targets` before running any code which might call `build`
+			cache, module_path, targets: Vec::new()
+		}));
+		let project_copy = Arc::clone(&project);
+
+		// lock the project to populate targets
+		let mut inner = project.lock().unwrap();
+		let mut module = inner.load_module(&project_copy, inner.module_path.to_owned())?;
+		inner.targets = module.state.get_targets(&mut module.store)?;
+		drop(inner);
+
+		Ok(project)
 	}
 
-	fn load_module_from(engine: &Engine, modules: &mut HashMap<String, Module>, path: String) -> Result<WasmModule> {
+	fn load_module(&self, project: &Arc<Mutex<Self>>, path: String) -> Result<WasmModule> {
+		let mut cache = self.cache.lock().map_err(|_|lock_failed("load_module"))?;
+		// reborrow as &mut so we can borrow multiple fields
+		let cache = &mut *cache;
+
 		// TODO can we get away with not cloning yet?
-		let cached = modules.entry(path.clone());
+		let cached = cache.modules.entry(path.clone());
 		let module = match cached {
 			Entry::Occupied(entry) => {
 				// https://stackoverflow.com/questions/60129097/entryoccupied-get-returns-a-value-referencing-data-owned-by-the-current-func
 				entry.into_mut()
 			},
 			Entry::Vacant(dest) => {
-				let loaded = WasmModule::compile(engine, &path)?;
+				let loaded = WasmModule::compile(&cache.engine, &path)?;
 				dest.insert(loaded)
 			},
 		};
 		// TODO we make a new store each time we reference a module.
 		// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
-		WasmModule::load(engine, &module)
+		WasmModule::load(&cache.engine, &module, Arc::clone(project))
 	}
 
-	fn load_module(&mut self, path: String) -> Result<WasmModule> {
-		Self::load_module_from(&self.engine, &mut self.modules, path)
-	}
+	fn build(project_ref: &Arc<Mutex<Self>>, request: DependencyRequest) -> Result<DependencyResponse> {
+		match request {
+			DependencyRequest::FileDependency(name) => {
+				debug!("Processing: {:?}", name);
+				let project = project_ref.lock().map_err(|_| lock_failed("build"))?;
+				let target = project.targets.iter().find(|t| match t {
+					Target::Indirect(x) => { debug!("skipping indirect... {:?}", x); false },
+					Target::Direct(t) => t.names.iter().any(|n| n == name),
+				}).ok_or_else(|| anyhow!("Not a buildable target: {}", name))?;
 
-	fn build(&mut self, name: &str) -> Result<()> {
-		debug!("Processing: {:?}", name);
-		let target = self.targets.iter().find(|t| match t {
-			Target::Indirect(x) => { debug!("skipping indirect... {:?}", x); false },
-			Target::Direct(t) => t.names.iter().any(|n| n == name),
-		}).ok_or_else(|| anyhow!("Not a buildable target: {}", name))?;
+				debug!("found target for {}: {:?}", name, target);
+				println!("# {}", name);
+				match target {
+					Target::Indirect(x) => todo!(),
+					Target::Direct(direct) => {
+						let direct = direct.clone(); // relive borrow on project since we got this from project.targets.iter()
+						
+						// TODO don't use root_module after an indirect target
+						let build_module_path = direct.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
+						let mut wasm_module = project.load_module(&project_ref, build_module_path)?;
 
-		debug!("found target for {}: {:?}", name, target);
-		println!("# {}", name);
-		match target {
-			Target::Indirect(x) => todo!(),
-			Target::Direct(direct) => {
-				let direct = direct.clone(); // relive borrow on self since we got this from self.targets.iter()
-				
-				// TODO don't use root_module after an indirect target
-				let build_module_path = direct.build.module.clone().unwrap_or_else(|| self.root_module.to_owned());
-				let mut wasm_module = self.load_module(build_module_path)?;
-				wasm_module.state.run_builder(&mut wasm_module.store, name, &direct)
+						// we MUST drop here so that run_builder can acces the mutex
+						drop(project);
+						wasm_module.state.run_builder(&mut wasm_module.store, name, &direct)?;
+					},
+				};
+				Ok(DependencyResponse::Unit(()))
 			},
+
+			_ => todo!("unhandled request type"),
 		}
 	}
 }
@@ -372,12 +406,14 @@ fn main() -> Result<()> {
 	env_logger::init_from_env(
 		env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"));
 
-	let mut workspace = Workspace::new(
+	let cache = ModuleCache::new();
+	let root = Project::new(
+		cache,
 		"target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm".to_owned()
 	)?;
 	let args: Vec<String> = env::args().skip(1).collect();
 	for arg in args {
-		workspace.build(&arg)?;
+		Project::build(&root, DependencyRequest::FileDependency(&arg))?;
 	}
 	Ok(())
 }

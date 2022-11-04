@@ -64,7 +64,7 @@ impl TargetCtx {
 	}
 
 	// invoke shortcuts
-	pub fn build(&self, path: &str) -> Result<()> {
-		Self::invoke::<()>(DependencyRequest::FileDependency(path))
+	pub fn build(&self, path: &str) -> Result<DependencyResponse> {
+		Self::invoke(DependencyRequest::FileDependency(path))
 	}
 }

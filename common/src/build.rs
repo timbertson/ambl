@@ -17,14 +17,12 @@ pub enum DependencyRequest<'a> {
 }
 
 // response types corresponding to the above
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DependencyResponse {
-	FileDependency(FileHandle),
-	WasmCall(()),
+	Unit(()),
 	EnvVar(String),
 	FileSet(String),
-	Universe(()),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct FileHandle { pub id: u32 }

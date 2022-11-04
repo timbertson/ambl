@@ -22,7 +22,9 @@ macro_rules! ffi {
 ffi!(build_all);
 fn build_all(c: &TargetCtx) -> Result<()> {
 	debug(&format!("Building {}", c.target()));
-	c.build("a")?;
+	if c.target() != "a" {
+		c.build("a")?;
+	}
 	Ok(())
 }
 
