@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::ops::DerefMut;
 use std::sync::{Arc, Mutex};
 
 use log::*;
@@ -13,6 +14,8 @@ use trou_common::target::{Target, DirectTarget, RawTargetCtx, BaseCtx};
 use wasmtime::*;
 
 use crate::{wasm::WasmModule, sync::lock_failed};
+
+pub type ProjectRef = Arc<Mutex<Project>>;
 
 pub struct ModuleCache {
 	pub engine: Engine,
@@ -54,7 +57,13 @@ impl Project {
 		Ok(project)
 	}
 
-	fn load_module(&self, project: &Arc<Mutex<Self>>, path: String) -> Result<WasmModule> {
+	pub fn load_module_ref(project_ref: &Arc<Mutex<Self>>, path: String) -> Result<WasmModule> {
+		Self::access("load_module", project_ref, |p| {
+			p.load_module(project_ref, path)
+		})
+	}
+
+	pub fn load_module(&self, project: &Arc<Mutex<Self>>, path: String) -> Result<WasmModule> {
 		let mut cache = self.cache.lock().map_err(|_|lock_failed("load_module"))?;
 		// reborrow as &mut so we can borrow multiple fields
 		let cache = &mut *cache;
@@ -74,6 +83,11 @@ impl Project {
 		// TODO we make a new store each time we reference a module.
 		// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
 		WasmModule::load(&cache.engine, &module, Arc::clone(project))
+	}
+	
+	pub fn access<T, F: FnOnce(&mut Self) -> Result<T>>(desc: &'static str, project_ref: &ProjectRef, f: F) -> Result<T> {
+		let mut project = project_ref.lock().map_err(|_| lock_failed(desc))?;
+		f(project.deref_mut())
 	}
 
 	pub fn build(project_ref: &Arc<Mutex<Self>>, request: DependencyRequest) -> Result<DependencyResponse> {

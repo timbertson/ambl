@@ -4,7 +4,7 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx}};
+use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx, FunctionSpec}};
 use wasmtime::*;
 
 use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::Project};
@@ -126,8 +126,12 @@ impl StateRef {
 	}
 	
 	// serialize an argument and call a guest function taking (buf, len, buf_out, len_out). Return the deserialized output
-	fn call_serde<I: Serialize, O: DeserializeOwned, C: AsContextMut>(&self, mut store: C, f: TypedFunc<(u32, u32, u32, u32), ()>, arg: &I) -> Result<O> {
-		let (buf, len) = self.send_string(store.as_context_mut(), &serde_json::to_string(arg)?)?;
+	fn call_serde<I: Serialize, O: DeserializeOwned, C: AsContextMut>(&self, store: C, f: TypedFunc<(u32, u32, u32, u32), ()>, arg: &I) -> Result<O> {
+		self.call_str(store, f, &serde_json::to_string(arg)?, |b| ResultFFI::deserialize(&b))
+	}
+
+	fn call_str<O, FO: FnOnce(Vec<u8>) -> Result<O>, C: AsContextMut>(&self, mut store: C, f: TypedFunc<(u32, u32, u32, u32), ()>, arg: &str, fo: FO) -> Result<O> {
+		let (buf, len) = self.send_string(store.as_context_mut(), arg)?;
 
 		let read = self.read();
 		// Grab a few things from state and then drop read before calling.
@@ -144,8 +148,7 @@ impl StateRef {
 		// we need to read the u32 pointers via the memory API, interpreting as little-endian (wasm) u32
 		let ret_len = self.read_u32(store.as_context(), outbox_len)?;
 		let ret_bytes = self.copy_bytes(store.as_context(), ret_offset, ret_len)?;
-
-		ResultFFI::deserialize(&ret_bytes)
+		fo(ret_bytes)
 		// TODO free ret_bytes from guest memory
 	}
 
@@ -173,11 +176,22 @@ impl StateRef {
 		debug!("run_builder");
 		let mut write = self.write();
 		let state = write.as_ref()?;
-		let f = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store.as_context_mut(), &builder.build.name)?;
+		let f = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store.as_context_mut(), &builder.build.fn_name)?;
 		let target = RawTargetCtx::new(target.to_owned());
 		drop(write);
 		debug!("run_builder call_serde");
 		self.call_serde(store, f, &target)
+	}
+
+	pub fn call_fn<C: AsContextMut>(&self, mut store: C, call: &FunctionSpec) -> Result<String> {
+		debug!("call_fn");
+		let mut write = self.write();
+		let state = write.as_ref()?;
+		let f = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store.as_context_mut(), &call.fn_name)?;
+		drop(write);
+		debug!("run_builder call_serde");
+		let arg = call.config.as_ref().expect("TODO implement default arg for missing config");
+		self.call_str(store, f, &arg, |b| Ok(String::from_utf8(b)?))
 	}
 }
 

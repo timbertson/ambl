@@ -4,6 +4,8 @@ use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned};
 use trou_common::{build::{DependencyRequest, DependencyResponse}, target::FunctionSpec};
 
+use crate::project::{ProjectRef, Project};
+
 enum Cached<T> {
 	Missing,
 	Cached(T), // may be stale
@@ -112,7 +114,7 @@ enum UpdatePersist<T> {
 struct DependencyEval<'a>(&'a DependencyRequest);
 
 impl<'a> DependencyEval<'a> {
-	fn eval(&self, cached: Option<Persist>) -> Result<UpdatePersist<DependencyResponse>> {
+	fn eval(&self, cached: Option<Persist>, project: &ProjectRef) -> Result<UpdatePersist<DependencyResponse>> {
 		// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
 		match self.0 {
 			DependencyRequest::EnvVar(key) => {
@@ -131,7 +133,12 @@ impl<'a> DependencyEval<'a> {
 				if let Some(cached_value) = cached.key_eq_serialized_both(&serialized_key) {
 					Ok(UpdatePersist::Unchanged(DependencyResponse::Str(cached_value.to_owned())))
 				} else {
-					let result = "TODO".to_owned();
+					// This should be made impossible via types but I don't want to duplicate DependencyRequest yet
+					let module_path = spec.module.to_owned().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
+
+					let mut module = Project::load_module_ref(project, module_path)?;
+					let result = module.state.call_fn(&mut module.store, spec)?;
+					// TODO should we cache negative results? We can't tell, it's an opaque string!
 					Ok(UpdatePersist::Changed(
 						(Persist::kv_serialized_both(serialized_key, result.to_owned()),
 						DependencyResponse::Str(result)))

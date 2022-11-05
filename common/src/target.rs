@@ -26,13 +26,13 @@ impl RawTargetCtx {
 // used for delegating target definitions to another module
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModuleSpec {
-	name: String,
+	module_path: String,
 	scope: Option<String>,
 	config: Option<String>,
 }
 
-pub fn module<S: Into<String>>(name: S) -> ModuleSpec {
-	ModuleSpec { name: name.into(), scope: None, config: None }
+pub fn module<S: Into<String>>(module_path: S) -> ModuleSpec {
+	ModuleSpec { module_path: module_path.into(), scope: None, config: None }
 }
 
 impl ModuleSpec {
@@ -49,17 +49,17 @@ impl ModuleSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FunctionSpec {
-	pub name: String, // TODO can we default this to `build` for modules?
+	pub fn_name: String, // TODO can we default this to `build` for modules?
 	pub module: Option<String>,
 	pub config: Option<String>,
 }
 
-pub fn build_fn<S: Into<String>>(name: S) -> FunctionSpec {
-	FunctionSpec { name: name.into(), module: None, config: None }
+pub fn build_fn<S: Into<String>>(fn_name: S) -> FunctionSpec {
+	FunctionSpec { fn_name: fn_name.into(), module: None, config: None }
 }
 
-pub fn build_via<S: Into<String>, S2: Into<String>>(module: S, name: S2) -> FunctionSpec {
-	FunctionSpec { name: name.into(), module: Some(module.into()), config: None }
+pub fn build_via<S: Into<String>, S2: Into<String>>(module: S, fn_name: S2) -> FunctionSpec {
+	FunctionSpec { fn_name: fn_name.into(), module: Some(module.into()), config: None }
 }
 
 impl FunctionSpec {
