@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fs, time::UNIX_EPOCH};
 
 use anyhow::*;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse}, target::FunctionSpec};
 
 use crate::project::{ProjectRef, Project};
@@ -17,6 +17,11 @@ enum Cached<T> {
 enum PersistVal {
 	String(String),
 	Serialized(String)
+}
+impl PersistVal {
+	pub fn serialize<T: Serialize>(t: &T) -> Result<Self> {
+		Ok(Self::Serialized(serde_json::to_string(t)?))
+	}
 }
 
 struct Persist {
@@ -40,6 +45,7 @@ trait PersistEq {
 	fn key_eq_string(&self, other: &str) -> bool;
 	fn key_eq_serialized(&self, other: &str) -> bool;
 	fn key_eq_serialized_both(&self, other: &str) -> Option<&str>;
+	fn get_serialized_key(&self) -> Option<&str>;
 }
 
 impl PersistEq for Option<Persist> {
@@ -62,6 +68,10 @@ impl PersistEq for Option<Persist> {
 	fn key_eq_serialized_both(&self, other: &str) -> Option<&str> {
 		self.as_ref().and_then(|p| p.key_eq_serialized_both(other))
 	}
+
+	fn get_serialized_key(&self) -> Option<&str> {
+		self.as_ref().and_then(|p| p.get_serialized_key())
+	}
 }
 
 impl PersistEq for Persist {
@@ -73,10 +83,7 @@ impl PersistEq for Persist {
 	}
 	
 	fn key_eq_serialized(&self, other: &str) -> bool {
-		match &self.key {
-			PersistVal::Serialized(s) => s == other,
-			PersistVal::String(_) => false,
-		}
+		self.get_serialized_key() == Some(other)
 	}
 
 	// return the serialized value if the serialized key matches
@@ -88,13 +95,23 @@ impl PersistEq for Persist {
 			_ => None,
 		}
 	}
+
+	fn get_serialized_key(&self) -> Option<&str> {
+		match &self.key {
+			PersistVal::Serialized(s) => Some(s),
+			PersistVal::String(_) => None,
+		}
+	}
 }
 
 enum UpdatePersist<T> {
-	Changed((Persist, T)),
-	Impure(T), // we can't cache this value, assume always changed
-	Equivalent((Persist, T)), // the value has changed, but it's semantically unchanged
-	Unchanged(T), // exactly the same as previous value
+	Dirty, // The dependency is definitely out of date
+
+	Changed((Persist, T)), // we've rebuilt it, and it's changed
+	// Impure(T), // we've rebuilt it, and it can't be cached. TODO can this just be folded into Dirty?
+
+	// Equivalent((Persist, T)), // We rebuilt it, and the value has changed, but it's semantically the same as the cached value (TODO why are we updatnig it then?)
+	Unchanged(T), // The value has not changed
 }
 
 // struct CachedEval {
@@ -111,9 +128,31 @@ enum UpdatePersist<T> {
 // 	FileSet(String),
 // }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct FileMetadata {
+	mtime: u128,
+	// TODO add hash for checksumming
+}
+impl FileMetadata {
+	pub fn from_stat(stat: fs::Metadata) -> Result<Self> {
+		let mtime = stat.modified()?.duration_since(UNIX_EPOCH)?.as_millis();
+		Ok(Self { mtime })
+	}
+}
+
 struct DependencyEval<'a>(&'a DependencyRequest);
 
 impl<'a> DependencyEval<'a> {
+	/* Evaluate this dependency, and rebuild it if necessary to determine whether it has changed.
+	Possile outcomes:
+	- the dep is clearly dirty (e.g. input file modified or checksum differs)
+	- the dep is clearly clean (unchanged)
+	- the dep _might_ be dirty (e.g. some inputs have changed, but there's a cut-point of a wasm call or checksum).
+	    In this case we rebuild the dependency,
+	    and return whether it is semantically different (e.g. produces a different checksum)
+	
+	The result contains a DependencyResponse whenever we have it, i.e when we rebuilt the value
+	*/
 	fn eval(&self, cached: Option<Persist>, project: &ProjectRef) -> Result<UpdatePersist<DependencyResponse>> {
 		// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
 		match self.0 {
@@ -127,7 +166,12 @@ impl<'a> DependencyEval<'a> {
 					))
 				}
 			},
-			DependencyRequest::Universe => Ok(UpdatePersist::Impure(DependencyResponse::Unit)),
+			DependencyRequest::Universe => Ok(UpdatePersist::Dirty),
+
+			// TODO: is it possible this wasm call wouldn't be required by the latest version of
+			// the build function? If we always evaluate things in sequence order then probably not,
+			// but if we parallelize then it's possible that some earlier input will change, causing
+			// this wasm call to not be made, or be made with different arguments.
 			DependencyRequest::WasmCall(spec) => {
 				let serialized_key = serde_json::to_string(&spec)?;
 				if let Some(cached_value) = cached.key_eq_serialized_both(&serialized_key) {
@@ -145,6 +189,19 @@ impl<'a> DependencyEval<'a> {
 					)
 				}
 			},
+			DependencyRequest::FileDependency(path) => {
+				// TODO do something different if the file is a buildable target.
+				// Specifically, just... recurse? The target will deps so check those...
+				if let Some(cached_key) = cached.get_serialized_key() {
+					let cached_meta: FileMetadata = serde_json::from_str(cached_key)?;
+					let current = FileMetadata::from_stat(fs::symlink_metadata(path)?)?;
+					// TODO checksum
+					if current == cached_meta {
+						return Ok(UpdatePersist::Unchanged(DependencyResponse::Unit))
+					}
+				}
+				Ok(UpdatePersist::Dirty)
+			},
 			_ => todo!(),
 		}
 	}
@@ -154,33 +211,6 @@ struct DepStore {
 	// TODO this assumes strings are reliable keys, but deps can be relative?
 	// Maybe all keys are normalized to project root?
 	cache: HashMap<DependencyRequest, Cached<Persist>>,
-}
-
-trait Eval<T> {
-	fn key(&self) -> DependencyRequest;
-
-	fn maybe_reeval(&self, cached: Persist) -> Result<UpdatePersist<T>>;
-
-	fn eval(&self) -> Result<UpdatePersist<T>>;
-}
-
-trait ImpureEval<T> {
-	fn key(&self) -> DependencyRequest;
-	fn impure_eval(&self) -> Result<T>;
-}
-
-impl<T, I: ImpureEval<T>> Eval<T> for I {
-	fn key(&self) -> DependencyRequest {
-		self.key()
-	}
-
-	fn maybe_reeval(&self, cached: Persist) -> Result<UpdatePersist<T>> {
-		self.eval()
-	}
-	
-	fn eval(&self) -> Result<UpdatePersist<T>> {
-		Ok(UpdatePersist::Impure(self.impure_eval()?))
-	}
 }
 
 /*
