@@ -58,20 +58,20 @@ impl PersistEq for Option<Persist> {
 	}
 
 	fn key_eq_serialized_both(&self, other: &str) -> Option<&str> {
-		self.and_then(|p| p.key_eq_serialized_both(other))
+		self.as_ref().and_then(|p| p.key_eq_serialized_both(other))
 	}
 }
 
 impl PersistEq for Persist {
 	fn key_eq_string(&self, other: &str) -> bool {
-		match self.key {
+		match &self.key {
 			PersistVal::Serialized(_) => false,
 			PersistVal::String(s) => s == other,
 		}
 	}
 	
 	fn key_eq_serialized(&self, other: &str) -> bool {
-		match self.key {
+		match &self.key {
 			PersistVal::Serialized(s) => s == other,
 			PersistVal::String(_) => false,
 		}
@@ -79,7 +79,7 @@ impl PersistEq for Persist {
 
 	// return the serialized value if the serialized key matches
 	fn key_eq_serialized_both(&self, other: &str) -> Option<&str> {
-		match (self.key, self.value) {
+		match (&self.key, &self.value) {
 			(PersistVal::Serialized(k), Some(PersistVal::Serialized(v))) if k == other => {
 				Some(&v)
 			},
