@@ -1,4 +1,6 @@
 #![allow(dead_code, unused_variables, unused_imports)]
+mod dependency;
+
 use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult, Mutex}, env, collections::{HashMap, hash_map::Entry}};
 use log::*;
 
@@ -371,6 +373,7 @@ impl Project {
 	fn build(project_ref: &Arc<Mutex<Self>>, request: DependencyRequest) -> Result<DependencyResponse> {
 		match request {
 			DependencyRequest::FileDependency(name) => {
+				let name = &name;
 				debug!("Processing: {:?}", name);
 				let project = project_ref.lock().map_err(|_| lock_failed("build"))?;
 				let target = project.targets.iter().find(|t| match t {
@@ -413,7 +416,7 @@ fn main() -> Result<()> {
 	)?;
 	let args: Vec<String> = env::args().skip(1).collect();
 	for arg in args {
-		Project::build(&root, DependencyRequest::FileDependency(&arg))?;
+		Project::build(&root, DependencyRequest::FileDependency(arg))?;
 	}
 	Ok(())
 }

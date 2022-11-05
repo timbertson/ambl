@@ -4,23 +4,23 @@ use crate::target::FunctionSpec;
 
 // A request, which can be turned into a Dependency by resolving
 // the requested resource.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum DependencyRequest<'a> {
-	FileDependency(&'a str),
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum DependencyRequest {
+	FileDependency(String),
 	
 	// an explicit method + args in a wasm module
 	WasmCall(FunctionSpec),
 
-	EnvVar(&'a str),
-	FileSet(&'a str),
+	EnvVar(String),
+	FileSet(String),
 	Universe,
 }
 
 // response types corresponding to the above
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DependencyResponse {
-	Unit(()),
-	EnvVar(String),
+	Unit,
+	Str(String),
 	FileSet(String),
 }
 

@@ -47,7 +47,7 @@ impl ModuleSpec {
 	}
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FunctionSpec {
 	pub name: String, // TODO can we default this to `build` for modules?
 	pub module: Option<String>,
