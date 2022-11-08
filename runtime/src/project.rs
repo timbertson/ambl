@@ -27,23 +27,22 @@ pub struct ModuleCache {
 }
 
 impl ModuleCache {
-	pub fn new() -> Arc<Mutex<Self>> {
+	pub fn new() -> Self {
 		let engine = Engine::default();
 		let modules = HashMap::new();
-		Arc::new(Mutex::new(Self { engine, modules }))
+		Self { engine, modules }
 	}
 }
 
 // Represents buildable targets for some subtree of a workspace
 pub struct Project {
-	// TODO should this really be a secondary mutex?
-	cache: Arc<Mutex<ModuleCache>>,
+	cache: ModuleCache,
 	module_path: String,
 	targets: Vec<Target>,
 }
 
 impl Project {
-	pub fn new(cache: Arc<Mutex<ModuleCache>>, module_path: String) -> Result<ProjectRef> {
+	pub fn new(cache: ModuleCache, module_path: String) -> Result<ProjectRef> {
 		let mut project = MutexRef::new(Project {
 			// CORRECTNESS: we must populate `targets` before running any code which might call `build`
 			cache, module_path: module_path.clone(), targets: Vec::new()
@@ -63,9 +62,7 @@ impl Project {
 
 	pub fn load_module_inner(project: &mut Mutexed<Project>, path: String) -> Result<WasmModule> {
 		let project_ref = project.add_ref();
-		let mut cache = project.cache.lock().map_err(|_|lock_failed("load_module"))?;
-		// reborrow as &mut so we can borrow multiple fields
-		let cache = &mut *cache;
+		let cache = &mut project.cache;
 
 		// TODO can we get away with not cloning yet?
 		let cached = cache.modules.entry(path.clone());
@@ -75,6 +72,7 @@ impl Project {
 				entry.into_mut()
 			},
 			Entry::Vacant(dest) => {
+				// TODO release lock while evaluating this?
 				let loaded = WasmModule::compile(&cache.engine, &path)?;
 				dest.insert(loaded)
 			},
