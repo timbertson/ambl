@@ -4,7 +4,7 @@ use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse}, target::FunctionSpec};
 
-use crate::project::{ProjectRef, Project};
+use crate::project::{ProjectRef, Project, ProjectHandle};
 
 enum Cached<T> {
 	Missing,
@@ -153,7 +153,7 @@ impl<'a> DependencyEval<'a> {
 	
 	The result contains a DependencyResponse whenever we have it, i.e when we rebuilt the value
 	*/
-	fn eval(&self, cached: Option<Persist>, project: &mut ProjectRef) -> Result<UpdatePersist<DependencyResponse>> {
+	fn eval(&self, cached: Option<Persist>, project: &mut ProjectHandle) -> Result<UpdatePersist<DependencyResponse>> {
 		// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
 		match self.0 {
 			DependencyRequest::EnvVar(key) => {

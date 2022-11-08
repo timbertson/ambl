@@ -19,13 +19,13 @@ fn main() -> Result<()> {
 		env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"));
 
 	let cache = ModuleCache::new();
-	let mut root = Project::new(
+	let root = Project::new(
 		cache,
 		"target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm".to_owned()
 	)?;
 	let args: Vec<String> = env::args().skip(1).collect();
 	for arg in args {
-		Project::build(&mut root, DependencyRequest::FileDependency(arg))?;
+		Project::build(&mut root.handle(), DependencyRequest::FileDependency(arg))?;
 	}
 	Ok(())
 }

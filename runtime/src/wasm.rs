@@ -210,7 +210,7 @@ impl WasmModule {
 		let mut linker = Linker::new(&engine);
 
 		let mut state = StateRef::empty();
-
+		
 		let state_invoke = state.clone(); // to move into closure
 		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, ()>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
 			debug!("trou_invoke");
@@ -221,7 +221,7 @@ impl WasmModule {
 				debug!("Got string from wasm: {}", &s);
 				let request: DependencyRequest = serde_json::from_str(&s)?;
 				println!("Got dep request: {:?} from WebAssembly", &request);
-				Project::build(&mut project.clone(), request)
+				Project::build(&mut project.handle(), request)
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {

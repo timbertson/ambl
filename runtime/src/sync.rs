@@ -50,15 +50,15 @@ MutexRef implements clone, so it's still possibly to have incorrect behaviour
 you'll just have one, and you'll only clone it when giving it to another
 class which you shouldn't then call reentrantly.
 */
+
+// mutexRef is the toplevel owner. It can generate many handles
 pub struct MutexRef<T>(Arc<Mutex<T>>);
 
 impl<T> MutexRef<T> {
 	pub fn new(t: T) -> Self { Self(Arc::new(Mutex::new(t))) }
 
-	pub fn lock(&mut self, desc: &'static str) -> Result<Mutexed<'_, T>> {
-		let arc = Arc::clone(&self.0);
-		let guard = self.0.lock().map_err(|_| lock_failed(desc))?;
-		Ok(Mutexed { arc, guard })
+	pub fn handle(&self) -> MutexHandle<T> {
+		MutexHandle(Arc::clone(&self.0))
 	}
 }
 
@@ -68,6 +68,22 @@ impl<T> Clone for MutexRef<T> {
 	}
 }
 
+// a handle is single use. You can lock it (and then unlock it),
+// but you can't make copies. Generally you thread this through
+// a single logical thread of control.
+pub struct MutexHandle<T>(Arc<Mutex<T>>);
+
+impl<T> MutexHandle<T> {
+	pub fn lock(&mut self, desc: &'static str) -> Result<Mutexed<'_, T>> {
+		let arc = Arc::clone(&self.0);
+		let guard: MutexGuard<T> = self.0.lock().map_err(|_| lock_failed(desc))?;
+		Ok(Mutexed { arc, guard })
+	}
+}
+
+// Mutexed is an actively locked resource. You can drop it, or unlock()
+// to turn it back into a handle. This is passed by value if you want
+// the callee to be able to release it, or by ref otherwise
 pub struct Mutexed<'a, T> {
 	arc: Arc<Mutex<T>>,
 	guard: MutexGuard<'a, T>,
@@ -79,9 +95,9 @@ impl<'a, T> Mutexed<'a, T> {
 		MutexRef(self.arc)
 	}
 	
-	pub fn add_ref(&mut self) -> MutexRef<T> {
-		MutexRef(Arc::clone(&self.arc))
-	}
+	// pub fn add_ref(&mut self) -> MutexRef<T> {
+	// 	MutexRef(Arc::clone(&self.arc))
+	// }
 }
 
 impl<'a, T> Deref for Mutexed<'a, T> {
