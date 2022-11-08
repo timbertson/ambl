@@ -13,9 +13,10 @@ use trou_common::ffi::ResultFFI;
 use trou_common::target::{Target, DirectTarget, RawTargetCtx, BaseCtx};
 use wasmtime::*;
 
+use crate::sync::{MutexRef, Mutexed};
 use crate::{wasm::WasmModule, sync::lock_failed};
 
-pub type ProjectRef = Arc<Mutex<Project>>;
+pub type ProjectRef = MutexRef<Project>;
 
 pub struct ModuleCache {
 	pub engine: Engine,
@@ -35,36 +36,34 @@ impl ModuleCache {
 
 // Represents buildable targets for some subtree of a workspace
 pub struct Project {
+	// TODO should this really be a secondary mutex?
 	cache: Arc<Mutex<ModuleCache>>,
 	module_path: String,
 	targets: Vec<Target>,
 }
 
 impl Project {
-	pub fn new(cache: Arc<Mutex<ModuleCache>>, module_path: String) -> Result<Arc<Mutex<Self>>> {
-		let project = Arc::new(Mutex::new(Project {
+	pub fn new(cache: Arc<Mutex<ModuleCache>>, module_path: String) -> Result<ProjectRef> {
+		let mut project = MutexRef::new(Project {
 			// CORRECTNESS: we must populate `targets` before running any code which might call `build`
-			cache, module_path, targets: Vec::new()
-		}));
-		let project_copy = Arc::clone(&project);
+			cache, module_path: module_path.clone(), targets: Vec::new()
+		});
 
 		// lock the project to populate targets
-		let mut inner = project.lock().unwrap();
-		let mut module = inner.load_module(&project_copy, inner.module_path.to_owned())?;
+		let mut inner = project.lock("load_module")?;
+		let mut module = Self::load_module_inner(&mut inner, module_path)?;
 		inner.targets = module.state.get_targets(&mut module.store)?;
-		drop(inner);
-
-		Ok(project)
+		Ok(inner.unlock())
 	}
 
-	pub fn load_module_ref(project_ref: &Arc<Mutex<Self>>, path: String) -> Result<WasmModule> {
-		Self::access("load_module", project_ref, |p| {
-			p.load_module(project_ref, path)
-		})
+	pub fn load_module_ref(project: &mut ProjectRef, path: String) -> Result<WasmModule> {
+		let mut inner = project.lock("load_module_ref")?;
+		Self::load_module_inner(&mut inner, path)
 	}
 
-	pub fn load_module(&self, project: &Arc<Mutex<Self>>, path: String) -> Result<WasmModule> {
-		let mut cache = self.cache.lock().map_err(|_|lock_failed("load_module"))?;
+	pub fn load_module_inner(project: &mut Mutexed<Project>, path: String) -> Result<WasmModule> {
+		let project_ref = project.add_ref();
+		let mut cache = project.cache.lock().map_err(|_|lock_failed("load_module"))?;
 		// reborrow as &mut so we can borrow multiple fields
 		let cache = &mut *cache;
 
@@ -82,20 +81,15 @@ impl Project {
 		};
 		// TODO we make a new store each time we reference a module.
 		// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
-		WasmModule::load(&cache.engine, &module, Arc::clone(project))
+		WasmModule::load(&cache.engine, &module, project_ref)
 	}
 	
-	pub fn access<T, F: FnOnce(&mut Self) -> Result<T>>(desc: &'static str, project_ref: &ProjectRef, f: F) -> Result<T> {
-		let mut project = project_ref.lock().map_err(|_| lock_failed(desc))?;
-		f(project.deref_mut())
-	}
-
-	pub fn build(project_ref: &Arc<Mutex<Self>>, request: DependencyRequest) -> Result<DependencyResponse> {
+	pub fn build(project_ref: &mut ProjectRef, request: DependencyRequest) -> Result<DependencyResponse> {
 		match request {
 			DependencyRequest::FileDependency(name) => {
 				let name = &name;
 				debug!("Processing: {:?}", name);
-				let project = project_ref.lock().map_err(|_| lock_failed("build"))?;
+				let mut project = project_ref.lock("build")?;
 				let target = project.targets.iter().find(|t| match t {
 					Target::Indirect(x) => { debug!("skipping indirect... {:?}", x); false },
 					Target::Direct(t) => t.names.iter().any(|n| n == name),
@@ -110,10 +104,11 @@ impl Project {
 						
 						// TODO don't use root_module after an indirect target
 						let build_module_path = direct.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
-						let mut wasm_module = project.load_module(&project_ref, build_module_path)?;
 
-						// we MUST drop here so that run_builder can acces the mutex
-						drop(project);
+						let mut wasm_module = Self::load_module_inner(&mut project, build_module_path)?;
+
+						// we MUST unlock here so that run_builder can acces the mutex
+						project.unlock();
 						wasm_module.state.run_builder(&mut wasm_module.store, name, &direct)?;
 					},
 				};

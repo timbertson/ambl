@@ -153,7 +153,7 @@ impl<'a> DependencyEval<'a> {
 	
 	The result contains a DependencyResponse whenever we have it, i.e when we rebuilt the value
 	*/
-	fn eval(&self, cached: Option<Persist>, project: &ProjectRef) -> Result<UpdatePersist<DependencyResponse>> {
+	fn eval(&self, cached: Option<Persist>, project: &mut ProjectRef) -> Result<UpdatePersist<DependencyResponse>> {
 		// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
 		match self.0 {
 			DependencyRequest::EnvVar(key) => {
@@ -191,7 +191,7 @@ impl<'a> DependencyEval<'a> {
 			},
 			DependencyRequest::FileDependency(path) => {
 				// TODO do something different if the file is a buildable target.
-				// Specifically, just... recurse? The target will deps so check those...
+				// Specifically, just... recurse? The target will have deps so check those...
 				if let Some(cached_key) = cached.get_serialized_key() {
 					let cached_meta: FileMetadata = serde_json::from_str(cached_key)?;
 					let current = FileMetadata::from_stat(fs::symlink_metadata(path)?)?;

@@ -7,7 +7,7 @@ use serde_json::map::OccupiedEntry;
 use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx, FunctionSpec}};
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::Project};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef}};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -206,7 +206,7 @@ impl WasmModule {
 		Ok(Module::from_file(&engine, &path)?)
 	}
 	
-	pub fn load(engine: &Engine, module: &Module, project: Arc<Mutex<Project>>) -> Result<WasmModule> {
+	pub fn load(engine: &Engine, module: &Module, project: ProjectRef) -> Result<WasmModule> {
 		let mut linker = Linker::new(&engine);
 
 		let mut state = StateRef::empty();
@@ -221,7 +221,7 @@ impl WasmModule {
 				debug!("Got string from wasm: {}", &s);
 				let request: DependencyRequest = serde_json::from_str(&s)?;
 				println!("Got dep request: {:?} from WebAssembly", &request);
-				Project::build(&project, request)
+				Project::build(&mut project.clone(), request)
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {
