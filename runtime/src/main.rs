@@ -1,5 +1,5 @@
 #![allow(dead_code, unused_variables, unused_imports)]
-mod dependency;
+mod persist;
 mod project;
 mod sync;
 mod wasm;
@@ -8,7 +8,7 @@ use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{A
 use log::*;
 
 use anyhow::*;
-use project::{Project, ModuleCache};
+use project::{Project, ModuleCache, BuildReason};
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
 use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx}};
@@ -25,7 +25,7 @@ fn main() -> Result<()> {
 	)?;
 	let args: Vec<String> = env::args().skip(1).collect();
 	for arg in args {
-		Project::build(&mut root.handle(), DependencyRequest::FileDependency(arg))?;
+		Project::build(root.handle().lock("main")?, DependencyRequest::FileDependency(arg), BuildReason::Explicit)?;
 	}
 	Ok(())
 }

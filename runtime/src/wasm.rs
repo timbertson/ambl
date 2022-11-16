@@ -7,7 +7,7 @@ use serde_json::map::OccupiedEntry;
 use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx, FunctionSpec}};
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef}};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle}};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -172,7 +172,7 @@ impl StateRef {
 		self.call_serde(store, targets_ffi, &BaseCtx::new())
 	}
 
-	pub fn run_builder<C: AsContextMut>(&self, mut store: C, target: &str, builder: &DirectTarget) -> Result<()> {
+	pub fn run_builder<C: AsContextMut>(&self, mut store: C, target: &str, builder: &DirectTarget, _unlocked_evidence: &ProjectHandle) -> Result<()> {
 		debug!("run_builder");
 		let mut write = self.write();
 		let state = write.as_ref()?;
@@ -183,7 +183,7 @@ impl StateRef {
 		self.call_serde(store, f, &target)
 	}
 
-	pub fn call_fn<C: AsContextMut>(&self, mut store: C, call: &FunctionSpec) -> Result<String> {
+	pub fn call_fn<C: AsContextMut>(&self, mut store: C, call: &FunctionSpec, _unlocked_evidence: &ProjectHandle) -> Result<String> {
 		debug!("call_fn");
 		let mut write = self.write();
 		let state = write.as_ref()?;
@@ -221,7 +221,9 @@ impl WasmModule {
 				debug!("Got string from wasm: {}", &s);
 				let request: DependencyRequest = serde_json::from_str(&s)?;
 				println!("Got dep request: {:?} from WebAssembly", &request);
-				Project::build(&mut project.handle(), request)
+				let mut project_handle = project.handle();
+				let project = project_handle.lock("trou_invoke")?;
+				Ok(Project::build(project, request, BuildReason::Dependency)?.raw())
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {

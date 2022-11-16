@@ -90,9 +90,9 @@ pub struct Mutexed<'a, T> {
 }
 
 impl<'a, T> Mutexed<'a, T> {
-	pub fn unlock(self) -> MutexRef<T> {
+	pub fn unlock(self) -> MutexHandle<T> {
 		// drops self.guard
-		MutexRef(self.arc)
+		MutexHandle(self.arc)
 	}
 	
 	// pub fn add_ref(&mut self) -> MutexRef<T> {
