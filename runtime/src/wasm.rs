@@ -4,10 +4,10 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx, FunctionSpec}};
+use trou_common::{build::{DependencyRequest, DependencyResponse, TaggedDependencyRequest}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx, FunctionSpec}};
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle}};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -172,15 +172,16 @@ impl StateRef {
 		self.call_serde(store, targets_ffi, &BaseCtx::new())
 	}
 
-	pub fn run_builder<C: AsContextMut>(&self, mut store: C, target: &str, builder: &DirectTarget, _unlocked_evidence: &ProjectHandle) -> Result<()> {
+	pub fn run_builder<C: AsContextMut>(&self, mut store: C, token: ActiveBuildToken, path: &str, builder: &DirectTarget, _unlocked_evidence: &ProjectHandle) -> Result<Option<PersistFile>> {
 		debug!("run_builder");
 		let mut write = self.write();
 		let state = write.as_ref()?;
 		let f = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store.as_context_mut(), &builder.build.fn_name)?;
-		let target = RawTargetCtx::new(target.to_owned());
+		let target = RawTargetCtx::new(path.to_owned(), token.raw());
 		drop(write);
 		debug!("run_builder call_serde");
-		self.call_serde(store, f, &target)
+		self.call_serde(store, f, &target)?;
+		PersistFile::from_path(path)
 	}
 
 	pub fn call_fn<C: AsContextMut>(&self, mut store: C, call: &FunctionSpec, _unlocked_evidence: &ProjectHandle) -> Result<String> {
@@ -219,11 +220,12 @@ impl WasmModule {
 				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
 				let s = String::from_utf8(data_bytes)?;
 				debug!("Got string from wasm: {}", &s);
-				let request: DependencyRequest = serde_json::from_str(&s)?;
+				let request: TaggedDependencyRequest = serde_json::from_str(&s)?;
 				println!("Got dep request: {:?} from WebAssembly", &request);
 				let mut project_handle = project.handle();
 				let project = project_handle.lock("trou_invoke")?;
-				Ok(Project::build(project, request, BuildReason::Dependency)?.raw())
+				let TaggedDependencyRequest { token, request } = request;
+				Ok(Project::build(project, request, BuildReason::Dependency(ActiveBuildToken::from_raw(token)))?.raw())
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {

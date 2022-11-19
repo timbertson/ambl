@@ -1,4 +1,5 @@
-use std::{collections::HashMap, fs, time::UNIX_EPOCH};
+use log::*;
+use std::{collections::HashMap, fs, time::UNIX_EPOCH, io};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
@@ -104,7 +105,6 @@ pub enum Cached<T> {
 // 	}
 // }
 
-// TODO just call this BuildResult?
 pub enum BuildResult<T> {
 	Changed(T),
 	Unchanged(T),
@@ -128,6 +128,14 @@ impl PersistFile {
 	pub fn from_stat(stat: fs::Metadata) -> Result<Self> {
 		let mtime = stat.modified()?.duration_since(UNIX_EPOCH)?.as_millis();
 		Ok(Self { mtime })
+	}
+
+	pub fn from_path(p: &str) -> Result<Option<Self>> {
+		match fs::symlink_metadata(p) {
+			Result::Ok(stat) => Ok(Some(Self::from_stat(stat)?)),
+			Result::Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+			Result::Err(err) => Err(err.into()),
+		}
 	}
 }
 
@@ -168,7 +176,8 @@ impl DepStore {
 		todo!()
 	}
 
-	pub fn update_file(&self, request: &str, persist: &PersistFile) -> Result<()> {
+	pub fn update_file(&self, request: &str, persist: &Option<PersistFile>, deps: Option<DepSet>) -> Result<()> {
+		info!("TODO: update file {:?}, {:?}, {:?}", request, persist, deps);
 		todo!()
 	}
 
@@ -178,6 +187,37 @@ impl DepStore {
 
 	pub fn update_wasm(&self, request: &FunctionSpec, persist: &str) -> Result<()> {
 		todo!()
+	}
+}
+
+// An evaluated dependency captures the request + result of a dependency
+// at a particular point in time.
+// This is persisted for target dependencies, so that we can reuse
+// the response if the request is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluatedFileDependency {
+	pub request: String,
+	pub persist: Option<PersistFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+// TODO rename just BuiltTarget or something?
+// What is this, does it serve exactly the same purpose as PersistFile?
+pub enum EvaluatedDependency {
+	File(EvaluatedFileDependency),
+	TODO, // TODO env etc
+}
+
+// the in-memory struct to collect deps during the build of a target.
+// it's stored in Project, keyed by ActiveBuildToken
+#[derive(Debug, Clone)]
+pub struct DepSet {
+	pub deps: Vec<EvaluatedDependency>,
+}
+
+impl Default for DepSet {
+	fn default() -> Self {
+		Self { deps: Default::default() }
 	}
 }
 

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::atomic;
 use std::{fs, iter};
 use std::ops::DerefMut;
 use std::sync::{Arc, Mutex};
@@ -14,25 +15,51 @@ use trou_common::ffi::ResultFFI;
 use trou_common::target::{Target, DirectTarget, RawTargetCtx, BaseCtx};
 use wasmtime::*;
 
-use crate::persist::{BuildResult, Cached, DepStore, PersistFile};
+use crate::persist::{BuildResult, Cached, DepStore, PersistFile, EvaluatedDependency, DepSet, EvaluatedFileDependency};
 use crate::sync::{MutexRef, Mutexed, MutexHandle};
 use crate::{wasm::WasmModule, sync::lock_failed};
 
 pub type ProjectRef = MutexRef<Project>;
 pub type ProjectHandle = MutexHandle<Project>;
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct ActiveBuildToken(u32);
+
+const NEXT_TOKEN: atomic::AtomicU32 = atomic::AtomicU32::new(0);
+
+impl ActiveBuildToken {
+	pub fn generate() -> Self {
+		Self(NEXT_TOKEN.fetch_add(1, atomic::Ordering::Relaxed))
+	}
+
+	pub fn from_raw(v: u32) -> Self {
+		Self(v)
+	}
+
+	pub fn raw(&self) -> u32 {
+		self.0
+	}
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum BuildReason {
-	Dependency, // needed to build something else
+	Dependency(ActiveBuildToken),
+
 	Explicit, // explicit user request
+}
+
+impl BuildReason {
+	pub fn parent(&self) -> Option<ActiveBuildToken> {
+		match self {
+			BuildReason::Dependency(p) => Some(*p),
+			BuildReason::Explicit => None,
+		}
+	}
 }
 
 pub struct ModuleCache {
 	pub engine: Engine,
 	pub modules: HashMap<String, Module>,
-	// root_module: String,
-	// targets: Vec<Target>,
-	// root_project: Project,
 }
 
 impl ModuleCache {
@@ -47,26 +74,30 @@ impl ModuleCache {
 pub struct Project {
 	module_cache: ModuleCache,
 	build_cache: DepStore,
+	active_tasks: HashMap<ActiveBuildToken, DepSet>,
 	module_path: String,
 	targets: Vec<Target>,
-	self_ref: ProjectRef,
+	self_ref: Option<ProjectRef>,
 }
 
 impl Project {
 	pub fn new(module_cache: ModuleCache, module_path: String) -> Result<ProjectRef> {
-		let mock_project_ref: ProjectRef = unsafe { std::mem::transmute([0 as u8; std::mem::size_of::<ProjectRef>()]) };
 		let project = MutexRef::new(Project {
 			build_cache: DepStore::new(),
-			// CORRECTNESS: we must populate `project_ref` before using it
+			active_tasks: Default::default(),
+			module_cache,
+			module_path: module_path.clone(),
+			self_ref: None,
+
 			// CORRECTNESS: we must populate `targets` before running any code which might call `build`
-			module_cache, module_path: module_path.clone(), targets: Vec::new(),
-			self_ref: mock_project_ref,
+			// TODO can we inject a lazy node so we don't have to eagerly load this?
+			targets: Vec::new(),
 		});
 
 		// lock the project to populate self_ref (first) and then targets
 		let mut handle = project.handle();
 		let mut inner = handle.lock("load_module")?;
-		inner.self_ref = project.clone();
+		inner.self_ref = Some(project.clone());
 
 		let mut module = Self::load_module_inner(&mut inner, module_path)?;
 		inner.targets = module.state.get_targets(&mut module.store)?;
@@ -79,7 +110,7 @@ impl Project {
 	}
 
 	pub fn load_module_inner(project: &mut Mutexed<Project>, path: String) -> Result<WasmModule> {
-		let self_ref = project.self_ref.clone();
+		let self_ref = project.self_ref.clone().unwrap();
 		let module_cache = &mut project.module_cache;
 
 		// TODO can we get away with not cloning yet? It's pointless if the module is loaded
@@ -186,45 +217,86 @@ impl Project {
 				// TODO dependency response for a plain file, unless we explicitly requested a build
 				// TODO lookup current state in cache
 				if let Some(direct) = project.target(name)? {
-					match reason {
-						BuildReason::Dependency => {
-							println!("# {}", name);
-							// TODO we're building every buildable all the time. We should first
-							// recurse over _it's_ dependencies to see if any of them cause us to need a rebuild.
+					println!("# {}", name);
+					// TODO we're building every buildable all the time. We should first
+					// recurse over _it's_ dependencies to see if any of them cause us to need a rebuild.
 	
-							let direct = direct.clone(); // relive borrow on project since we got this from project.targets.iter()
-							
-							// TODO don't use root_module, track which module the target was defined in
-							let build_module_path = direct.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
+					let direct = direct.clone(); // relive borrow on project since we got this from project.targets.iter()
+					
+					// TODO don't use root_module, track which module the target was defined in
+					let build_module_path = direct.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
 
-							let mut wasm_module = Self::load_module_inner(&mut project, build_module_path)?;
+					let mut wasm_module = Self::load_module_inner(&mut project, build_module_path)?;
 
-							let mut project_handle = project.unlock();
+					let mut project_handle = project.unlock();
 
-							wasm_module.state.run_builder(&mut wasm_module.store, name, &direct, &project_handle)?;
-							// TODO: check checksum if present?
-							
-							let project = project_handle.lock("build#Dependency")?;
-							project.build_cache.update_file(name, todo!())?;
-							Ok(BuildResult::Changed(DependencyResponse::Unit))
-						},
+					let build_token = ActiveBuildToken::generate();
+					let built = wasm_module.state.run_builder(&mut wasm_module.store, build_token, name, &direct, &project_handle)?;
+					// TODO: check checksum if present?
+					
+					let mut project = project_handle.lock("build#Dependency")?;
+					project.save_build_result(SaveBuildResult {
+						build_token: Some(build_token),
+						parent: reason.parent(),
+						result: EvaluatedDependency::File(EvaluatedFileDependency {
+							request: name.to_owned(),
+							persist: built,
+						}),
+					})?;
+					Ok(BuildResult::Changed(DependencyResponse::Unit))
+				} else {
+					match reason {
 						BuildReason::Explicit => {
 							return Err(anyhow!("Not a buildable target: {}", name))
 						},
+						BuildReason::Dependency(parent) => {
+							let current = PersistFile::from_stat(fs::symlink_metadata(name)?)?;
+							project.save_build_result(SaveBuildResult {
+								parent: Some(parent),
+								build_token: None,
+								result: EvaluatedDependency::File(EvaluatedFileDependency {
+									request: name.to_owned(),
+									persist: Some(current),
+								}),
+							})?;
+							// TODO suppress based on whether it matches the cached state?
+							Ok(BuildResult::Changed(DependencyResponse::Unit))
+						},
 					}
-				} else {
-					if let Some(cached) = project.build_cache.lookup_file(name)? {
-						let current = PersistFile::from_stat(fs::symlink_metadata(name)?)?;
-						// TODO checksum
-						if &current == cached {
-							return Ok(BuildResult::Unchanged(DependencyResponse::Unit))
-						}
-					}
-					Ok(BuildResult::Changed(DependencyResponse::Unit))
 				}
 			},
 
 			other => todo!("unhandled request: {:?}", other),
 		}
 	}
+	
+	// Called after every target build, to update both (a) the in-memory understanding of what the parent
+	// task depends on, and (b) the persistent cache of built results.
+	fn save_build_result(&mut self, store: SaveBuildResult) -> Result<()> {
+		// Firstly, if there's a parent build token, it registers this dependency (& result) into that build.
+		if let Some(parent) = store.parent {
+			let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(|| Default::default());
+			parent_dep_set.deps.push(store.result.to_owned());
+		}
+		
+		// secondly, collect any deps which were registered as this build's children:
+		let dep_set = store.build_token.and_then(|token| self.active_tasks.remove(&token));
+
+		// And finally, store the built result of this target
+		match &store.result {
+			EvaluatedDependency::File(file) => {
+				let EvaluatedFileDependency { request, persist } = file;
+				self.build_cache.update_file(request, persist, dep_set)?;
+			},
+			EvaluatedDependency::TODO => todo!(),
+		}
+
+		Ok(())
+	}
+}
+
+struct SaveBuildResult {
+	parent: Option<ActiveBuildToken>,
+	build_token: Option<ActiveBuildToken>,
+	result: EvaluatedDependency,
 }

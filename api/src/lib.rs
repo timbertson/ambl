@@ -8,7 +8,6 @@ pub use trou_common::ffi::*;
 use serde::de::DeserializeOwned;
 use anyhow::*;
 
-
 // used to detect incompatible guest modules
 #[no_mangle]
 pub extern "C" fn trou_api_version() -> usize {
@@ -45,14 +44,15 @@ pub struct TargetCtx(RawTargetCtx);
 
 // needs to be in this crate to depend on trou_invoke
 impl TargetCtx {
-	pub fn new(target: String) -> Self {
-		Self(RawTargetCtx::new(target))
+	pub fn new(target: String, token: u32) -> Self {
+		Self(RawTargetCtx::new(target, token))
 	}
 
 	pub fn target(&self) -> &str { &self.0.target }
 
-	pub fn invoke<'de, Response: DeserializeOwned>(call: DependencyRequest) -> Result<Response> {
-		let buf = serde_json::to_vec(&call)?;
+	pub fn invoke<'de, Response: DeserializeOwned>(&self, request: DependencyRequest) -> Result<Response> {
+		let tagged = TaggedDependencyRequest { token: self.0.token, request };
+		let buf = serde_json::to_vec(&tagged)?;
 		let mut response = SizedPtr::empty();
 		let response_slice = unsafe {
 			trou_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
@@ -65,6 +65,6 @@ impl TargetCtx {
 
 	// invoke shortcuts
 	pub fn build<S: Into<String>>(&self, path: S) -> Result<DependencyResponse> {
-		Self::invoke(DependencyRequest::FileDependency(path.into()))
+		self.invoke(DependencyRequest::FileDependency(path.into()))
 	}
 }

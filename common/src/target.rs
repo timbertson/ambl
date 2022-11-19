@@ -13,12 +13,14 @@ impl BaseCtx {
 #[derive(Serialize, Deserialize)]
 pub struct RawTargetCtx {
 	pub target: String,
+	pub token: u32,
 }
 
 impl RawTargetCtx {
-	pub fn new(target: String) -> Self {
+	pub fn new(target: String, token: u32) -> Self {
 		Self {
 			target,
+			token,
 		}
 	}
 }
