@@ -15,7 +15,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::target::{Target, DirectTarget, RawTargetCtx, BaseCtx};
 use wasmtime::*;
 
-use crate::persist::{BuildResult, Cached, DepStore, PersistFile, EvaluatedDependency, DepSet, EvaluatedFileDependency};
+use crate::persist::*;
 use crate::sync::{MutexRef, Mutexed, MutexHandle};
 use crate::{wasm::WasmModule, sync::lock_failed};
 
@@ -159,62 +159,63 @@ impl Project {
 	    and return whether it is semantically different (e.g. produces a different checksum)
 	
 	The result contains a DependencyResponse whenever we have it, i.e when we rebuilt the value
+	
+
+
+	There are two types of staleness to consider:
+	1. the thing needs to be rebuilt
+	2. the thing does not need rebuilding, but has changed.
+	   - plain files, envvar etc
+	   - targets which have been built more recently than the parent target
+	
+	This is the build function, it only builds the _child_. However it also returns the latest
+	state of that child. This latest state may be cached (if it doesn't need rebuilding), or
+	it may be freshly minted (for a plain file / envvar etc).
+
+	Whether the _parent_ target needs rebuilding is the responsibility of the build function for that
+	parent. Basically, it iterates over all previous dependencies. It builds all of those, and if
+	the result differs from the cached result then it rebuilds the whole parent.
+	
+	NOTE: gup doesn't actively rebuild the child, it instead returns "is dirty". But if for each target we
+	run builds in the same order they were referenced, then there should be no difference in practice?
+	This might change if we evaluate deps in parallel. But even then, it can probably work. We'd just have to make sure
+	that speculatively-evaluated dep failures cause the parent to rebuild, not to fail.
 	*/
-	// pub fn build(project: &mut Mutexed<Project>, request: DependencyRequest, reason: BuildReason) -> Result<BuildResult<DependencyResponse>> {
 
-	// 	// TODO should we keep projectand pass it to build_inner?
-	// 	let project_ref = project.unlock();
-	// 	let update = Self::build_inner(project_ref, request, cached, reason)?;
-	// }
-
-	pub fn build(mut project: Mutexed<Project>,
-		request: DependencyRequest,
-		reason: BuildReason) -> Result<BuildResult<DependencyResponse>> {
-
-		// let cached: Option<&Persist> = project.build_cache.lookup(&request)?.to_owned();
+	pub fn build<'a>(mut project: Mutexed<'a, Project>,
+		request: &DependencyRequest,
+		reason: BuildReason,
+	) -> Result<(Mutexed<'a, Project>, Persist)> {
 
 		match &request {
 			// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
 			DependencyRequest::EnvVar(key) => {
-				let current_value = std::env::var(key)?;
-				let cached = project.build_cache.lookup_env(&key)?;
-				if cached == Some(&current_value) {
-					Ok(BuildResult::Unchanged(DependencyResponse::Str(current_value)))
-				} else {
-					project.build_cache.update_env(&key, &current_value)?;
-					Ok(BuildResult::Changed(DependencyResponse::Str(current_value)))
-				}
+				Ok((project, Persist::Env(PersistEnv(std::env::var(key)?))))
 			},
-			DependencyRequest::Universe => Ok(BuildResult::Changed(DependencyResponse::Unit)),
+			DependencyRequest::Universe => Ok((project, Persist::Unit)),
 
 			// TODO: is it possible this wasm call wouldn't be required by the latest version of
 			// the build function? If we always evaluate things in sequence order then probably not,
 			// but if we parallelize then it's possible that some earlier input will change, causing
 			// this wasm call to not be made, or be made with different arguments.
 			DependencyRequest::WasmCall(spec) => {
-				let cached = project.build_cache.lookup_wasm(&spec)?;
-				if let Some(cached) = cached.filter(|c| &c.spec == spec) {
-					Ok(BuildResult::Unchanged(DependencyResponse::Str(cached.result.to_owned())))
-				} else {
-					// This should be made impossible via types but I don't want to duplicate DependencyRequest yet
-					let module_path = spec.module.to_owned().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
+				// This should be made impossible via types but I don't want to duplicate DependencyRequest yet
+				let module_path = spec.module.to_owned().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
 
-					let mut module = Self::load_module_inner(&mut project, module_path)?;
-					
-					let mut project_handle = project.unlock();
+				let mut module = Self::load_module_inner(&mut project, module_path)?;
+				
+				let result = project.unlocked_block(|project_handle| {
+					// TODO wasm calls can be cached. This requires tracking the inputs to the wasm call, mainly the module itself.
+					module.state.call_fn(&mut module.store, spec, &project_handle)
+				})?;
+				let persist = Persist::Wasm(PersistWasmCall { spec: spec.to_owned(), result });
 
-					let result = module.state.call_fn(&mut module.store, spec, &project_handle)?;
-					// TODO should we cache negative results? We can't tell, it's an opaque string!
-					let project = project_handle.lock("build#WasmCall")?;
-					project.build_cache.update_wasm(spec, &result)?;
-					Ok(BuildResult::Changed(DependencyResponse::Str(result)))
-				}
+				Ok((project, persist))
 			},
 
 			DependencyRequest::FileDependency(name) => {
 				debug!("Processing: {:?}", name);
 				
-				// TODO dependency response for a plain file, unless we explicitly requested a build
 				// TODO lookup current state in cache
 				if let Some(direct) = project.target(name)? {
 					println!("# {}", name);
@@ -222,45 +223,71 @@ impl Project {
 					// recurse over _it's_ dependencies to see if any of them cause us to need a rebuild.
 	
 					let direct = direct.clone(); // relive borrow on project since we got this from project.targets.iter()
-					
+
+					let build_token = ActiveBuildToken::generate();
+
+					// iterate over all stored dependencies
+					// to_owned here is to relieve the borrow on project
+					let cached = project.build_cache.lookup(&request)?.and_then(|p| p.as_target()).map(|p| p.to_owned());
+					if let Some(cached) = cached {
+						let mut needs_build = false;
+
+						// TODO ideally we could thread through the project mutex, but that sounds hard. For now, just release it and let
+						// each dependency re-lock it
+						let project_handle = project.self_ref.clone().unwrap();
+						// let mut unlocked = project.unlock();
+
+						for (dep_req, dep_cached) in cached.deps.deps.iter() {
+							let reason = BuildReason::Dependency(build_token);
+							
+							// always build the dep (which will be immediate it's cached and doesn't need rebuilding)
+							let (project_ret, dep_latest) = Self::build(project, dep_req, reason)?;
+							project = project_ret;
+							
+							// if the result differs from what this target was based on, rebuild this target
+							if dep_latest.is_changed_since(dep_cached) {
+								needs_build = true;
+								break;
+							}
+						}
+						if !needs_build {
+							return Ok((project, Persist::Target(cached)))
+						}
+					};
+
 					// TODO don't use root_module, track which module the target was defined in
 					let build_module_path = direct.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
 
 					let mut wasm_module = Self::load_module_inner(&mut project, build_module_path)?;
 
-					let mut project_handle = project.unlock();
+					let built = project.unlocked_block(|project_handle| {
+						wasm_module.state.run_builder(&mut wasm_module.store, build_token, name, &direct, &project_handle)
+					})?;
 
-					let build_token = ActiveBuildToken::generate();
-					let built = wasm_module.state.run_builder(&mut wasm_module.store, build_token, name, &direct, &project_handle)?;
-					// TODO: check checksum if present?
-					
-					let mut project = project_handle.lock("build#Dependency")?;
+					// let mut project = project_handle.lock("build#Dependency")?;
+					let result = Persist::File(built);
 					project.save_build_result(SaveBuildResult {
 						build_token: Some(build_token),
 						parent: reason.parent(),
-						result: EvaluatedDependency::File(EvaluatedFileDependency {
-							request: name.to_owned(),
-							persist: built,
-						}),
+						request: &request,
+						result: &result
 					})?;
-					Ok(BuildResult::Changed(DependencyResponse::Unit))
+					Ok((project, result))
 				} else {
 					match reason {
 						BuildReason::Explicit => {
 							return Err(anyhow!("Not a buildable target: {}", name))
 						},
 						BuildReason::Dependency(parent) => {
-							let current = PersistFile::from_stat(fs::symlink_metadata(name)?)?;
+							// treat it as a source file
+							let result = Persist::File(Some(PersistFile::from_stat(fs::symlink_metadata(name)?)?));
 							project.save_build_result(SaveBuildResult {
 								parent: Some(parent),
 								build_token: None,
-								result: EvaluatedDependency::File(EvaluatedFileDependency {
-									request: name.to_owned(),
-									persist: Some(current),
-								}),
+								request: &request,
+								result: &result,
 							})?;
-							// TODO suppress based on whether it matches the cached state?
-							Ok(BuildResult::Changed(DependencyResponse::Unit))
+							Ok((project, result))
 						},
 					}
 				}
@@ -276,27 +303,21 @@ impl Project {
 		// Firstly, if there's a parent build token, it registers this dependency (& result) into that build.
 		if let Some(parent) = store.parent {
 			let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(|| Default::default());
-			parent_dep_set.deps.push(store.result.to_owned());
+			parent_dep_set.add(store.request.to_owned(), store.result.to_owned());
 		}
 		
 		// secondly, collect any deps which were registered as this build's children:
 		let dep_set = store.build_token.and_then(|token| self.active_tasks.remove(&token));
 
 		// And finally, store the built result of this target
-		match &store.result {
-			EvaluatedDependency::File(file) => {
-				let EvaluatedFileDependency { request, persist } = file;
-				self.build_cache.update_file(request, persist, dep_set)?;
-			},
-			EvaluatedDependency::TODO => todo!(),
-		}
-
+		self.build_cache.update(store.request, &store.result, dep_set)?;
 		Ok(())
 	}
 }
 
-struct SaveBuildResult {
+struct SaveBuildResult<'a> {
 	parent: Option<ActiveBuildToken>,
 	build_token: Option<ActiveBuildToken>,
-	result: EvaluatedDependency,
+	request: &'a DependencyRequest,
+	result: &'a Persist,
 }

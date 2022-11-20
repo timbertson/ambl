@@ -74,10 +74,10 @@ impl<T> Clone for MutexRef<T> {
 pub struct MutexHandle<T>(Arc<Mutex<T>>);
 
 impl<T> MutexHandle<T> {
-	pub fn lock(&mut self, desc: &'static str) -> Result<Mutexed<'_, T>> {
+	pub fn lock<'a>(&'a mut self, desc: &'static str) -> Result<Mutexed<'a, T>> {
 		let arc = Arc::clone(&self.0);
 		let guard: MutexGuard<T> = self.0.lock().map_err(|_| lock_failed(desc))?;
-		Ok(Mutexed { arc, guard })
+		Ok(Mutexed { arc, guard: Some(guard) })
 	}
 }
 
@@ -86,13 +86,32 @@ impl<T> MutexHandle<T> {
 // the callee to be able to release it, or by ref otherwise
 pub struct Mutexed<'a, T> {
 	arc: Arc<Mutex<T>>,
-	guard: MutexGuard<'a, T>,
+	guard: Option<MutexGuard<'a, T>>, // only set to None during unlocked_block
 }
 
 impl<'a, T> Mutexed<'a, T> {
 	pub fn unlock(self) -> MutexHandle<T> {
 		// drops self.guard
 		MutexHandle(self.arc)
+	}
+
+	// unlock this mutex for the duration of a block. This is needed because otherwise users run into
+	// lifetime issues when they need to re-lock the mutex without altering the lifetime.
+	pub fn unlocked_block<'b, R, F: FnOnce(&mut MutexHandle<T>) -> Result<R>>(&'b mut self, f: F) -> Result<R> {
+		self.guard = None; // drops guard
+
+		// Correctness: the following code either resets self.guard to Some, or it panics
+		let mut unlocked = MutexHandle(Arc::clone(&self.arc));
+		let result = f(&mut unlocked);
+		drop(unlocked);
+		let reacquired = self.arc.lock().expect("failed to reacquire lock in unlocked_block");
+
+		// Correctness: the 'b lifetime we have may be shorter than 'a. HOWEVER, it's guaranteed that
+		// the underlying lock _will_ live for a, since there exists a reference to the mutex with lifetime 'a.
+		self.guard = Some(unsafe {
+			std::mem::transmute::<MutexGuard<'b, T>, MutexGuard<'a, T>>(reacquired) as MutexGuard<'a, T>
+		});
+		result
 	}
 	
 	// pub fn add_ref(&mut self) -> MutexRef<T> {
@@ -104,13 +123,13 @@ impl<'a, T> Deref for Mutexed<'a, T> {
 	type Target = MutexGuard<'a, T>;
 
 	fn deref(&self) -> &Self::Target {
-		&self.guard
+		self.guard.as_ref().expect("guard is None")
 	}
 }
 
 
 impl<'a, T> DerefMut for Mutexed<'a, T> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
-		&mut self.guard
+		self.guard.as_mut().expect("guard is None")
 	}
 }

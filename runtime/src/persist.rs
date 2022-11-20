@@ -13,98 +13,6 @@ pub enum Cached<T> {
 	Fresh(T), // definitely fresh
 }
 
-// We store all persisted values as String, to avoid generics.
-// TODO some kind of run-time object so we don't need to re-parse?
-// pub enum PersistVal {
-// 	String(String),
-// 	Serialized(String)
-// }
-// impl PersistVal {
-// 	pub fn serialize<T: Serialize>(t: &T) -> Result<Self> {
-// 		Ok(Self::Serialized(serde_json::to_string(t)?))
-// 	}
-// }
-
-// pub struct Persist {
-// 	key: PersistVal,
-// 	value: Option<PersistVal>,
-// }
-
-// impl Persist {
-// 	pub fn key(key: PersistVal) -> Self { Self { key, value: None } }
-// 	pub fn string_key(key: String) -> Self { Self { key: PersistVal::String(key), value: None } }
-
-// 	pub fn kv_serialized_both(key: String, value: String) -> Self {
-// 		Self {
-// 			key: PersistVal::Serialized(key),
-// 			value: Some(PersistVal::Serialized(value)),
-// 		}
-// 	}
-// }
-
-// pub trait PersistEq {
-// 	fn key_eq_string(&self, other: &str) -> bool;
-// 	fn key_eq_serialized(&self, other: &str) -> bool;
-// 	fn key_eq_serialized_both(&self, other: &str) -> Option<&str>;
-// 	fn get_serialized_key(&self) -> Option<&str>;
-// }
-
-// impl<'a> PersistEq for Option<&'a Persist> {
-// 	fn key_eq_string(&self, other: &str) -> bool {
-// 		if let Some(p) = self {
-// 			p.key_eq_string(other)
-// 		} else {
-// 			false
-// 		}
-// 	}
-
-// 	fn key_eq_serialized(&self, other: &str) -> bool {
-// 		if let Some(p) = self {
-// 			p.key_eq_serialized(other)
-// 		} else {
-// 			false
-// 		}
-// 	}
-
-// 	fn key_eq_serialized_both(&self, other: &str) -> Option<&str> {
-// 		self.as_ref().and_then(|p| p.key_eq_serialized_both(other))
-// 	}
-
-// 	fn get_serialized_key(&self) -> Option<&str> {
-// 		self.as_ref().and_then(|p| p.get_serialized_key())
-// 	}
-// }
-
-// impl PersistEq for Persist {
-// 	fn key_eq_string(&self, other: &str) -> bool {
-// 		match &self.key {
-// 			PersistVal::Serialized(_) => false,
-// 			PersistVal::String(s) => s == other,
-// 		}
-// 	}
-	
-// 	fn key_eq_serialized(&self, other: &str) -> bool {
-// 		self.get_serialized_key() == Some(other)
-// 	}
-
-// 	// return the serialized value if the serialized key matches
-// 	fn key_eq_serialized_both(&self, other: &str) -> Option<&str> {
-// 		match (&self.key, &self.value) {
-// 			(PersistVal::Serialized(k), Some(PersistVal::Serialized(v))) if k == other => {
-// 				Some(&v)
-// 			},
-// 			_ => None,
-// 		}
-// 	}
-
-// 	fn get_serialized_key(&self) -> Option<&str> {
-// 		match &self.key {
-// 			PersistVal::Serialized(s) => Some(s),
-// 			PersistVal::String(_) => None,
-// 		}
-// 	}
-// }
-
 pub enum BuildResult<T> {
 	Changed(T),
 	Unchanged(T),
@@ -117,6 +25,12 @@ impl<T> BuildResult<T> {
 			Self::Unchanged(t) => t,
 		}
 	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PersistTarget {
+	pub file: PersistFile,
+	pub deps: DepSet,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,6 +52,9 @@ impl PersistFile {
 		}
 	}
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistEnv(pub String);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistWasmCall {
@@ -163,56 +80,101 @@ impl DepStore {
 			env_cache: Default::default(),
 		}
 	}
-
-	pub fn lookup_file(&self, request: &str) -> Result<Option<&PersistFile>> {
+	
+	// TODO which things have deps? Only FileDeps? Should there be another ADT which distinguishes targets from files?
+	// Or should we just store empty depsets and not worry about coherence?
+	pub fn update(&mut self, request: &DependencyRequest, persist: &Persist, dep_set: Option<DepSet>) -> Result<()> {
 		todo!()
 	}
 
-	pub fn lookup_env(&self, request: &str) -> Result<Option<&str>> {
+	pub fn lookup(&self, request: &DependencyRequest) -> Result<Option<&Persist>> {
 		todo!()
 	}
 
-	pub fn lookup_wasm(&self, request: &FunctionSpec) -> Result<Option<&PersistWasmCall>> {
-		todo!()
-	}
+	// pub fn lookup_env(&self, request: &str) -> Result<Option<&str>> {
+	// 	todo!()
+	// }
 
-	pub fn update_file(&self, request: &str, persist: &Option<PersistFile>, deps: Option<DepSet>) -> Result<()> {
-		info!("TODO: update file {:?}, {:?}, {:?}", request, persist, deps);
-		todo!()
-	}
+	// pub fn lookup_wasm(&self, request: &FunctionSpec) -> Result<Option<&PersistWasmCall>> {
+	// 	todo!()
+	// }
 
-	pub fn update_env(&self, request: &str, persist: &str) -> Result<()> {
-		todo!()
-	}
+	// pub fn update_file(&self, request: &str, persist: &Option<PersistFile>, deps: Option<DepSet>) -> Result<()> {
+	// 	info!("TODO: update file {:?}, {:?}, {:?}", request, persist, deps);
+	// 	todo!()
+	// }
 
-	pub fn update_wasm(&self, request: &FunctionSpec, persist: &str) -> Result<()> {
-		todo!()
-	}
+	// pub fn update_env(&self, request: &str, persist: &str) -> Result<()> {
+	// 	todo!()
+	// }
+
+	// pub fn update_wasm(&self, request: &FunctionSpec, persist: &str) -> Result<()> {
+	// 	todo!()
+	// }
 }
 
-// An evaluated dependency captures the request + result of a dependency
-// at a particular point in time.
-// This is persisted for target dependencies, so that we can reuse
-// the response if the request is unchanged.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvaluatedFileDependency {
-	pub request: String,
-	pub persist: Option<PersistFile>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Persist {
+	File(Option<PersistFile>),
+	Target(PersistTarget),
+	Env(PersistEnv),
+	Wasm(PersistWasmCall),
+	Unit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-// TODO rename just BuiltTarget or something?
-// What is this, does it serve exactly the same purpose as PersistFile?
-pub enum EvaluatedDependency {
-	File(EvaluatedFileDependency),
-	TODO, // TODO env etc
+impl Persist {
+	pub fn as_env(&self) -> Option<&PersistEnv> {
+		todo!()
+	}
+
+	pub fn as_wasm_call(&self) -> Option<&PersistWasmCall> {
+		todo!()
+	}
+
+	pub fn as_target(&self) -> Option<&PersistTarget> {
+		match &self {
+			Persist::Target(f) => Some(f),
+			_ => None,
+		}
+	}
+
+	pub fn as_file(&self) -> Option<&PersistFile> {
+		match self {
+			Persist::File(f) => f.as_ref(),
+			_ => None,
+		}
+	}
+
+	pub fn into_response(self) -> DependencyResponse {
+		todo!()
+	}
+
+	pub fn is_changed_since(&self, prior: &Self) -> bool {
+		todo!()
+	}
 }
 
 // the in-memory struct to collect deps during the build of a target.
 // it's stored in Project, keyed by ActiveBuildToken
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepSet {
-	pub deps: Vec<EvaluatedDependency>,
+	pub deps: HashMap<DependencyRequest, Persist>,
+}
+
+impl DepSet {
+	pub fn add(&mut self, request: DependencyRequest, result: Persist) {
+		self.deps.insert(request, result);
+	}
+
+	pub fn lookup(&self, request: &DependencyRequest) -> Option<&Persist> {
+		self.deps.iter().find_map(|(key, dep)| {
+			if key == request {
+				Some(dep)
+			} else {
+				None
+			}
+		})
+	}
 }
 
 impl Default for DepSet {

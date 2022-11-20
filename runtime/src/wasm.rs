@@ -225,7 +225,8 @@ impl WasmModule {
 				let mut project_handle = project.handle();
 				let project = project_handle.lock("trou_invoke")?;
 				let TaggedDependencyRequest { token, request } = request;
-				Ok(Project::build(project, request, BuildReason::Dependency(ActiveBuildToken::from_raw(token)))?.raw())
+				let (_, persist) = Project::build(project, &request, BuildReason::Dependency(ActiveBuildToken::from_raw(token)))?;
+				Ok(persist.into_response())
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {
