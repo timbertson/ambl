@@ -41,7 +41,7 @@ impl ActiveBuildToken {
 	}
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum BuildReason {
 	Dependency(ActiveBuildToken),
 
@@ -83,7 +83,7 @@ pub struct Project {
 impl Project {
 	pub fn new(module_cache: ModuleCache, module_path: String) -> Result<ProjectRef> {
 		let project = MutexRef::new(Project {
-			build_cache: DepStore::new(),
+			build_cache: DepStore::load(),
 			active_tasks: Default::default(),
 			module_cache,
 			module_path: module_path.clone(),
@@ -109,6 +109,7 @@ impl Project {
 		Self::load_module_inner(&mut inner, path)
 	}
 
+	// TODO: this should auto-build any requested module
 	pub fn load_module_inner(project: &mut Mutexed<Project>, path: String) -> Result<WasmModule> {
 		let self_ref = project.self_ref.clone().unwrap();
 		let module_cache = &mut project.module_cache;
@@ -146,21 +147,11 @@ impl Project {
 			}
 		}).next();
 
-		debug!("found target for {}: {:?}", name, target);
+		debug!("target for {}: {:?}", name, target);
 		Ok(target)
 	}
 
-	/* Build this dependency if necessary.
-	Possile outcomes:
-	- the dep is clearly dirty (e.g. input file modified or checksum differs)
-	- the dep is clearly clean (unchanged)
-	- the dep _might_ be dirty (e.g. some inputs have changed, but there's a cut-point of a wasm call or checksum).
-	    In this case we rebuild the dependency,
-	    and return whether it is semantically different (e.g. produces a different checksum)
-	
-	The result contains a DependencyResponse whenever we have it, i.e when we rebuilt the value
-	
-
+	/* Build this dependency and return its persistable result
 
 	There are two types of staleness to consider:
 	1. the thing needs to be rebuilt
@@ -168,8 +159,8 @@ impl Project {
 	   - plain files, envvar etc
 	   - targets which have been built more recently than the parent target
 	
-	This is the build function, it only builds the _child_. However it also returns the latest
-	state of that child. This latest state may be cached (if it doesn't need rebuilding), or
+	This is the build function, it only builds the requested thing. However it also returns the latest
+	state of that thing. This latest state may be cached (if it doesn't need rebuilding), or
 	it may be freshly minted (for a plain file / envvar etc).
 
 	Whether the _parent_ target needs rebuilding is the responsibility of the build function for that
@@ -192,7 +183,7 @@ impl Project {
 			DependencyRequest::EnvVar(key) => {
 				Ok((project, Persist::Env(PersistEnv(std::env::var(key)?))))
 			},
-			DependencyRequest::Universe => Ok((project, Persist::Unit)),
+			DependencyRequest::Universe => Ok((project, Persist::AlwaysDirty)),
 
 			// TODO: is it possible this wasm call wouldn't be required by the latest version of
 			// the build function? If we always evaluate things in sequence order then probably not,
@@ -224,23 +215,18 @@ impl Project {
 	
 					let direct = direct.clone(); // relive borrow on project since we got this from project.targets.iter()
 
-					let build_token = ActiveBuildToken::generate();
-
 					// iterate over all stored dependencies
 					// to_owned here is to relieve the borrow on project
 					let cached = project.build_cache.lookup(&request)?.and_then(|p| p.as_target()).map(|p| p.to_owned());
 					if let Some(cached) = cached {
 						let mut needs_build = false;
 
-						// TODO ideally we could thread through the project mutex, but that sounds hard. For now, just release it and let
-						// each dependency re-lock it
-						let project_handle = project.self_ref.clone().unwrap();
-						// let mut unlocked = project.unlock();
+						let speculative_build_token = ActiveBuildToken::generate();
+						let reason = BuildReason::Dependency(speculative_build_token);
 
-						for (dep_req, dep_cached) in cached.deps.deps.iter() {
-							let reason = BuildReason::Dependency(build_token);
+						for (dep_req, dep_cached) in cached.deps.iter() {
 							
-							// always build the dep (which will be immediate it's cached and doesn't need rebuilding)
+							// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
 							let (project_ret, dep_latest) = Self::build(project, dep_req, reason)?;
 							project = project_ret;
 							
@@ -250,13 +236,28 @@ impl Project {
 								break;
 							}
 						}
+
+						// drop any deps accumulated by this speculative building
+						project.collect_deps(speculative_build_token);
+
 						if !needs_build {
 							return Ok((project, Persist::Target(cached)))
 						}
 					};
 
-					// TODO don't use root_module, track which module the target was defined in
+					let build_token = ActiveBuildToken::generate();
+					debug!("created build token {:?} for {:?}", build_token, &request);
+					let reason = BuildReason::Dependency(build_token);
+
+					// TODO don't use project.module_path, track which module the target was defined in
 					let build_module_path = direct.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
+
+					// First, mark the module itself as a dependency.
+					// TODO need to enforce a project-rooted path, not an abspath
+					let module_request = DependencyRequest::FileDependency(build_module_path.clone());
+					let (project_ret, module_built) = Self::build(project, &module_request, reason)?;
+					project = project_ret;
+					project.register_dependency(reason.parent(), &module_request, &module_built);
 
 					let mut wasm_module = Self::load_module_inner(&mut project, build_module_path)?;
 
@@ -264,16 +265,18 @@ impl Project {
 						wasm_module.state.run_builder(&mut wasm_module.store, build_token, name, &direct, &project_handle)
 					})?;
 
-					// let mut project = project_handle.lock("build#Dependency")?;
-					let result = Persist::File(built);
+					let result = Persist::Target(PersistTarget {
+						file: built,
+						deps: project.collect_deps(build_token),
+					});
 					project.save_build_result(SaveBuildResult {
-						build_token: Some(build_token),
 						parent: reason.parent(),
 						request: &request,
 						result: &result
 					})?;
 					Ok((project, result))
 				} else {
+					debug!("Not a buildable target: {:?}", &request);
 					match reason {
 						BuildReason::Explicit => {
 							return Err(anyhow!("Not a buildable target: {}", name))
@@ -283,7 +286,6 @@ impl Project {
 							let result = Persist::File(Some(PersistFile::from_stat(fs::symlink_metadata(name)?)?));
 							project.save_build_result(SaveBuildResult {
 								parent: Some(parent),
-								build_token: None,
 								request: &request,
 								result: &result,
 							})?;
@@ -300,24 +302,45 @@ impl Project {
 	// Called after every target build, to update both (a) the in-memory understanding of what the parent
 	// task depends on, and (b) the persistent cache of built results.
 	fn save_build_result(&mut self, store: SaveBuildResult) -> Result<()> {
-		// Firstly, if there's a parent build token, it registers this dependency (& result) into that build.
-		if let Some(parent) = store.parent {
-			let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(|| Default::default());
-			parent_dep_set.add(store.request.to_owned(), store.result.to_owned());
-		}
-		
-		// secondly, collect any deps which were registered as this build's children:
-		let dep_set = store.build_token.and_then(|token| self.active_tasks.remove(&token));
+		let SaveBuildResult { request, result, parent } = store;
 
-		// And finally, store the built result of this target
-		self.build_cache.update(store.request, &store.result, dep_set)?;
+		// Firstly, if there's a parent build token, it registers this dependency (& result) into that build.
+		self.register_dependency(parent, request, result);
+		
+		// Store the built result of this target
+		self.build_cache.update(request.to_owned(), result.to_owned())?;
 		Ok(())
+	}
+
+	fn collect_deps(&mut self, token: ActiveBuildToken) -> DepSet {
+		let collected = self.active_tasks.remove(&token).unwrap_or_else(Default::default);
+		debug!("Collected {:?} deps for token {:?}", collected.len(), token);
+		collected
+	}
+
+	// we just built something as requested, register it as a dependency on the parent target
+	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, request: &DependencyRequest, result: &Persist) {
+		if let Some(parent) = parent {
+			// For targets we don't need to store the full dependency state, only the file.
+			// TODO enforce this via types?
+			let result = match result {
+				Persist::Target(target) => Persist::File(target.file.to_owned()),
+				other => other.to_owned(),
+			};
+			debug!("registering dependency {:?} against build {:?} (result: {:?}", &request, parent, &result);
+
+			let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(Default::default);
+			parent_dep_set.add(request.to_owned(), result);
+		}
+	}
+	
+	pub fn save(&self) -> Result<()> {
+		self.build_cache.save()
 	}
 }
 
 struct SaveBuildResult<'a> {
 	parent: Option<ActiveBuildToken>,
-	build_token: Option<ActiveBuildToken>,
 	request: &'a DependencyRequest,
 	result: &'a Persist,
 }

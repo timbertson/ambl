@@ -29,7 +29,7 @@ impl<T> BuildResult<T> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistTarget {
-	pub file: PersistFile,
+	pub file: Option<PersistFile>,
 	pub deps: DepSet,
 }
 
@@ -64,53 +64,78 @@ pub struct PersistWasmCall {
 impl PersistWasmCall {
 }
 
+// dumb workaround for JSON only allowing string keys
+#[derive(Serialize, Deserialize)]
+struct DepStorePersist {
+	items: Vec<(DependencyRequest, Persist)>,
+}
+
+impl From<HashMap<DependencyRequest, Persist>> for DepStorePersist {
+	fn from(map: HashMap<DependencyRequest, Persist>) -> Self {
+		Self { items: map.into_iter().collect() }
+	}
+}
+
+impl From<DepStorePersist> for DepStore {
+	fn from(store: DepStorePersist) -> Self {
+		Self { cache: store.items.into_iter().collect() }
+	}
+}
+
+#[derive(Debug)]
 pub struct DepStore {
 	// TODO this assumes strings are reliable keys, but deps can be relative?
 	// Maybe all keys are normalized to project root?
-	file_cache: HashMap<String, Cached<PersistFile>>,
-	wasm_cache: HashMap<FunctionSpec, Cached<PersistWasmCall>>,
-	env_cache: HashMap<String, Cached<String>>,
+	// file_cache: HashMap<String, Cached<PersistFile>>,
+	// wasm_cache: HashMap<FunctionSpec, Cached<PersistWasmCall>>,
+	// env_cache: HashMap<String, Cached<String>>,
+	
+	cache: HashMap<DependencyRequest, Persist>
 }
 
 impl DepStore {
-	pub fn new() -> Self {
-		Self {
-			file_cache: Default::default(),
-			wasm_cache: Default::default(),
-			env_cache: Default::default(),
-		}
+	pub fn load() -> Self {
+		let cache: Result<Option<Self>> = (|| {
+			let contents = match fs::read_to_string(".trou.cache") {
+				Result::Ok(s) => s,
+				Result::Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+				Result::Err(e) => return Err(e.into()),
+			};
+			let cache : DepStorePersist = serde_json::from_str(&contents)?;
+			Ok(Some(cache.into()))
+		})();
+
+		let loaded = cache.unwrap_or_else(|err| {
+			warn!("Unable to load cache: {:?}", err);
+			None
+		});
+
+		debug!("Loaded cache: {:?}", &loaded);
+		loaded.unwrap_or_else(Default::default)
 	}
-	
-	// TODO which things have deps? Only FileDeps? Should there be another ADT which distinguishes targets from files?
-	// Or should we just store empty depsets and not worry about coherence?
-	pub fn update(&mut self, request: &DependencyRequest, persist: &Persist, dep_set: Option<DepSet>) -> Result<()> {
-		todo!()
+
+	pub fn save(&self) -> Result<()> {
+		debug!("Writing cache: {:?}", &self);
+		let persist: DepStorePersist = self.cache.clone().into();
+		let str = serde_json::to_string(&persist).context("serializing build cache")?;
+		Ok(fs::write(".trou.cache", str).context("writing cache file")?)
+	}
+
+	// TODO remove these result types if we don't do IO directly...
+	pub fn update(&mut self, request: DependencyRequest, persist: Persist) -> Result<()> {
+		self.cache.insert(request, persist);
+		Ok(())
 	}
 
 	pub fn lookup(&self, request: &DependencyRequest) -> Result<Option<&Persist>> {
-		todo!()
+		Ok(self.cache.get(request))
 	}
+}
 
-	// pub fn lookup_env(&self, request: &str) -> Result<Option<&str>> {
-	// 	todo!()
-	// }
-
-	// pub fn lookup_wasm(&self, request: &FunctionSpec) -> Result<Option<&PersistWasmCall>> {
-	// 	todo!()
-	// }
-
-	// pub fn update_file(&self, request: &str, persist: &Option<PersistFile>, deps: Option<DepSet>) -> Result<()> {
-	// 	info!("TODO: update file {:?}, {:?}, {:?}", request, persist, deps);
-	// 	todo!()
-	// }
-
-	// pub fn update_env(&self, request: &str, persist: &str) -> Result<()> {
-	// 	todo!()
-	// }
-
-	// pub fn update_wasm(&self, request: &FunctionSpec, persist: &str) -> Result<()> {
-	// 	todo!()
-	// }
+impl Default for DepStore {
+	fn default() -> Self {
+		Self { cache: Default::default() }
+	}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,7 +144,7 @@ pub enum Persist {
 	Target(PersistTarget),
 	Env(PersistEnv),
 	Wasm(PersistWasmCall),
-	Unit,
+	AlwaysDirty,
 }
 
 impl Persist {
@@ -146,11 +171,28 @@ impl Persist {
 	}
 
 	pub fn into_response(self) -> DependencyResponse {
-		todo!()
+		match self {
+			Persist::File(_) => DependencyResponse::Unit,
+			Persist::Target(_) => DependencyResponse::Unit,
+			Persist::Env(env) => DependencyResponse::Str(env.0),
+			Persist::Wasm(wasm) => DependencyResponse::Str(wasm.result),
+			Persist::AlwaysDirty => DependencyResponse::Unit,
+		}
 	}
 
 	pub fn is_changed_since(&self, prior: &Self) -> bool {
-		todo!()
+		match (self, prior) {
+			(_, Persist::Target(_)) => todo!("Impossible? It should not have been stored like this"),
+			(Persist::File(a), Persist::File(b)) => a != b,
+			(Persist::Target(a), Persist::File(b)) => &a.file != b,
+			(Persist::Env(a), Persist::Env(b)) => a != b,
+			(Persist::Wasm(_), Persist::Wasm(_)) => todo!(),
+			(Persist::AlwaysDirty, Persist::AlwaysDirty) => true,
+			other => {
+				debug!("Comparing incompatible persisted dependencies: {:?}", other);
+				true
+			},
+		}
 	}
 }
 
@@ -158,12 +200,20 @@ impl Persist {
 // it's stored in Project, keyed by ActiveBuildToken
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepSet {
-	pub deps: HashMap<DependencyRequest, Persist>,
+	deps: Vec<(DependencyRequest, Persist)>,
 }
 
 impl DepSet {
 	pub fn add(&mut self, request: DependencyRequest, result: Persist) {
-		self.deps.insert(request, result);
+		self.deps.push((request, result));
+	}
+
+	pub fn len(&self) -> usize {
+		self.deps.len()
+	}
+
+	pub fn iter(&self) -> std::slice::Iter<(DependencyRequest, Persist)> {
+		self.deps.iter()
 	}
 
 	pub fn lookup(&self, request: &DependencyRequest) -> Option<&Persist> {
