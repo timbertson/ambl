@@ -1,3 +1,4 @@
+#![allow(unreachable_code)]
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::atomic;
@@ -44,14 +45,15 @@ impl ActiveBuildToken {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum BuildReason {
 	Dependency(ActiveBuildToken),
-
-	Explicit, // explicit user request
+	Internal, // Required for either module load or speculative execution, but not associated with an active build
+	Explicit, // explicit user request, fail if not a target
 }
 
 impl BuildReason {
 	pub fn parent(&self) -> Option<ActiveBuildToken> {
 		match self {
 			BuildReason::Dependency(p) => Some(*p),
+			BuildReason::Internal => None,
 			BuildReason::Explicit => None,
 		}
 	}
@@ -99,18 +101,29 @@ impl Project {
 		let mut inner = handle.lock("load_module")?;
 		inner.self_ref = Some(project.clone());
 
-		let mut module = Self::load_module_inner(&mut inner, module_path)?;
+		let (mut inner, mut module) = Self::load_module_inner(inner, module_path, BuildReason::Internal)?;
 		inner.targets = module.state.get_targets(&mut module.store)?;
 		Ok(project)
 	}
 
-	pub fn load_module_ref(project: &mut ProjectHandle, path: String) -> Result<WasmModule> {
-		let mut inner = project.lock("load_module_ref")?;
-		Self::load_module_inner(&mut inner, path)
+	pub fn load_module_ref(project: &mut ProjectHandle, path: String, reason: BuildReason) -> Result<WasmModule> {
+		let inner = project.lock("load_module_ref")?;
+		Ok(Self::load_module_inner(inner, path, reason)?.1)
 	}
 
 	// TODO: this should auto-build any requested module
-	pub fn load_module_inner(project: &mut Mutexed<Project>, path: String) -> Result<WasmModule> {
+	pub fn load_module_inner(
+		project: Mutexed<Project>,
+		path: String,
+		reason: BuildReason
+	) -> Result<(Mutexed<Project>, WasmModule)> {
+
+		// First, build the module itself and register it as a dependency.
+		// TODO need to enforce a project-rooted path, consistent with targets
+		let request = DependencyRequest::FileDependency(path.clone());
+		let (mut project, module_built) = Self::build(project, &request, reason)?;
+		project.register_dependency(reason.parent(), &request, module_built);
+
 		let self_ref = project.self_ref.clone().unwrap();
 		let module_cache = &mut project.module_cache;
 
@@ -129,7 +142,8 @@ impl Project {
 		};
 		// TODO we make a new store each time we reference a module.
 		// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
-		WasmModule::load(&module_cache.engine, &module, self_ref)
+		let module = WasmModule::load(&module_cache.engine, &module, self_ref)?;
+		Ok((project, module))
 	}
 	
 	fn target(&self, name: &str) -> Result<Option<&DirectTarget>> {
@@ -177,6 +191,7 @@ impl Project {
 		request: &DependencyRequest,
 		reason: BuildReason,
 	) -> Result<(Mutexed<'a, Project>, PersistDependency)> {
+		debug!("build({:?})", request);
 
 		match &request {
 			// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
@@ -203,7 +218,12 @@ impl Project {
 					}
 				};
 
-				let mut module = Self::load_module_inner(&mut project, module_path)?;
+				let build_token = ActiveBuildToken::generate();
+				debug!("created build token {:?} for {:?}", build_token, &request);
+				let (mut project, mut module) = Self::load_module_inner(
+					project,
+					module_path,
+					BuildReason::Dependency(build_token))?;
 				
 				let deps = DepSet::default();
 				// deps.add(todo!(), todo!()); // TODO add module_path dep
@@ -230,11 +250,8 @@ impl Project {
 			},
 
 			DependencyRequest::FileDependency(name) => {
-				debug!("Processing: {:?}", name);
-				
 				// TODO lookup current state in cache
 				if let Some(direct) = project.target(name)? {
-					println!("# {}", name);
 					// TODO we're building every buildable all the time. We should first
 					// recurse over _it's_ dependencies to see if any of them cause us to need a rebuild.
 	
@@ -252,6 +269,7 @@ impl Project {
 						}
 					};
 
+					println!("# {}", name);
 					let build_token = ActiveBuildToken::generate();
 					debug!("created build token {:?} for {:?}", build_token, &request);
 					let reason = BuildReason::Dependency(build_token);
@@ -259,14 +277,7 @@ impl Project {
 					// TODO don't use project.module_path, track which module the target was defined in
 					let build_module_path = direct.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
 
-					// First, mark the module itself as a dependency.
-					// TODO need to enforce a project-rooted path, not an abspath
-					let module_request = DependencyRequest::FileDependency(build_module_path.clone());
-					let (project_ret, module_built) = Self::build(project, &module_request, reason)?;
-					project = project_ret;
-					project.register_dependency(reason.parent(), &module_request, module_built);
-
-					let mut wasm_module = Self::load_module_inner(&mut project, build_module_path)?;
+					let (mut project, mut wasm_module) = Self::load_module_inner(project, build_module_path, reason)?;
 
 					let built = project.unlocked_block(|project_handle| {
 						wasm_module.state.run_builder(&mut wasm_module.store, build_token, name, &direct, &project_handle)
@@ -288,11 +299,11 @@ impl Project {
 						BuildReason::Explicit => {
 							return Err(anyhow!("Not a buildable target: {}", name))
 						},
-						BuildReason::Dependency(parent) => {
+						_ => {
 							// treat it as a source file
 							let result = Persist::File(Some(PersistFile::from_stat(fs::symlink_metadata(name)?)?));
 							project.save_build_result(SaveBuildResult {
-								parent: Some(parent),
+								parent: reason.parent(),
 								request: &request,
 								result: &result,
 							})?;
@@ -341,8 +352,7 @@ impl Project {
 	) -> Result<(Mutexed<'a, Project>, bool)> {
 		let mut needs_build = false;
 
-		let speculative_build_token = ActiveBuildToken::generate();
-		let reason = BuildReason::Dependency(speculative_build_token);
+		let reason = BuildReason::Internal;
 
 		for (dep_req, dep_cached) in cached.dep_set().iter() {
 			debug!("Recursing over dependency {:?}", dep_req);
@@ -363,9 +373,6 @@ impl Project {
 			}
 		}
 
-		// drop any deps accumulated by this speculative building
-		// TODO introduce a new speculative BuildReason?
-		project.collect_deps(speculative_build_token);
 		Ok((project, needs_build))
 	}
 	

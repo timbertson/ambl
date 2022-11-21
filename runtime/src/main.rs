@@ -15,9 +15,14 @@ use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI
 use wasmtime::*;
 
 fn main() -> Result<()> {
-	env_logger::init_from_env(
-		env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"));
 
+	let env = env_logger::Env::new().default_filter_or("info");
+	env_logger::builder()
+		.parse_env(env)
+		.filter_module("cranelift_codegen", LevelFilter::Info)
+		.filter_module("wasmtime_cranelift", LevelFilter::Info)
+		.init();
+		
 	let cache = ModuleCache::new();
 	let root = Project::new(
 		cache,
