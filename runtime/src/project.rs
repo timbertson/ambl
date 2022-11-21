@@ -151,7 +151,7 @@ impl Project {
 		Ok(target)
 	}
 
-	/* Build this dependency and return its persistable result
+	/* Build this dependency, persisting (and returning) its result
 
 	There are two types of staleness to consider:
 	1. the thing needs to be rebuilt
@@ -176,14 +176,14 @@ impl Project {
 	pub fn build<'a>(mut project: Mutexed<'a, Project>,
 		request: &DependencyRequest,
 		reason: BuildReason,
-	) -> Result<(Mutexed<'a, Project>, Persist)> {
+	) -> Result<(Mutexed<'a, Project>, PersistDependency)> {
 
 		match &request {
 			// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
 			DependencyRequest::EnvVar(key) => {
-				Ok((project, Persist::Env(PersistEnv(std::env::var(key)?))))
+				Ok((project, PersistDependency::Env(PersistEnv(std::env::var(key)?))))
 			},
-			DependencyRequest::Universe => Ok((project, Persist::AlwaysDirty)),
+			DependencyRequest::Universe => Ok((project, PersistDependency::AlwaysDirty)),
 
 			// TODO: is it possible this wasm call wouldn't be required by the latest version of
 			// the build function? If we always evaluate things in sequence order then probably not,
@@ -193,15 +193,40 @@ impl Project {
 				// This should be made impossible via types but I don't want to duplicate DependencyRequest yet
 				let module_path = spec.module.to_owned().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
 
+				let cached = project.build_cache.lookup(&request)?.and_then(|p| p.as_wasm_call()).map(|p| p.to_owned());
+				if let Some(cached) = cached {
+					let (project_ret, needs_build) = Self::requires_build(project, &cached)?;
+					project = project_ret;
+					if !needs_build {
+						debug!("Using cached result for {:?}", &cached.call);
+						return Ok((project, PersistDependency::Wasm(cached.call)));
+					}
+				};
+
 				let mut module = Self::load_module_inner(&mut project, module_path)?;
+				
+				let deps = DepSet::default();
+				// deps.add(todo!(), todo!()); // TODO add module_path dep
 				
 				let result = project.unlocked_block(|project_handle| {
 					// TODO wasm calls can be cached. This requires tracking the inputs to the wasm call, mainly the module itself.
 					module.state.call_fn(&mut module.store, spec, &project_handle)
 				})?;
-				let persist = Persist::Wasm(PersistWasmCall { spec: spec.to_owned(), result });
+				let persist = Persist::Wasm(PersistWasmCall {
+					deps,
+					call: PersistWasmDependency {
+						spec: spec.to_owned(),
+						result,
+					}
+				});
+				
+				project.save_build_result(SaveBuildResult {
+					parent: reason.parent(),
+					request,
+					result: &persist
+				})?;
 
-				Ok((project, persist))
+				Ok((project, persist.into_dependency()))
 			},
 
 			DependencyRequest::FileDependency(name) => {
@@ -219,29 +244,11 @@ impl Project {
 					// to_owned here is to relieve the borrow on project
 					let cached = project.build_cache.lookup(&request)?.and_then(|p| p.as_target()).map(|p| p.to_owned());
 					if let Some(cached) = cached {
-						let mut needs_build = false;
-
-						let speculative_build_token = ActiveBuildToken::generate();
-						let reason = BuildReason::Dependency(speculative_build_token);
-
-						for (dep_req, dep_cached) in cached.deps.iter() {
-							
-							// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
-							let (project_ret, dep_latest) = Self::build(project, dep_req, reason)?;
-							project = project_ret;
-							
-							// if the result differs from what this target was based on, rebuild this target
-							if dep_latest.is_changed_since(dep_cached) {
-								needs_build = true;
-								break;
-							}
-						}
-
-						// drop any deps accumulated by this speculative building
-						project.collect_deps(speculative_build_token);
-
+						let (project_ret, needs_build) = Self::requires_build(project, &cached)?;
+						project = project_ret;
 						if !needs_build {
-							return Ok((project, Persist::Target(cached)))
+							debug!("Using cached result for {:?}", &cached.file);
+							return Ok((project, PersistDependency::File(cached.file)));
 						}
 					};
 
@@ -257,7 +264,7 @@ impl Project {
 					let module_request = DependencyRequest::FileDependency(build_module_path.clone());
 					let (project_ret, module_built) = Self::build(project, &module_request, reason)?;
 					project = project_ret;
-					project.register_dependency(reason.parent(), &module_request, &module_built);
+					project.register_dependency(reason.parent(), &module_request, module_built);
 
 					let mut wasm_module = Self::load_module_inner(&mut project, build_module_path)?;
 
@@ -274,7 +281,7 @@ impl Project {
 						request: &request,
 						result: &result
 					})?;
-					Ok((project, result))
+					Ok((project, result.into_dependency()))
 				} else {
 					debug!("Not a buildable target: {:?}", &request);
 					match reason {
@@ -289,7 +296,7 @@ impl Project {
 								request: &request,
 								result: &result,
 							})?;
-							Ok((project, result))
+							Ok((project, result.into_dependency()))
 						},
 					}
 				}
@@ -305,7 +312,7 @@ impl Project {
 		let SaveBuildResult { request, result, parent } = store;
 
 		// Firstly, if there's a parent build token, it registers this dependency (& result) into that build.
-		self.register_dependency(parent, request, result);
+		self.register_dependency(parent, request, result.clone().into_dependency());
 		
 		// Store the built result of this target
 		self.build_cache.update(request.to_owned(), result.to_owned())?;
@@ -319,19 +326,47 @@ impl Project {
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
-	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, request: &DependencyRequest, result: &Persist) {
+	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, request: &DependencyRequest, result: PersistDependency) {
 		if let Some(parent) = parent {
-			// For targets we don't need to store the full dependency state, only the file.
-			// TODO enforce this via types?
-			let result = match result {
-				Persist::Target(target) => Persist::File(target.file.to_owned()),
-				other => other.to_owned(),
-			};
 			debug!("registering dependency {:?} against build {:?} (result: {:?}", &request, parent, &result);
 
 			let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(Default::default);
 			parent_dep_set.add(request.to_owned(), result);
 		}
+	}
+	
+	pub fn requires_build<'a, T: HasDependencies>(
+		mut project: Mutexed<'a, Project>,
+		cached: &T,
+	) -> Result<(Mutexed<'a, Project>, bool)> {
+		let mut needs_build = false;
+
+		let speculative_build_token = ActiveBuildToken::generate();
+		let reason = BuildReason::Dependency(speculative_build_token);
+
+		for (dep_req, dep_cached) in cached.dep_set().iter() {
+			debug!("Recursing over dependency {:?}", dep_req);
+			
+			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
+			let (project_ret, dep_latest) = Self::build(project, dep_req, reason)?;
+			project = project_ret;
+			
+			// if the result differs from what this target was based on, rebuild this target
+			if dep_latest.has_changed_since(dep_cached) {
+				debug!("Dependency {:?} state ({:?}) has changed since ({:?}); triggering rebuild of parent",
+					dep_req,
+					&dep_latest,
+					dep_cached,
+				);
+				needs_build = true;
+				break;
+			}
+		}
+
+		// drop any deps accumulated by this speculative building
+		// TODO introduce a new speculative BuildReason?
+		project.collect_deps(speculative_build_token);
+		Ok((project, needs_build))
 	}
 	
 	pub fn save(&self) -> Result<()> {

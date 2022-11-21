@@ -56,12 +56,16 @@ impl PersistFile {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistEnv(pub String);
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PersistWasmCall {
+	pub deps: DepSet,
+	pub call: PersistWasmDependency,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PersistWasmDependency {
 	pub spec: FunctionSpec,
 	pub result: String,
-}
-impl PersistWasmCall {
 }
 
 // dumb workaround for JSON only allowing string keys
@@ -170,29 +174,69 @@ impl Persist {
 		}
 	}
 
-	pub fn into_response(self) -> DependencyResponse {
+	pub fn into_dependency(self) -> PersistDependency {
 		match self {
-			Persist::File(_) => DependencyResponse::Unit,
-			Persist::Target(_) => DependencyResponse::Unit,
-			Persist::Env(env) => DependencyResponse::Str(env.0),
-			Persist::Wasm(wasm) => DependencyResponse::Str(wasm.result),
-			Persist::AlwaysDirty => DependencyResponse::Unit,
+			Persist::Target(v) => PersistDependency::File(v.file),
+			Persist::Wasm(v) => PersistDependency::Wasm(v.call),
+			Persist::File(v) => PersistDependency::File(v),
+			Persist::Env(v) => PersistDependency::Env(v),
+			Persist::AlwaysDirty => PersistDependency::AlwaysDirty,
 		}
 	}
+}
 
-	pub fn is_changed_since(&self, prior: &Self) -> bool {
+// PersistDependency is a simplified version of Persist, stored
+// in a DepSet. This is not the canonical store of a dependency,
+// it's a snapshot of a dependency without including that dependency's
+// own (recursive) dependencies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PersistDependency {
+	File(Option<PersistFile>),
+	Env(PersistEnv),
+	Wasm(PersistWasmDependency),
+	AlwaysDirty,
+}
+
+impl PersistDependency {
+	pub fn has_changed_since(&self, prior: &Self) -> bool {
+		use PersistDependency::*;
 		match (self, prior) {
-			(_, Persist::Target(_)) => todo!("Impossible? It should not have been stored like this"),
-			(Persist::File(a), Persist::File(b)) => a != b,
-			(Persist::Target(a), Persist::File(b)) => &a.file != b,
-			(Persist::Env(a), Persist::Env(b)) => a != b,
-			(Persist::Wasm(_), Persist::Wasm(_)) => todo!(),
-			(Persist::AlwaysDirty, Persist::AlwaysDirty) => true,
+			(File(a), File(b)) => a != b,
+			(Env(a), Env(b)) => a != b,
+			(Wasm(_), Wasm(_)) => todo!(),
+			(AlwaysDirty, AlwaysDirty) => true,
 			other => {
 				debug!("Comparing incompatible persisted dependencies: {:?}", other);
 				true
 			},
 		}
+	}
+
+	pub fn into_response(self) -> DependencyResponse {
+		use PersistDependency::*;
+		match self {
+			File(_) => DependencyResponse::Unit,
+			Env(env) => DependencyResponse::Str(env.0),
+			Wasm(wasm) => DependencyResponse::Str(wasm.result),
+			AlwaysDirty => DependencyResponse::Unit,
+		}
+	}
+
+}
+
+pub trait HasDependencies {
+	fn dep_set(&self) -> &DepSet;
+}
+
+impl HasDependencies for PersistTarget {
+	fn dep_set(&self) -> &DepSet {
+		&self.deps
+	}
+}
+
+impl HasDependencies for PersistWasmCall {
+	fn dep_set(&self) -> &DepSet {
+		&self.deps
 	}
 }
 
@@ -200,11 +244,11 @@ impl Persist {
 // it's stored in Project, keyed by ActiveBuildToken
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepSet {
-	deps: Vec<(DependencyRequest, Persist)>,
+	deps: Vec<(DependencyRequest, PersistDependency)>,
 }
 
 impl DepSet {
-	pub fn add(&mut self, request: DependencyRequest, result: Persist) {
+	pub fn add(&mut self, request: DependencyRequest, result: PersistDependency) {
 		self.deps.push((request, result));
 	}
 
@@ -212,11 +256,11 @@ impl DepSet {
 		self.deps.len()
 	}
 
-	pub fn iter(&self) -> std::slice::Iter<(DependencyRequest, Persist)> {
+	pub fn iter(&self) -> std::slice::Iter<(DependencyRequest, PersistDependency)> {
 		self.deps.iter()
 	}
 
-	pub fn lookup(&self, request: &DependencyRequest) -> Option<&Persist> {
+	pub fn get(&self, request: &DependencyRequest) -> Option<&PersistDependency> {
 		self.deps.iter().find_map(|(key, dep)| {
 			if key == request {
 				Some(dep)
