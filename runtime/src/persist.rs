@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, time::UNIX_EPOCH, io};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
-use trou_common::{build::{DependencyRequest, DependencyResponse}, target::FunctionSpec};
+use trou_common::{build::{DependencyRequest, DependencyResponse}, rule::FunctionSpec};
 
 use crate::project::{ProjectRef, Project, ProjectHandle};
 

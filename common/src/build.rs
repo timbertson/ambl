@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 
-use crate::target::FunctionSpec;
+use crate::rule::FunctionSpec;
 
 // A request, which can be turned into a Dependency by resolving
 // the requested resource.

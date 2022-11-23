@@ -13,7 +13,7 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
 use trou_common::build::{DependencyRequest, DependencyResponse};
 use trou_common::ffi::ResultFFI;
-use trou_common::target::{Target, DirectTarget, RawTargetCtx, BaseCtx};
+use trou_common::rule::*;
 use wasmtime::*;
 
 use crate::persist::*;
@@ -78,7 +78,7 @@ pub struct Project {
 	build_cache: DepStore,
 	active_tasks: HashMap<ActiveBuildToken, DepSet>,
 	module_path: String,
-	targets: Vec<Target>,
+	rules: Vec<Rule>,
 	self_ref: Option<ProjectRef>,
 }
 
@@ -90,37 +90,33 @@ impl Project {
 			module_cache,
 			module_path: module_path.clone(),
 			self_ref: None,
-
-			// CORRECTNESS: we must populate `targets` before running any code which might call `build`
-			// TODO can we inject a lazy node so we don't have to eagerly load this?
-			targets: Vec::new(),
+			rules: vec!(include(yaml("trou.yaml"))),
 		});
+		
 
-		// lock the project to populate self_ref (first) and then targets
+		// lock the project to populate self_ref
 		let mut handle = project.handle();
 		let mut inner = handle.lock("load_module")?;
 		inner.self_ref = Some(project.clone());
 
-		let (mut inner, mut module) = Self::load_module_inner(inner, module_path, BuildReason::Internal)?;
-		inner.targets = module.state.get_targets(&mut module.store)?;
 		Ok(project)
 	}
 
-	pub fn load_module_ref(project: &mut ProjectHandle, path: String, reason: BuildReason) -> Result<WasmModule> {
+	pub fn load_module_ref(project: &mut ProjectHandle, path: &str, reason: BuildReason) -> Result<WasmModule> {
 		let inner = project.lock("load_module_ref")?;
 		Ok(Self::load_module_inner(inner, path, reason)?.1)
 	}
 
 	// TODO: this should auto-build any requested module
-	pub fn load_module_inner(
-		project: Mutexed<Project>,
-		path: String,
+	pub fn load_module_inner<'a>(
+		project: Mutexed<'a, Project>,
+		path: &str,
 		reason: BuildReason
-	) -> Result<(Mutexed<Project>, WasmModule)> {
+	) -> Result<(Mutexed<'a, Project>, WasmModule)> {
 
 		// First, build the module itself and register it as a dependency.
-		// TODO need to enforce a project-rooted path, consistent with targets
-		let request = DependencyRequest::FileDependency(path.clone());
+		// TODO need to enforce a project-rooted path, consistent with rules
+		let request = DependencyRequest::FileDependency(path.to_owned());
 		let (mut project, module_built) = Self::build(project, &request, reason)?;
 		project.register_dependency(reason.parent(), &request, module_built);
 
@@ -128,7 +124,7 @@ impl Project {
 		let module_cache = &mut project.module_cache;
 
 		// TODO can we get away with not cloning yet? It's pointless if the module is loaded
-		let cached = module_cache.modules.entry(path.clone());
+		let cached = module_cache.modules.entry(path.to_owned());
 		let module = match cached {
 			Entry::Occupied(entry) => {
 				// https://stackoverflow.com/questions/60129097/entryoccupied-get-returns-a-value-referencing-data-owned-by-the-current-func
@@ -136,7 +132,7 @@ impl Project {
 			},
 			Entry::Vacant(dest) => {
 				// TODO release lock while evaluating this?
-				let loaded = WasmModule::compile(&module_cache.engine, &path)?;
+				let loaded = WasmModule::compile(&module_cache.engine, path)?;
 				dest.insert(loaded)
 			},
 		};
@@ -146,23 +142,83 @@ impl Project {
 		Ok((project, module))
 	}
 	
-	fn target(&self, name: &str) -> Result<Option<&DirectTarget>> {
-		let target = self.targets.iter().flat_map(|t| match t {
-			Target::Indirect(x) => {
-				debug!("skipping indirect... {:?}", x);
-				None
-			},
-			Target::Direct(t) => {
+	fn within_scope<'a>(name: &'a str, scope: &'a Option<String>) -> Option<&'a str> {
+		match scope {
+			Some(scope) => scope.strip_prefix(scope).and_then(|s| s.strip_prefix("/")),
+			None => Some(name)
+		}
+	}
+	
+	pub fn expand_and_filter_rule<'a, 'b>(
+		mut project: Mutexed<'a, Project>,
+		rule: &'b mut Rule,
+		name: &str,
+	) -> Result<(Mutexed<'a, Project>, Option<&'b Target>)> {
+		match rule {
+			Rule::Target(t) => {
 				if t.names.iter().any(|n| n == name) {
-					Some(t)
+					Ok((project, Some(&*t)))
 				} else {
-					None
+					Ok((project, None))
 				}
-			}
-		}).next();
+			},
+			Rule::Nested(ref mut nested) => {
+				if let Some(name) = Self::within_scope(name, &nested.scope) {
+					for rule in nested.rules.iter_mut() {
+						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name)?;
+						project = project_ret;
+						if target.is_some() {
+							return Ok((project, target));
+						}
+					}
+				}
+				Ok((project, None))
+			},
+			Rule::Alias(x) => {
+				debug!("TODO: skipping alias... {:?}", x);
+				Ok((project, None))
+			},
+			Rule::Include(include) => {
+				if Self::within_scope(name, include.get_scope()).is_some() {
+					debug!("Loading include: {:?}", include);
+					let (project_ret, mut module) = Self::load_module_inner(project, include.get_path(), BuildReason::Internal)?;
+					project = project_ret;
+					*rule = Rule::Nested(NestedRule {
+						scope: include.get_scope().to_owned(),
+						rules: module.state.get_rules(&mut module.store)?,
+					});
+					// reevaluate after replacing, this will drop into the Rule::Nested branch
+					Self::expand_and_filter_rule(project, rule, name)
+				} else {
+					Ok((project, None))
+				}
+			},
+		}
+	}
 
-		debug!("target for {}: {:?}", name, target);
-		Ok(target)
+	pub fn target<'a>(
+		mut project: Mutexed<'a, Project>,
+		name: &str,
+	) -> Result<(Mutexed<'a, Project>, Option<Target>)> {
+		// TODO do this only when needed
+		let mut rules_mut = project.rules.clone();
+
+		let mut result = None;
+
+		for rule in rules_mut.iter_mut() {
+			let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name)?;
+			project = project_ret;
+			if target.is_some() {
+				// TODO can we return a reference instead of cloning here?
+				result = target.map(|t| t.to_owned());
+				break;
+			}
+		}
+		
+		project.rules = rules_mut;
+
+		debug!("target for {}: {:?}", name, result);
+		Ok((project, result))
 	}
 
 	/* Build this dependency, persisting (and returning) its result
@@ -222,7 +278,7 @@ impl Project {
 				debug!("created build token {:?} for {:?}", build_token, &request);
 				let (mut project, mut module) = Self::load_module_inner(
 					project,
-					module_path,
+					&module_path,
 					BuildReason::Dependency(build_token))?;
 				
 				let deps = DepSet::default();
@@ -250,15 +306,11 @@ impl Project {
 			},
 
 			DependencyRequest::FileDependency(name) => {
-				// TODO lookup current state in cache
-				if let Some(direct) = project.target(name)? {
-					// TODO we're building every buildable all the time. We should first
-					// recurse over _it's_ dependencies to see if any of them cause us to need a rebuild.
-	
-					let direct = direct.clone(); // relive borrow on project since we got this from project.targets.iter()
-
+				let (mut project, target) = Project::target(project, name)?;
+				if let Some(target) = target {
 					// iterate over all stored dependencies
-					// to_owned here is to relieve the borrow on project
+					
+					// TODO add another cached type which means "already built in this invocation"
 					let cached = project.build_cache.lookup(&request)?.and_then(|p| p.as_target()).map(|p| p.to_owned());
 					if let Some(cached) = cached {
 						let (project_ret, needs_build) = Self::requires_build(project, &cached)?;
@@ -275,12 +327,12 @@ impl Project {
 					let reason = BuildReason::Dependency(build_token);
 
 					// TODO don't use project.module_path, track which module the target was defined in
-					let build_module_path = direct.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
+					let build_module_path = target.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
 
-					let (mut project, mut wasm_module) = Self::load_module_inner(project, build_module_path, reason)?;
+					let (mut project, mut wasm_module) = Self::load_module_inner(project, &build_module_path, reason)?;
 
 					let built = project.unlocked_block(|project_handle| {
-						wasm_module.state.run_builder(&mut wasm_module.store, build_token, name, &direct, &project_handle)
+						wasm_module.state.run_builder(&mut wasm_module.store, build_token, name, &target, &project_handle)
 					})?;
 
 					let result = Persist::Target(PersistTarget {

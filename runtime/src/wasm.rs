@@ -4,7 +4,9 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::{build::{DependencyRequest, DependencyResponse, TaggedDependencyRequest}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx, FunctionSpec}};
+use trou_common::{build::*, ctx::{BaseCtx, RawTargetCtx}};
+use trou_common::ffi::ResultFFI;
+use trou_common::rule::*;
 use wasmtime::*;
 
 use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile};
@@ -162,17 +164,18 @@ impl StateRef {
 		Ok(())
 	}
 
-	pub fn get_targets<C: AsContextMut>(&self, mut store: C) -> Result<Vec<Target>> {
-		debug!("get_targets");
+	// TODO: accept config and pass it through
+	pub fn get_rules<C: AsContextMut>(&self, mut store: C) -> Result<Vec<Rule>> {
+		debug!("get_rules");
 		let mut write = self.write();
 		let state = write.as_ref()?;
-		let targets_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(
-			store.as_context_mut(), "targets_ffi")?;
+		let rules_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(
+			store.as_context_mut(), "rules_ffi")?;
 		drop(write);
-		self.call_serde(store, targets_ffi, &BaseCtx::new())
+		self.call_serde(store, rules_ffi, &BaseCtx::new())
 	}
 
-	pub fn run_builder<C: AsContextMut>(&self, mut store: C, token: ActiveBuildToken, path: &str, builder: &DirectTarget, _unlocked_evidence: &ProjectHandle) -> Result<Option<PersistFile>> {
+	pub fn run_builder<C: AsContextMut>(&self, mut store: C, token: ActiveBuildToken, path: &str, builder: &Target, _unlocked_evidence: &ProjectHandle) -> Result<Option<PersistFile>> {
 		debug!("run_builder");
 		let mut write = self.write();
 		let state = write.as_ref()?;

@@ -29,8 +29,8 @@ fn build_all(c: &TargetCtx) -> Result<()> {
 }
 
 // TODO clean up this macro invocation
-ffi!(targets_ffi);
-pub fn targets_ffi(_: &BaseCtx) -> Result<Vec<Target>> {
+ffi!(rules_ffi);
+pub fn rules_ffi(_: &BaseCtx) -> Result<Vec<Rule>> {
 	Ok(vec!(
 		target("all", build_fn("build_all")),
 		targets(vec!("a", "b", "c"), build_fn("build_all")),

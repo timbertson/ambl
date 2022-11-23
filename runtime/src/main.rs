@@ -11,7 +11,9 @@ use anyhow::*;
 use project::{Project, ModuleCache, BuildReason};
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::{build::{DependencyRequest, DependencyResponse}, ffi::ResultFFI, target::{Target, DirectTarget, RawTargetCtx, BaseCtx}};
+use trou_common::build::*;
+use trou_common::ffi::ResultFFI;
+use trou_common::rule::*;
 use wasmtime::*;
 
 fn main() -> Result<()> {
