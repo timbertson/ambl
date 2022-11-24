@@ -1,14 +1,21 @@
 use serde::{Serialize, Deserialize};
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IncludeMode { YAML, WASM }
 
 // used for delegating target definitions to another module
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct Include {
-	path: String,
+	module: String,
+
+	#[serde(default)]
 	scope: Option<String>,
+
+	#[serde(default)]
 	config: Option<String>,
+
+	// TODO: just detect file extension?
 	mode: IncludeMode, // TODO this is bad modelling, YAML doesn't use config
 }
 
@@ -27,8 +34,8 @@ impl Include {
 		&self.scope
 	}
 
-	pub fn get_path(& self) -> &String {
-		&self.path
+	pub fn get_module(& self) -> &String {
+		&self.module
 	}
 
 	pub fn get_config(& self) -> &Option<String> {
@@ -41,9 +48,15 @@ impl Include {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct FunctionSpec {
+	#[serde(rename = "fn")]
 	pub fn_name: String, // TODO can we default this to `build` for modules?
+
+	#[serde(default)]
 	pub module: Option<String>,
+
+	#[serde(default)]
 	pub config: Option<String>,
 }
 
@@ -60,12 +73,14 @@ impl FunctionSpec {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct Alias {
 	name: String,
 	path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Rule {
 	Alias(Alias),
 	Target(Target),
@@ -77,12 +92,16 @@ pub enum Rule {
 pub struct Target {
 	// TODO deserializer which accepts `name` shorthand
 	pub names: Vec<String>,
+
+	#[serde(flatten)]
 	pub build: FunctionSpec,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NestedRule {
+	#[serde(default)]
 	pub scope: Option<String>,
+
 	pub rules: Vec<Rule>,
 }
 
@@ -107,12 +126,12 @@ pub fn include(m: Include) -> Rule {
 	Rule::Include(m)
 }
 
-pub fn module<S: Into<String>>(path: S) -> Include {
-	Include { path: path.into(), scope: None, config: None, mode: IncludeMode::WASM }
+pub fn module<S: Into<String>>(module: S) -> Include {
+	Include { module: module.into(), scope: None, config: None, mode: IncludeMode::WASM }
 }
 
 pub fn yaml<S: Into<String>>(path: S) -> Include {
-	Include { path: path.into(), scope: None, config: None, mode: IncludeMode::YAML }
+	Include { module: path.into(), scope: None, config: None, mode: IncludeMode::YAML }
 }
 
 pub fn alias<S1: Into<String>, S2: Into<String>>(name: S1, path: S2) -> Rule {

@@ -25,15 +25,11 @@ fn main() -> Result<()> {
 		.filter_module("wasmtime_cranelift", LevelFilter::Info)
 		.init();
 		
-	let cache = ModuleCache::new();
-	let root = Project::new(
-		cache,
-		"target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm".to_owned()
-	)?;
+	let root = Project::new()?;
 	let result = (|| {
 		let args: Vec<String> = env::args().skip(1).collect();
 		for arg in args {
-			Project::build(root.handle().lock("main")?, &DependencyRequest::FileDependency(arg), BuildReason::Explicit)?;
+			Project::build(root.handle().lock("main")?, &DependencyRequest::FileDependency(arg), &BuildReason::Explicit)?;
 		}
 		Ok(())
 	})();

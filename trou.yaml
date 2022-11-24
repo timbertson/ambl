@@ -1,0 +1,45 @@
+
+# alias gets treated as a buildable which is just a symlink to (and depending on) the real thing
+# It cannot shadow a source file (error? or warn?)
+# - alias:
+#     name: builder.wasm
+#     path: target/debug/builder.wasm
+
+- target:
+    names: [all] # TODO `name: all`
+    module: target/debug/builder.wasm
+    fn: build_all
+
+- target:
+    names:
+     - a
+     - b
+     - c
+    module: target/debug/builder.wasm
+    fn: build_all
+    mode: WASM
+    # config:
+    #   length: 1
+
+# - include:
+#     mode: WASM
+#     module: builtin:scala
+#     config: | # TODO: parse as nested JSON?
+#       x: 123
+
+# - include:
+#     mode: WASM
+#     module: builtin:lint
+#     scope: lint
+#     config: |
+#       src: ./scala
+
+# - include:
+#     mode: WASM
+#     module: builtin:cargo-wasm
+#     scope: builder
+#     config: |
+#       # NOTE: should scope change the conceptual "cwd"?
+#       package: trou-builder
+
+# # assume a builtin module which can build a rust cargo project into wasm :thinking: ...

@@ -1,5 +1,5 @@
 #![allow(unreachable_code)]
-use std::collections::HashMap;
+use std::collections::{HashMap, LinkedList};
 use std::collections::hash_map::Entry;
 use std::sync::atomic;
 use std::{fs, iter};
@@ -42,10 +42,11 @@ impl ActiveBuildToken {
 	}
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum BuildReason {
 	Dependency(ActiveBuildToken),
-	Internal, // Required for either module load or speculative execution, but not associated with an active build
+	Speculative, // speculative execution of a build target, not associated with an active build
+	Include(Vec<Include>), // module import, tracking the stack / chain of imports for cycle detection
 	Explicit, // explicit user request, fail if not a target
 }
 
@@ -53,7 +54,8 @@ impl BuildReason {
 	pub fn parent(&self) -> Option<ActiveBuildToken> {
 		match self {
 			BuildReason::Dependency(p) => Some(*p),
-			BuildReason::Internal => None,
+			BuildReason::Speculative => None,
+			BuildReason::Include(_) => None,
 			BuildReason::Explicit => None,
 		}
 	}
@@ -77,22 +79,19 @@ pub struct Project {
 	module_cache: ModuleCache,
 	build_cache: DepStore,
 	active_tasks: HashMap<ActiveBuildToken, DepSet>,
-	module_path: String,
 	rules: Vec<Rule>,
 	self_ref: Option<ProjectRef>,
 }
 
 impl Project {
-	pub fn new(module_cache: ModuleCache, module_path: String) -> Result<ProjectRef> {
+	pub fn new() -> Result<ProjectRef> {
 		let project = MutexRef::new(Project {
 			build_cache: DepStore::load(),
 			active_tasks: Default::default(),
-			module_cache,
-			module_path: module_path.clone(),
+			module_cache: ModuleCache::new(),
 			self_ref: None,
 			rules: vec!(include(yaml("trou.yaml"))),
 		});
-		
 
 		// lock the project to populate self_ref
 		let mut handle = project.handle();
@@ -102,17 +101,17 @@ impl Project {
 		Ok(project)
 	}
 
-	pub fn load_module_ref(project: &mut ProjectHandle, path: &str, reason: BuildReason) -> Result<WasmModule> {
+	pub fn load_module_ref(project: &mut ProjectHandle, path: &str, reason: &BuildReason) -> Result<WasmModule> {
 		let inner = project.lock("load_module_ref")?;
 		Ok(Self::load_module_inner(inner, path, reason)?.1)
 	}
 
-	// TODO: this should auto-build any requested module
 	pub fn load_module_inner<'a>(
 		project: Mutexed<'a, Project>,
 		path: &str,
-		reason: BuildReason
+		reason: &BuildReason
 	) -> Result<(Mutexed<'a, Project>, WasmModule)> {
+		debug!("Loading module {:?} for {:?}", path, reason);
 
 		// First, build the module itself and register it as a dependency.
 		// TODO need to enforce a project-rooted path, consistent with rules
@@ -132,14 +131,36 @@ impl Project {
 			},
 			Entry::Vacant(dest) => {
 				// TODO release lock while evaluating this?
-				let loaded = WasmModule::compile(&module_cache.engine, path)?;
+				let loaded = WasmModule::compile(&module_cache.engine, path)
+					.with_context(|| format!("Compiling WASM file: {}", path))?;
 				dest.insert(loaded)
 			},
 		};
 		// TODO we make a new store each time we reference a module.
 		// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
-		let module = WasmModule::load(&module_cache.engine, &module, self_ref)?;
+		let module = WasmModule::load(&module_cache.engine, &module, self_ref)
+			.with_context(|| format!("Loading WASM module: {}", path))?;
 		Ok((project, module))
+	}
+
+	pub fn load_yaml_rules<'a>(
+		project: Mutexed<'a, Project>,
+		path: &str,
+		reason: &BuildReason
+	) -> Result<(Mutexed<'a, Project>, Vec<Rule>)> {
+		debug!("Loading YAML rules {:?} for {:?}", path, reason);
+		// First, build the module itself and register it as a dependency.
+		// TODO need to enforce a project-rooted path, consistent with rules
+		let request = DependencyRequest::FileDependency(path.to_owned());
+		let (mut project, module_built) = Self::build(project, &request, reason)?;
+		project.register_dependency(reason.parent(), &request, module_built);
+
+		let rules: Result<Vec<Rule>> = (|| {
+			Ok(serde_yaml::from_str(&fs::read_to_string(path)?)?)
+		})();
+		let rules = rules.with_context(|| format!("Loading rules YAML: {}", path))?;
+
+		Ok((project, rules))
 	}
 	
 	fn within_scope<'a>(name: &'a str, scope: &'a Option<String>) -> Option<&'a str> {
@@ -153,6 +174,7 @@ impl Project {
 		mut project: Mutexed<'a, Project>,
 		rule: &'b mut Rule,
 		name: &str,
+		load_chain: &Vec<Include>, // the chain of includes we're resolving. This is used to prevent recusive loops.
 	) -> Result<(Mutexed<'a, Project>, Option<&'b Target>)> {
 		match rule {
 			Rule::Target(t) => {
@@ -165,7 +187,7 @@ impl Project {
 			Rule::Nested(ref mut nested) => {
 				if let Some(name) = Self::within_scope(name, &nested.scope) {
 					for rule in nested.rules.iter_mut() {
-						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name)?;
+						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name, load_chain)?;
 						project = project_ret;
 						if target.is_some() {
 							return Ok((project, target));
@@ -179,16 +201,41 @@ impl Project {
 				Ok((project, None))
 			},
 			Rule::Include(include) => {
-				if Self::within_scope(name, include.get_scope()).is_some() {
-					debug!("Loading include: {:?}", include);
-					let (project_ret, mut module) = Self::load_module_inner(project, include.get_path(), BuildReason::Internal)?;
-					project = project_ret;
+				if load_chain.contains(include) {
+					debug!("Encountered recursive include {:?} while searching for target {:?}. Skipping.", include, name);
+					Ok((project, None))
+				} else if Self::within_scope(name, include.get_scope()).is_some() {
+					let subchain = iter::once(&*include).chain(load_chain.iter()).map(|include| include.to_owned()).collect();
+					debug!("Loading include {:?} with load_chain {:?}, subchain {:?}", include, &load_chain, &subchain);
+					
+					let rules = match include.get_mode() {
+						IncludeMode::YAML => {
+							let (project_ret, rules) = Self::load_yaml_rules(
+								project,
+								include.get_module(),
+								&BuildReason::Include(subchain)
+							)?;
+							project = project_ret;
+							rules
+						},
+
+						IncludeMode::WASM => {
+							let (project_ret, mut module) = Self::load_module_inner(
+								project,
+								include.get_module(),
+								&BuildReason::Include(subchain)
+							)?;
+							project = project_ret;
+							module.state.get_rules(&mut module.store)?
+						},
+					};
+
 					*rule = Rule::Nested(NestedRule {
 						scope: include.get_scope().to_owned(),
-						rules: module.state.get_rules(&mut module.store)?,
+						rules,
 					});
 					// reevaluate after replacing, this will drop into the Rule::Nested branch
-					Self::expand_and_filter_rule(project, rule, name)
+					Self::expand_and_filter_rule(project, rule, name, load_chain)
 				} else {
 					Ok((project, None))
 				}
@@ -199,6 +246,7 @@ impl Project {
 	pub fn target<'a>(
 		mut project: Mutexed<'a, Project>,
 		name: &str,
+		load_chain: &Vec<Include>,
 	) -> Result<(Mutexed<'a, Project>, Option<Target>)> {
 		// TODO do this only when needed
 		let mut rules_mut = project.rules.clone();
@@ -206,7 +254,7 @@ impl Project {
 		let mut result = None;
 
 		for rule in rules_mut.iter_mut() {
-			let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name)?;
+			let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name, load_chain)?;
 			project = project_ret;
 			if target.is_some() {
 				// TODO can we return a reference instead of cloning here?
@@ -245,7 +293,7 @@ impl Project {
 
 	pub fn build<'a>(mut project: Mutexed<'a, Project>,
 		request: &DependencyRequest,
-		reason: BuildReason,
+		reason: &BuildReason,
 	) -> Result<(Mutexed<'a, Project>, PersistDependency)> {
 		debug!("build({:?})", request);
 
@@ -279,7 +327,7 @@ impl Project {
 				let (mut project, mut module) = Self::load_module_inner(
 					project,
 					&module_path,
-					BuildReason::Dependency(build_token))?;
+					&BuildReason::Dependency(build_token))?;
 				
 				let deps = DepSet::default();
 				// deps.add(todo!(), todo!()); // TODO add module_path dep
@@ -306,7 +354,12 @@ impl Project {
 			},
 
 			DependencyRequest::FileDependency(name) => {
-				let (mut project, target) = Project::target(project, name)?;
+				let empty_chain = Vec::new();
+				let load_chain = match reason {
+					BuildReason::Include(chain) => &chain,
+					_ => &empty_chain,
+				};
+				let (mut project, target) = Project::target(project, name, load_chain)?;
 				if let Some(target) = target {
 					// iterate over all stored dependencies
 					
@@ -326,10 +379,10 @@ impl Project {
 					debug!("created build token {:?} for {:?}", build_token, &request);
 					let reason = BuildReason::Dependency(build_token);
 
-					// TODO don't use project.module_path, track which module the target was defined in
-					let build_module_path = target.build.module.clone().unwrap_or_else(|| project.module_path.to_owned());
+					// TODO track which module the target was defined in
+					let build_module_path = target.build.module.clone().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
 
-					let (mut project, mut wasm_module) = Self::load_module_inner(project, &build_module_path, reason)?;
+					let (mut project, mut wasm_module) = Self::load_module_inner(project, &build_module_path, &reason)?;
 
 					let built = project.unlocked_block(|project_handle| {
 						wasm_module.state.run_builder(&mut wasm_module.store, build_token, name, &target, &project_handle)
@@ -404,13 +457,13 @@ impl Project {
 	) -> Result<(Mutexed<'a, Project>, bool)> {
 		let mut needs_build = false;
 
-		let reason = BuildReason::Internal;
+		let reason = BuildReason::Speculative;
 
 		for (dep_req, dep_cached) in cached.dep_set().iter() {
 			debug!("Recursing over dependency {:?}", dep_req);
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
-			let (project_ret, dep_latest) = Self::build(project, dep_req, reason)?;
+			let (project_ret, dep_latest) = Self::build(project, dep_req, &reason)?;
 			project = project_ret;
 			
 			// if the result differs from what this target was based on, rebuild this target
