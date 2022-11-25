@@ -91,7 +91,7 @@ impl Project {
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
 			self_ref: None,
-			rules: vec!(include(yaml("trou.yaml"))),
+			rules: vec!(dsl::include(dsl::yaml("trou.yaml"))),
 		});
 
 		// lock the project to populate self_ref

@@ -106,42 +106,46 @@ pub struct NestedRule {
 }
 
 
-// Rule builder functions. Strictly these are just part of the API,
-// but they live here for locality with the instance methods
-pub fn target<S: Into<String>>(s: S, entrypoint: FunctionSpec) -> Rule {
-	Rule::Target(Target {
-		names: vec!(s.into()),
-		build: entrypoint,
-	})
-}
+pub mod dsl {
+	use super::*;
 
-pub fn targets<S: Into<String>>(s: Vec<S>, entrypoint: FunctionSpec) -> Rule {
-	Rule::Target(Target {
-		names: s.into_iter().map(|s| s.into()).collect(),
-		build: entrypoint,
-	})
-}
+	// Rule builder functions. Strictly these are just part of the API,
+	// but they live here for locality with the instance methods
+	pub fn target<S: Into<String>>(s: S, entrypoint: FunctionSpec) -> Rule {
+		Rule::Target(Target {
+			names: vec!(s.into()),
+			build: entrypoint,
+		})
+	}
 
-pub fn include(m: Include) -> Rule {
-	Rule::Include(m)
-}
+	pub fn targets<S: Into<String>>(s: Vec<S>, entrypoint: FunctionSpec) -> Rule {
+		Rule::Target(Target {
+			names: s.into_iter().map(|s| s.into()).collect(),
+			build: entrypoint,
+		})
+	}
 
-pub fn module<S: Into<String>>(module: S) -> Include {
-	Include { module: module.into(), scope: None, config: None, mode: IncludeMode::WASM }
-}
+	pub fn include(m: Include) -> Rule {
+		Rule::Include(m)
+	}
 
-pub fn yaml<S: Into<String>>(path: S) -> Include {
-	Include { module: path.into(), scope: None, config: None, mode: IncludeMode::YAML }
-}
+	pub fn module<S: Into<String>>(module: S) -> Include {
+		Include { module: module.into(), scope: None, config: None, mode: IncludeMode::WASM }
+	}
 
-pub fn alias<S1: Into<String>, S2: Into<String>>(name: S1, path: S2) -> Rule {
-	Rule::Alias(Alias { name: name.into(), path: path.into() })
-}
+	pub fn yaml<S: Into<String>>(path: S) -> Include {
+		Include { module: path.into(), scope: None, config: None, mode: IncludeMode::YAML }
+	}
 
-pub fn build_fn<S: Into<String>>(fn_name: S) -> FunctionSpec {
-	FunctionSpec { fn_name: fn_name.into(), module: None, config: None }
-}
+	pub fn alias<S1: Into<String>, S2: Into<String>>(name: S1, path: S2) -> Rule {
+		Rule::Alias(Alias { name: name.into(), path: path.into() })
+	}
 
-pub fn build_via<S: Into<String>, S2: Into<String>>(module: S, fn_name: S2) -> FunctionSpec {
-	FunctionSpec { fn_name: fn_name.into(), module: Some(module.into()), config: None }
+	pub fn build_fn<S: Into<String>>(fn_name: S) -> FunctionSpec {
+		FunctionSpec { fn_name: fn_name.into(), module: None, config: None }
+	}
+
+	pub fn build_via<S: Into<String>, S2: Into<String>>(module: S, fn_name: S2) -> FunctionSpec {
+		FunctionSpec { fn_name: fn_name.into(), module: Some(module.into()), config: None }
+	}
 }

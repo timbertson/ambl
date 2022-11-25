@@ -3,6 +3,7 @@
 use serde::{Serialize, Deserialize};
 pub use trou_common::build::*;
 pub use trou_common::rule::*;
+pub use trou_common::rule::dsl::*;
 pub use trou_common::ffi::*;
 pub use trou_common::ctx::*;
 
