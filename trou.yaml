@@ -1,13 +1,15 @@
 
 # alias gets treated as a buildable which is just a symlink to (and depending on) the real thing
 # It cannot shadow a source file (error? or warn?)
+# TODO do we even need the symlink? It's probably more pure to do so.
+# We could probably implement this as a builtin wasm module...
 # - alias:
 #     name: builder.wasm
 #     path: target/debug/builder.wasm
 
 - target:
     names: [all] # TODO `name: all`
-    module: target/debug/builder.wasm
+    module: target/wasm32-unknown-unknown/release/trou_sample_builder.wasm
     fn: build_all
 
 - target:
@@ -15,7 +17,7 @@
      - a
      - b
      - c
-    module: target/debug/builder.wasm
+    module: target/wasm32-unknown-unknown/release/trou_sample_builder.wasm
     fn: build_all
     mode: WASM
     # config:

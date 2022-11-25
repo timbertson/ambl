@@ -48,7 +48,7 @@ impl PersistFile {
 		match fs::symlink_metadata(p) {
 			Result::Ok(stat) => Ok(Some(Self::from_stat(stat)?)),
 			Result::Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-			Result::Err(err) => Err(err.into()),
+			Result::Err(err) => Err(err).with_context(|| format!("Reading {:?}", p)),
 		}
 	}
 }
@@ -103,7 +103,7 @@ impl DepStore {
 			let contents = match fs::read_to_string(".trou.cache") {
 				Result::Ok(s) => s,
 				Result::Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-				Result::Err(e) => return Err(e.into()),
+				Result::Err(e) => return Err(e).context("loading .trou.cache"),
 			};
 			let cache : DepStorePersist = serde_json::from_str(&contents)?;
 			Ok(Some(cache.into()))

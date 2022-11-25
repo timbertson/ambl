@@ -16,6 +16,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
+use crate::err::*;
 use crate::persist::*;
 use crate::sync::{MutexRef, Mutexed, MutexHandle};
 use crate::{wasm::WasmModule, sync::lock_failed};
@@ -111,36 +112,36 @@ impl Project {
 		path: &str,
 		reason: &BuildReason
 	) -> Result<(Mutexed<'a, Project>, WasmModule)> {
-		debug!("Loading module {:?} for {:?}", path, reason);
+		result_block(|| {
+			debug!("Loading module {:?} for {:?}", path, reason);
 
-		// First, build the module itself and register it as a dependency.
-		// TODO need to enforce a project-rooted path, consistent with rules
-		let request = DependencyRequest::FileDependency(path.to_owned());
-		let (mut project, module_built) = Self::build(project, &request, reason)?;
-		project.register_dependency(reason.parent(), &request, module_built);
+			// First, build the module itself and register it as a dependency.
+			// TODO need to enforce a project-rooted path, consistent with rules
+			let request = DependencyRequest::FileDependency(path.to_owned());
+			let (mut project, module_built) = Self::build(project, &request, reason)?;
+			project.register_dependency(reason.parent(), &request, module_built);
 
-		let self_ref = project.self_ref.clone().unwrap();
-		let module_cache = &mut project.module_cache;
+			let self_ref = project.self_ref.clone().unwrap();
+			let module_cache = &mut project.module_cache;
 
-		// TODO can we get away with not cloning yet? It's pointless if the module is loaded
-		let cached = module_cache.modules.entry(path.to_owned());
-		let module = match cached {
-			Entry::Occupied(entry) => {
-				// https://stackoverflow.com/questions/60129097/entryoccupied-get-returns-a-value-referencing-data-owned-by-the-current-func
-				entry.into_mut()
-			},
-			Entry::Vacant(dest) => {
-				// TODO release lock while evaluating this?
-				let loaded = WasmModule::compile(&module_cache.engine, path)
-					.with_context(|| format!("Compiling WASM file: {}", path))?;
-				dest.insert(loaded)
-			},
-		};
-		// TODO we make a new store each time we reference a module.
-		// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
-		let module = WasmModule::load(&module_cache.engine, &module, self_ref)
-			.with_context(|| format!("Loading WASM module: {}", path))?;
-		Ok((project, module))
+			// TODO can we get away with not cloning yet? It's pointless if the module is loaded
+			let cached = module_cache.modules.entry(path.to_owned());
+			let module = match cached {
+				Entry::Occupied(entry) => {
+					// https://stackoverflow.com/questions/60129097/entryoccupied-get-returns-a-value-referencing-data-owned-by-the-current-func
+					entry.into_mut()
+				},
+				Entry::Vacant(dest) => {
+					// TODO release lock while evaluating this?
+					let loaded = WasmModule::compile(&module_cache.engine, path)?;
+					dest.insert(loaded)
+				},
+			};
+			// TODO we make a new store each time we reference a module.
+			// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
+			let module = WasmModule::load(&module_cache.engine, &module, self_ref)?;
+			Ok((project, module))
+		}).with_context(|| format!("Loading WASM module: {}", path))
 	}
 
 	pub fn load_yaml_rules<'a>(
@@ -155,11 +156,9 @@ impl Project {
 		let (mut project, module_built) = Self::build(project, &request, reason)?;
 		project.register_dependency(reason.parent(), &request, module_built);
 
-		let rules: Result<Vec<Rule>> = (|| {
-			Ok(serde_yaml::from_str(&fs::read_to_string(path)?)?)
-		})();
-		let rules = rules.with_context(|| format!("Loading rules YAML: {}", path))?;
-
+		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(path)?)?))
+			.with_context(|| format!("Loading rules YAML: {}", path))?;
+		
 		Ok((project, rules))
 	}
 	
