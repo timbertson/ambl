@@ -1,0 +1,12 @@
+#!bash -eu
+cargo build \
+	--color always \
+	--package trou-sample-builder \
+	--target=wasm32-unknown-unknown \
+	&& cargo build \
+	--color always \
+	--package trou-builtin-rust \
+	--target=wasm32-unknown-unknown \
+	&& cargo build \
+	--color always \
+	--package trou-runtime

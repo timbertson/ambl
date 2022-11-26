@@ -1,5 +1,10 @@
 [workspace]
-members = [ "common", "api", "builder", "runtime" ]
+members = [ "common", "api", "builder", "runtime", "builtin/rust" ]
 
 [profile.release]
 panic = "abort"
+lto = true # this is slow, but drops wasm sizes by ~80%
+
+[profile.release.package.trou-builtin-rust]
+opt-level = "z" # Optimize for size.
+codegen-units = 1

@@ -7,7 +7,6 @@ pub use trou_common::rule::dsl::*;
 pub use trou_common::ffi::*;
 pub use trou_common::ctx::*;
 
-use serde::de::DeserializeOwned;
 use anyhow::*;
 
 // used to detect incompatible guest modules
@@ -52,7 +51,7 @@ impl TargetCtx {
 
 	pub fn target(&self) -> &str { &self.0.target }
 
-	pub fn invoke<'de, Response: DeserializeOwned>(&self, request: DependencyRequest) -> Result<Response> {
+	pub fn invoke<'de>(&self, request: DependencyRequest) -> Result<DependencyResponse> {
 		let tagged = TaggedDependencyRequest { token: self.0.token, request };
 		let buf = serde_json::to_vec(&tagged)?;
 		let mut response = SizedPtr::empty();
@@ -60,13 +59,25 @@ impl TargetCtx {
 			trou_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
 			response.to_slice()
 		};
-		let result = ResultFFI::deserialize(response_slice);
+		let result = ResultFFI::deserialize(response_slice).with_context(|| {
+			let response_str = String::from_utf8(response_slice.into())
+				.unwrap_or_else(|_|"[non-UTF8 string]".to_owned());
+			format!("Deserializing response to request: {:?}\n```\n{}\n```", &tagged.request, response_str)
+		});
 		// debug(format!("invoke result: {:?}", result));
 		result
 	}
 
 	// invoke shortcuts
-	pub fn build<S: Into<String>>(&self, path: S) -> Result<DependencyResponse> {
-		self.invoke(DependencyRequest::FileDependency(path.into()))
+	pub fn build<S: Into<String>>(&self, path: S) -> Result<()> {
+		self.invoke(DependencyRequest::FileDependency(path.into())).map(|_|())
+	}
+
+	pub fn run(&self, cmd: Command) -> Result<DependencyResponse> {
+		self.invoke(DependencyRequest::Execute(cmd))
+	}
+
+	pub fn always_rebuild(&self) -> Result<()> {
+		self.invoke(DependencyRequest::Universe).map(|_|())
 	}
 }

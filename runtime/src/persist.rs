@@ -194,6 +194,7 @@ pub enum PersistDependency {
 	File(Option<PersistFile>),
 	Env(PersistEnv),
 	Wasm(PersistWasmDependency),
+	AlwaysClean,
 	AlwaysDirty,
 }
 
@@ -205,6 +206,7 @@ impl PersistDependency {
 			(Env(a), Env(b)) => a != b,
 			(Wasm(_), Wasm(_)) => todo!(),
 			(AlwaysDirty, AlwaysDirty) => true,
+			(AlwaysClean, AlwaysClean) => false,
 			other => {
 				debug!("Comparing incompatible persisted dependencies: {:?}", other);
 				true
@@ -219,6 +221,7 @@ impl PersistDependency {
 			Env(env) => DependencyResponse::Str(env.0),
 			Wasm(wasm) => DependencyResponse::Str(wasm.result),
 			AlwaysDirty => DependencyResponse::Unit,
+			AlwaysClean => DependencyResponse::Unit,
 		}
 	}
 

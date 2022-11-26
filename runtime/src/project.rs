@@ -1,6 +1,7 @@
 #![allow(unreachable_code)]
 use std::collections::{HashMap, LinkedList};
 use std::collections::hash_map::Entry;
+use std::process::{Command, Stdio};
 use std::sync::atomic;
 use std::{fs, iter};
 use std::ops::DerefMut;
@@ -11,7 +12,7 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::build::{DependencyRequest, DependencyResponse};
+use trou_common::build::{DependencyRequest, DependencyResponse, self};
 use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
@@ -112,15 +113,15 @@ impl Project {
 		path: &str,
 		reason: &BuildReason
 	) -> Result<(Mutexed<'a, Project>, WasmModule)> {
+		debug!("Loading module {:?} for {:?}", path, reason);
+
+		// First, build the module itself and register it as a dependency.
+		// TODO need to enforce a project-rooted path, consistent with rules
+		let request = DependencyRequest::FileDependency(path.to_owned());
+		let (mut project, module_built) = Self::build(project, &request, reason)?;
+		project.register_dependency(reason.parent(), &request, module_built);
+
 		result_block(|| {
-			debug!("Loading module {:?} for {:?}", path, reason);
-
-			// First, build the module itself and register it as a dependency.
-			// TODO need to enforce a project-rooted path, consistent with rules
-			let request = DependencyRequest::FileDependency(path.to_owned());
-			let (mut project, module_built) = Self::build(project, &request, reason)?;
-			project.register_dependency(reason.parent(), &request, module_built);
-
 			let self_ref = project.self_ref.clone().unwrap();
 			let module_cache = &mut project.module_cache;
 
@@ -296,7 +297,7 @@ impl Project {
 	) -> Result<(Mutexed<'a, Project>, PersistDependency)> {
 		debug!("build({:?})", request);
 
-		match &request {
+		match request {
 			// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
 			DependencyRequest::EnvVar(key) => {
 				Ok((project, PersistDependency::Env(PersistEnv(std::env::var(key)?))))
@@ -416,8 +417,39 @@ impl Project {
 					}
 				}
 			},
+			DependencyRequest::FileSet(_) => todo!("handle FileSet"),
+			DependencyRequest::Execute(build::Command { exe, args, cwd, env, output, input }) => {
+				// TODO do we need to add any dependencies?
+				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
+				// need to add that.
+				let mut cmd = Command::new(exe);
+				cmd.args(args);
+				if let Some(cwd) = cwd {
+					cmd.current_dir(cwd);
+				}
+				cmd.stdin(match input {
+					build::Stdin::Inherit => Stdio::inherit(),
+					build::Stdin::Value(v) => todo!(),
+					build::Stdin::Null => Stdio::null(),
+				});
 
-			other => todo!("unhandled request: {:?}", other),
+				cmd.stdout(match output.stdout {
+					build::Stdout::String => todo!(),
+					build::Stdout::Inherit => Stdio::inherit(),
+					build::Stdout::Ignore => Stdio::null(),
+					build::Stdout::WriteTo(_) => todo!(),
+					build::Stdout::AppendTo(_) => todo!(),
+				});
+
+				debug!("+ {:?}", &cmd);
+				let result = cmd.status()?;
+				if result.success() {
+					Ok((project, PersistDependency::AlwaysClean))
+				} else {
+					Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result))
+				}
+			},
+			// other => todo!("unhandled request: {:?}", other),
 		}
 	}
 	

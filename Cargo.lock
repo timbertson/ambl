@@ -925,6 +925,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "trou-builtin-rust"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "trou-api",
+]
+
+[[package]]
 name = "trou-common"
 version = "0.1.0"
 dependencies = [

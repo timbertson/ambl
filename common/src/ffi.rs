@@ -71,7 +71,7 @@ impl<T> ResultFFI<T> {
 	}
 
 	pub fn deserialize(s: &[u8]) -> Result<T> where T: DeserializeOwned {
-		serde_json::from_slice::<Self>(s)?.into_result()
+		serde_json::from_slice::<Self>(s)?.into_result().context("Invalid FFI response")
 	}
 }
 

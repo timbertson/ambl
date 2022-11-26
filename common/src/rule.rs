@@ -107,6 +107,7 @@ pub struct NestedRule {
 
 
 pub mod dsl {
+	use crate::build::Command;
 	use super::*;
 
 	// Rule builder functions. Strictly these are just part of the API,
@@ -147,5 +148,16 @@ pub mod dsl {
 
 	pub fn build_via<S: Into<String>, S2: Into<String>>(module: S, fn_name: S2) -> FunctionSpec {
 		FunctionSpec { fn_name: fn_name.into(), module: Some(module.into()), config: None }
+	}
+	
+	pub fn cmd<S: Into<String>>(exe: S) -> Command {
+		Command {
+			exe: exe.into(),
+			args: Default::default(),
+			cwd: Default::default(),
+			env: Default::default(),
+			output: Default::default(),
+			input: Default::default(),
+		}
 	}
 }

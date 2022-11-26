@@ -9,7 +9,7 @@
 
 - target:
     names: [all] # TODO `name: all`
-    module: target/wasm32-unknown-unknown/release/trou_sample_builder.wasm
+    module: target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm
     fn: build_all
 
 - target:
@@ -17,11 +17,16 @@
      - a
      - b
      - c
-    module: target/wasm32-unknown-unknown/release/trou_sample_builder.wasm
+    module: target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm
     fn: build_all
     mode: WASM
     # config:
     #   length: 1
+
+- target:
+    names: [target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm]
+    module: target/wasm32-unknown-unknown/debug/trou_builtin_rust.wasm
+    fn: cargo
 
 # - include:
 #     mode: WASM
