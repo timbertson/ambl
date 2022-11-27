@@ -1,23 +1,15 @@
-// extern shims required by guests, plus a reexport of trou_common
+// extern shims required by guests, plus a reexport of various trou_common APIs
 
-use serde::{Serialize, Deserialize};
 pub use trou_common::build::*;
 pub use trou_common::rule::*;
 pub use trou_common::rule::dsl::*;
 pub use trou_common::ffi::*;
 pub use trou_common::ctx::*;
 
-use anyhow::*;
-
 // used to detect incompatible guest modules
 #[no_mangle]
 pub extern "C" fn trou_api_version() -> usize {
 	1
-}
-
-extern {
-	pub fn trou_invoke(data: *const u8, len: u32, out: &mut *mut u8, out_len: &mut u32);
-	pub fn trou_debug(data: *const u8, len: u32);
 }
 
 pub fn debug(s: &str) {
@@ -37,47 +29,4 @@ pub extern "C" fn trou_free(ptr: *mut u8, len: u32) {
 	let size = len as usize;
 	let data = unsafe { Vec::from_raw_parts(ptr, size, size) };
 	std::mem::drop(data);
-}
-
-#[derive(Serialize, Deserialize)]
-#[repr(transparent)]
-pub struct TargetCtx(RawTargetCtx);
-
-// needs to be in this crate to depend on trou_invoke
-impl TargetCtx {
-	pub fn new(target: String, token: u32) -> Self {
-		Self(RawTargetCtx::new(target, token))
-	}
-
-	pub fn target(&self) -> &str { &self.0.target }
-
-	pub fn invoke<'de>(&self, request: DependencyRequest) -> Result<DependencyResponse> {
-		let tagged = TaggedDependencyRequest { token: self.0.token, request };
-		let buf = serde_json::to_vec(&tagged)?;
-		let mut response = SizedPtr::empty();
-		let response_slice = unsafe {
-			trou_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
-			response.to_slice()
-		};
-		let result = ResultFFI::deserialize(response_slice).with_context(|| {
-			let response_str = String::from_utf8(response_slice.into())
-				.unwrap_or_else(|_|"[non-UTF8 string]".to_owned());
-			format!("Deserializing response to request: {:?}\n```\n{}\n```", &tagged.request, response_str)
-		});
-		// debug(format!("invoke result: {:?}", result));
-		result
-	}
-
-	// invoke shortcuts
-	pub fn build<S: Into<String>>(&self, path: S) -> Result<()> {
-		self.invoke(DependencyRequest::FileDependency(path.into())).map(|_|())
-	}
-
-	pub fn run(&self, cmd: Command) -> Result<DependencyResponse> {
-		self.invoke(DependencyRequest::Execute(cmd))
-	}
-
-	pub fn always_rebuild(&self) -> Result<()> {
-		self.invoke(DependencyRequest::Universe).map(|_|())
-	}
 }

@@ -1,4 +1,5 @@
 use anyhow::*;
+use serde::{Deserialize, Serialize};
 use trou_api::*;
 
 macro_rules! ffi {
@@ -16,20 +17,39 @@ macro_rules! ffi {
 	}
 }
 
+// TODO how do we share this struct nicely without
+// - making a second crate containing just the struct
+// - exposing internal functions (like `cargo`) on any module that depends on us
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CargoOpts {
+	package: Option<String>,
+}
+impl Default for CargoOpts {
+	fn default() -> Self {
+		Self { package: Default::default() }
+	}
+}
 
 ffi!(cargo);
-fn cargo(c: &TargetCtx) -> Result<()> {
-	debug(&format!("Building {}", c.target()));
+fn cargo(c: TargetCtx) -> Result<()> {
+	let opts: CargoOpts = c.parse_config()?;
+	debug(&format!("Building {} with {:?}", c.target(), &opts));
 	// TODO: depend on *.toml, src/**/*.rs
 	c.always_rebuild()?;
 
+	let mut args = vec!("build", "--target", "wasm32-unknown-unknown");
+	if let Some(package) = opts.package.as_ref() {
+		args.push("--package");
+		args.push(package);
+	}
 	// TODO: determine package from Cargo.toml
-	c.run(cmd("cargo").args(vec!("build", "--target", "wasm32-unknown-unknown", "--package", "trou-sample-builder")))?;
+	c.run(cmd("cargo").args(args))?;
 	Ok(())
 }
 
 ffi!(rules);
-pub fn rules(_: &BaseCtx) -> Result<Vec<Rule>> {
+pub fn rules(_: BaseCtx) -> Result<Vec<Rule>> {
 	Ok(vec!(
 		target("default", build_fn("cargo")),
 	))

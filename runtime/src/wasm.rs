@@ -4,7 +4,8 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::{build::*, ctx::{BaseCtx, RawTargetCtx}};
+use trou_common::build::*;
+use trou_common::ctx::*;
 use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
@@ -164,15 +165,14 @@ impl StateRef {
 		Ok(())
 	}
 
-	// TODO: accept config and pass it through
-	pub fn get_rules<C: AsContextMut>(&self, mut store: C) -> Result<Vec<Rule>> {
+	pub fn get_rules<C: AsContextMut>(&self, mut store: C, config: &trou_common::rule::Config) -> Result<Vec<Rule>> {
 		debug!("get_rules");
 		let mut write = self.write();
 		let state = write.as_ref()?;
 		let rules_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(
 			store.as_context_mut(), "rules_ffi")?;
 		drop(write);
-		self.call_serde(store, rules_ffi, &BaseCtx::new())
+		self.call_serde(store, rules_ffi, &BaseCtx::new(config.value().to_owned()))
 	}
 
 	pub fn run_builder<C: AsContextMut>(&self, mut store: C, token: ActiveBuildToken, path: &str, builder: &Target, _unlocked_evidence: &ProjectHandle) -> Result<Option<PersistFile>> {
@@ -180,22 +180,12 @@ impl StateRef {
 		let mut write = self.write();
 		let state = write.as_ref()?;
 		let f = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store.as_context_mut(), &builder.build.fn_name)?;
-		let target = RawTargetCtx::new(path.to_owned(), token.raw());
+		let config = builder.build.config.value();
+		let target = TargetCtx::new(path.to_owned(), config.to_owned(), token.raw());
 		drop(write);
 		debug!("run_builder call_serde");
-		self.call_serde(store, f, &target)?;
+		let result: () = self.call_serde::<TargetCtx, (), C>(store, f, &target)?;
 		PersistFile::from_path(path)
-	}
-
-	pub fn call_fn<C: AsContextMut>(&self, mut store: C, call: &FunctionSpec, _unlocked_evidence: &ProjectHandle) -> Result<String> {
-		debug!("call_fn");
-		let mut write = self.write();
-		let state = write.as_ref()?;
-		let f = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store.as_context_mut(), &call.fn_name)?;
-		drop(write);
-		debug!("run_builder call_serde");
-		let arg = call.config.as_ref().expect("TODO implement default arg for missing config");
-		self.call_str(store, f, &arg, |b| Ok(String::from_utf8(b)?))
 	}
 }
 
@@ -224,7 +214,7 @@ impl WasmModule {
 				let s = String::from_utf8(data_bytes)?;
 				debug!("Got string from wasm: {}", &s);
 				let request: TaggedDependencyRequest = serde_json::from_str(&s)?;
-				println!("Got dep request: {:?} from WebAssembly", &request);
+				debug!("Got dep request: {:?} from WebAssembly", &request);
 				let mut project_handle = project.handle();
 				let project = project_handle.lock("trou_invoke")?;
 				let TaggedDependencyRequest { token, request } = request;

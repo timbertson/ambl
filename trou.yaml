@@ -8,7 +8,7 @@
 #     path: target/debug/builder.wasm
 
 - target:
-    names: [all] # TODO `name: all`
+    names: [all] # TODO `name: all` for convenience
     module: target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm
     fn: build_all
 
@@ -27,11 +27,13 @@
     names: [target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm]
     module: target/wasm32-unknown-unknown/debug/trou_builtin_rust.wasm
     fn: cargo
+    config:
+      package: trou-sample-builder
 
 # - include:
 #     mode: WASM
 #     module: builtin:scala
-#     config: | # TODO: parse as nested JSON?
+#     config:
 #       x: 123
 
 # - include:

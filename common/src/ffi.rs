@@ -71,7 +71,10 @@ impl<T> ResultFFI<T> {
 	}
 
 	pub fn deserialize(s: &[u8]) -> Result<T> where T: DeserializeOwned {
-		serde_json::from_slice::<Self>(s)?.into_result().context("Invalid FFI response")
+		serde_json::from_slice::<Self>(s).with_context(|| {
+			let s: String = String::from_utf8(Vec::from_iter(s.iter().map(|c| *c))).unwrap_or("[invalid utf8]".to_owned());
+			format!("Can't deserialize ResultFFI from:\n```\n{}\n```", s)
+		})?.into_result()
 	}
 }
 
@@ -84,14 +87,24 @@ impl<T> From<Result<T>> for ResultFFI<T> {
 	}
 }
 
-pub fn wrap_fn_mut1<'a, I: DeserializeOwned, O: Serialize, F: FnOnce(&I)
+pub fn wrap_fn_mut1<'a, I: DeserializeOwned, O: Serialize, F: FnOnce(I)
 	-> Result<O>>(f: F, ptr_in: *const u8, len_in: u32, ptr_out: &'a mut *mut u8, len_out: &'a mut u32) {
 	let mut out = SizedPtrRef::wrap(ptr_out, len_out);
 	let in_bytes = unsafe { slice::from_raw_parts(ptr_in, len_in as usize) };
 	let result: Result<O> = (|| {
 		let input = serde_json::from_slice::<I>(in_bytes)?;
-		f(&input)
+		f(input)
 	})();
 	let bytes = ResultFFI::serialize(result).expect("serialization failed").into_bytes();
 	out.write_and_leak(bytes).expect("write_and_leak failed")
+}
+
+pub fn wrap_fn_mut2<'a, I1: DeserializeOwned, I2: DeserializeOwned + Default, O: Serialize, F: FnOnce(I1, I2)
+	-> Result<O>>(f: F, ptr_in: *const u8, len_in: u32, ptr_out: &'a mut *mut u8, len_out: &'a mut u32) {
+	let f = |pair: (I1, Option<I2>)| {
+		let (i1, i2) = pair;
+		let i2 = i2.unwrap_or_else(|| Default::default());
+		f(i1, i2)
+	};
+	wrap_fn_mut1(f, ptr_in, len_in, ptr_out, len_out)
 }

@@ -226,7 +226,7 @@ impl Project {
 								&BuildReason::Include(subchain)
 							)?;
 							project = project_ret;
-							module.state.get_rules(&mut module.store)?
+							module.state.get_rules(&mut module.store, include.get_config())?
 						},
 					};
 
@@ -291,7 +291,7 @@ impl Project {
 	that speculatively-evaluated dep failures cause the parent to rebuild, not to fail.
 	*/
 
-	pub fn build<'a>(mut project: Mutexed<'a, Project>,
+	pub fn build<'a>(project: Mutexed<'a, Project>,
 		request: &DependencyRequest,
 		reason: &BuildReason,
 	) -> Result<(Mutexed<'a, Project>, PersistDependency)> {
@@ -309,48 +309,49 @@ impl Project {
 			// but if we parallelize then it's possible that some earlier input will change, causing
 			// this wasm call to not be made, or be made with different arguments.
 			DependencyRequest::WasmCall(spec) => {
-				// This should be made impossible via types but I don't want to duplicate DependencyRequest yet
-				let module_path = spec.module.to_owned().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
+				todo!()
+				// // This should be made impossible via types but I don't want to duplicate DependencyRequest yet
+				// let module_path = spec.module.to_owned().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
 
-				let cached = project.build_cache.lookup(&request)?.and_then(|p| p.as_wasm_call()).map(|p| p.to_owned());
-				if let Some(cached) = cached {
-					let (project_ret, needs_build) = Self::requires_build(project, &cached)?;
-					project = project_ret;
-					if !needs_build {
-						debug!("Using cached result for {:?}", &cached.call);
-						return Ok((project, PersistDependency::Wasm(cached.call)));
-					}
-				};
+				// let cached = project.build_cache.lookup(&request)?.and_then(|p| p.as_wasm_call()).map(|p| p.to_owned());
+				// if let Some(cached) = cached {
+				// 	let (project_ret, needs_build) = Self::requires_build(project, &cached)?;
+				// 	project = project_ret;
+				// 	if !needs_build {
+				// 		debug!("Using cached result for {:?}", &cached.call);
+				// 		return Ok((project, PersistDependency::Wasm(cached.call)));
+				// 	}
+				// };
 
-				let build_token = ActiveBuildToken::generate();
-				debug!("created build token {:?} for {:?}", build_token, &request);
-				let (mut project, mut module) = Self::load_module_inner(
-					project,
-					&module_path,
-					&BuildReason::Dependency(build_token))?;
+				// let build_token = ActiveBuildToken::generate();
+				// debug!("created build token {:?} for {:?}", build_token, &request);
+				// let (mut project, mut module) = Self::load_module_inner(
+				// 	project,
+				// 	&module_path,
+				// 	&BuildReason::Dependency(build_token))?;
 				
-				let deps = DepSet::default();
-				// deps.add(todo!(), todo!()); // TODO add module_path dep
+				// let deps = DepSet::default();
+				// // deps.add(todo!(), todo!()); // TODO add module_path dep
 				
-				let result = project.unlocked_block(|project_handle| {
-					// TODO wasm calls can be cached. This requires tracking the inputs to the wasm call, mainly the module itself.
-					module.state.call_fn(&mut module.store, spec, &project_handle)
-				})?;
-				let persist = Persist::Wasm(PersistWasmCall {
-					deps,
-					call: PersistWasmDependency {
-						spec: spec.to_owned(),
-						result,
-					}
-				});
+				// let result = project.unlocked_block(|project_handle| {
+				// 	// TODO wasm calls can be cached. This requires tracking the inputs to the wasm call, mainly the module itself.
+				// 	module.state.call_fn(&mut module.store, spec, &project_handle)
+				// })?;
+				// let persist = Persist::Wasm(PersistWasmCall {
+				// 	deps,
+				// 	call: PersistWasmDependency {
+				// 		spec: spec.to_owned(),
+				// 		result,
+				// 	}
+				// });
 				
-				project.save_build_result(SaveBuildResult {
-					parent: reason.parent(),
-					request,
-					result: &persist
-				})?;
+				// project.save_build_result(SaveBuildResult {
+				// 	parent: reason.parent(),
+				// 	request,
+				// 	result: &persist
+				// })?;
 
-				Ok((project, persist.into_dependency()))
+				// Ok((project, persist.into_dependency()))
 			},
 
 			DependencyRequest::FileDependency(name) => {
@@ -441,12 +442,12 @@ impl Project {
 					build::Stdout::AppendTo(_) => todo!(),
 				});
 
-				debug!("+ {:?}", &cmd);
+				info!("+ {:?}", &cmd);
 				let result = cmd.status()?;
 				if result.success() {
 					Ok((project, PersistDependency::AlwaysClean))
 				} else {
-					Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result))
+					Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result.code()))
 				}
 			},
 			// other => todo!("unhandled request: {:?}", other),

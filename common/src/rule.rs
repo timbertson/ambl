@@ -1,7 +1,30 @@
 use serde::{Serialize, Deserialize};
+use std::hash::Hash;
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IncludeMode { YAML, WASM }
+
+// Newtype wrapper so we can implement Hash for it
+#[repr(transparent)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Config(pub Option<serde_json::Value>);
+impl Config {
+	pub fn value(&self) -> &Option<serde_json::Value> {
+		&self.0
+	}
+}
+
+impl Hash for Config {
+	fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {
+		// This is an extremely weak hash, because a nice one would require the ability
+		// to iterate Value object properties in a sorted order and that's not worth it.
+	}
+}
+impl Default for Config {
+	fn default() -> Self {
+		Self(Default::default())
+	}
+}
 
 // used for delegating target definitions to another module
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -13,15 +36,16 @@ pub struct Include {
 	scope: Option<String>,
 
 	#[serde(default)]
-	config: Option<String>,
+	config: Config,
 
 	// TODO: just detect file extension?
 	mode: IncludeMode, // TODO this is bad modelling, YAML doesn't use config
 }
 
 impl Include {
-	pub fn config<S: Into<String>>(mut self, s: S) -> Self {
-		self.config = Some(s.into());
+	// TODO: typed variant which takes a Serializable
+	pub fn config(mut self, v: serde_json::Value) -> Self {
+		self.config = Config(Some(v));
 		self
 	}
 
@@ -38,7 +62,7 @@ impl Include {
 		&self.module
 	}
 
-	pub fn get_config(& self) -> &Option<String> {
+	pub fn get_config(& self) -> &Config {
 		&self.config
 	}
 
@@ -47,7 +71,7 @@ impl Include {
 	}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FunctionSpec {
 	#[serde(rename = "fn")]
@@ -57,12 +81,12 @@ pub struct FunctionSpec {
 	pub module: Option<String>,
 
 	#[serde(default)]
-	pub config: Option<String>,
+	pub config: Config,
 }
 
 impl FunctionSpec {
-	pub fn config<S: Into<String>>(mut self, s: S) -> Self {
-		self.config = Some(s.into());
+	pub fn config(mut self, v: serde_json::Value) -> Self {
+		self.config = Config(Some(v));
 		self
 	}
 
@@ -131,23 +155,44 @@ pub mod dsl {
 	}
 
 	pub fn module<S: Into<String>>(module: S) -> Include {
-		Include { module: module.into(), scope: None, config: None, mode: IncludeMode::WASM }
+		Include {
+			module: module.into(),
+			scope: None,
+			config: Default::default(),
+			mode: IncludeMode::WASM
+		}
 	}
 
 	pub fn yaml<S: Into<String>>(path: S) -> Include {
-		Include { module: path.into(), scope: None, config: None, mode: IncludeMode::YAML }
+		Include {
+			module: path.into(),
+			scope: None,
+			config: Default::default(),
+			mode: IncludeMode::YAML
+		}
 	}
 
 	pub fn alias<S1: Into<String>, S2: Into<String>>(name: S1, path: S2) -> Rule {
-		Rule::Alias(Alias { name: name.into(), path: path.into() })
+		Rule::Alias(Alias {
+			name: name.into(),
+			path: path.into()
+		})
 	}
 
 	pub fn build_fn<S: Into<String>>(fn_name: S) -> FunctionSpec {
-		FunctionSpec { fn_name: fn_name.into(), module: None, config: None }
+		FunctionSpec {
+			fn_name: fn_name.into(),
+			module: None,
+			config: Default::default()
+		}
 	}
 
 	pub fn build_via<S: Into<String>, S2: Into<String>>(module: S, fn_name: S2) -> FunctionSpec {
-		FunctionSpec { fn_name: fn_name.into(), module: Some(module.into()), config: None }
+		FunctionSpec {
+			fn_name: fn_name.into(),
+			module: Some(module.into()),
+			config: Default::default()
+		}
 	}
 	
 	pub fn cmd<S: Into<String>>(exe: S) -> Command {
