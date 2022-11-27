@@ -247,10 +247,17 @@ impl HasDependencies for PersistWasmCall {
 // it's stored in Project, keyed by ActiveBuildToken
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepSet {
-	deps: Vec<(DependencyRequest, PersistDependency)>,
+	pub deps: Vec<(DependencyRequest, PersistDependency)>,
 }
 
+const EMPTY_DEPSET: DepSet = DepSet { deps: Vec::new() };
+const EMPTY_DEPSET_PTR: &'static DepSet = &EMPTY_DEPSET;
+
 impl DepSet {
+	pub fn empty_static() -> &'static DepSet {
+		EMPTY_DEPSET_PTR
+	}
+
 	pub fn add(&mut self, request: DependencyRequest, result: PersistDependency) {
 		self.deps.push((request, result));
 	}

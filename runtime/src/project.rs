@@ -19,6 +19,7 @@ use wasmtime::*;
 
 use crate::err::*;
 use crate::persist::*;
+use crate::sandbox::Sandbox;
 use crate::sync::{MutexRef, Mutexed, MutexHandle};
 use crate::{wasm::WasmModule, sync::lock_failed};
 
@@ -419,36 +420,12 @@ impl Project {
 				}
 			},
 			DependencyRequest::FileSet(_) => todo!("handle FileSet"),
-			DependencyRequest::Execute(build::Command { exe, args, cwd, env, output, input }) => {
-				// TODO do we need to add any dependencies?
+			DependencyRequest::Execute(cmd) => {
+				// TODO do we need to add any dependencies first?
 				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
 				// need to add that.
-				let mut cmd = Command::new(exe);
-				cmd.args(args);
-				if let Some(cwd) = cwd {
-					cmd.current_dir(cwd);
-				}
-				cmd.stdin(match input {
-					build::Stdin::Inherit => Stdio::inherit(),
-					build::Stdin::Value(v) => todo!(),
-					build::Stdin::Null => Stdio::null(),
-				});
-
-				cmd.stdout(match output.stdout {
-					build::Stdout::String => todo!(),
-					build::Stdout::Inherit => Stdio::inherit(),
-					build::Stdout::Ignore => Stdio::null(),
-					build::Stdout::WriteTo(_) => todo!(),
-					build::Stdout::AppendTo(_) => todo!(),
-				});
-
-				info!("+ {:?}", &cmd);
-				let result = cmd.status()?;
-				if result.success() {
-					Ok((project, PersistDependency::AlwaysClean))
-				} else {
-					Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result.code()))
-				}
+				let project = Sandbox::run(project, cmd, reason)?;
+				Ok((project, PersistDependency::AlwaysClean))
 			},
 			// other => todo!("unhandled request: {:?}", other),
 		}
@@ -471,6 +448,10 @@ impl Project {
 		let collected = self.active_tasks.remove(&token).unwrap_or_else(Default::default);
 		debug!("Collected {:?} deps for token {:?}", collected.len(), token);
 		collected
+	}
+
+	pub fn get_deps(&self, token: ActiveBuildToken) -> Option<&DepSet> {
+		self.active_tasks.get(&token)
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
