@@ -431,7 +431,8 @@ impl Project {
 		}
 	}
 	
-	// Called after every target build, to update both (a) the in-memory understanding of what the parent
+	// Called after every successful target build or file dependency declaration,
+	// to update both (a) the in-memory understanding of what the parent
 	// task depends on, and (b) the persistent cache of built results.
 	fn save_build_result(&mut self, store: SaveBuildResult) -> Result<()> {
 		let SaveBuildResult { request, result, parent } = store;
@@ -494,6 +495,10 @@ impl Project {
 		Ok((project, needs_build))
 	}
 	
+	pub fn lookup(&self, request: &DependencyRequest) -> Result<Option<&Persist>> {
+		self.build_cache.lookup(request)
+	}
+
 	pub fn save(&self) -> Result<()> {
 		self.build_cache.save()
 	}

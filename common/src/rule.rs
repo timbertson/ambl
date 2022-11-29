@@ -201,6 +201,7 @@ pub mod dsl {
 			args: Default::default(),
 			cwd: Default::default(),
 			env: Default::default(),
+			env_inherit: Default::default(),
 			output: Default::default(),
 			input: Default::default(),
 		}

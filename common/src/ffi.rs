@@ -54,14 +54,21 @@ pub unsafe fn leak_opaque<T>(t: T) -> *const T {
 #[derive(Serialize, Deserialize)]
 pub enum ResultFFI<T> {
 	Ok(T),
-	Err(String),
+	Err(Vec<String>),
 }
 
 impl<T> ResultFFI<T> {
 	pub fn into_result(self) -> Result<T> {
 		match self {
 			ResultFFI::Ok(t) => Result::Ok(t),
-			ResultFFI::Err(e) => Result::Err(Error::msg(e)),
+			ResultFFI::Err(chain) => {
+				let mut it = chain.into_iter();
+				let mut err = Error::msg(it.next().unwrap_or_else(|| "[empty error message]".to_owned()));
+				for msg in it {
+					err = err.context(msg);
+				}
+				Result::Err(err)
+			},
 		}
 	}
 	
@@ -82,7 +89,9 @@ impl<T> From<Result<T>> for ResultFFI<T> {
 	fn from(r: Result<T>) -> Self {
 		match r {
 			Result::Ok(t) => ResultFFI::Ok(t),
-			Result::Err(e) => ResultFFI::Err(format!("{}", e)),
+			Result::Err(e) => {
+				ResultFFI::Err(e.chain().map(|c| c.to_string()).collect())
+			},
 		}
 	}
 }

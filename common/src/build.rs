@@ -8,6 +8,7 @@ use crate::rule::FunctionSpec;
 // the requested resource.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum DependencyRequest {
+	// File (or target)
 	FileDependency(String),
 	
 	// an explicit method + args in a wasm module
@@ -44,6 +45,7 @@ pub struct Command {
 	pub args: Vec<String>,
 	pub cwd: Option<String>,
 	pub env: BTreeMap<String, String>,
+	pub env_inherit: Vec<String>,
 	pub output: Stdio,
 	pub input: Stdin,
 	// TODO add hermeticity by default, with an opt-out. Biggest challenge is being able to declare (transitive) available files,
@@ -60,6 +62,16 @@ pub struct Command {
 impl Command {
 	pub fn args<S: ToString, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
 		self.args.extend(v.into_iter().map(|a| a.to_string()));
+		self
+	}
+
+	pub fn env<V: IntoIterator<Item=(String, String)>>(mut self, v: V) -> Self {
+		self.env.extend(v.into_iter());
+		self
+	}
+
+	pub fn env_inherit<S: Into<String>, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
+		self.env_inherit.extend(v.into_iter().map(|s| s.into()));
 		self
 	}
 }
