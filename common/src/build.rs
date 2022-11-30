@@ -9,7 +9,7 @@ use crate::rule::FunctionSpec;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum DependencyRequest {
 	// File (or target)
-	FileDependency(String),
+	FileDependency(FileDependency),
 	
 	// an explicit method + args in a wasm module
 	WasmCall(FunctionSpec),
@@ -19,6 +19,7 @@ pub enum DependencyRequest {
 	Execute(Command),
 	Universe,
 }
+
 
 // Used to associate a request with the implicit build context
 // in which this code is running
@@ -32,12 +33,28 @@ pub struct TaggedDependencyRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DependencyResponse {
 	Unit,
+	Bool(bool),
 	Str(String),
 	FileSet(String),
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
-pub struct FileHandle { pub id: u32 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct FileDependency {
+	pub path: String,
+	pub ret: FileDependencyType,
+}
+impl FileDependency {
+	pub fn new(path: String) -> Self {
+		Self { path, ret: FileDependencyType::Unit }
+	}
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum FileDependencyType {
+	Unit, // just depend on it
+	Existence, // check existence
+	Contents, // return contents
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Command {

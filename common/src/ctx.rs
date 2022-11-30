@@ -1,7 +1,7 @@
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
-use crate::{ffi::{ResultFFI, SizedPtr}, build::{TaggedDependencyRequest, DependencyRequest, DependencyResponse, Command}};
+use crate::{ffi::{ResultFFI, SizedPtr}, build::{TaggedDependencyRequest, DependencyRequest, DependencyResponse, Command, FileDependencyType, FileDependency}};
 
 #[cfg(target_arch = "wasm32")]
 extern {
@@ -81,7 +81,33 @@ impl TargetCtx {
 
 	// invoke shortcuts
 	pub fn build<S: Into<String>>(&self, path: S) -> Result<()> {
-		self.invoke(DependencyRequest::FileDependency(path.into())).map(|_|())
+		self.invoke(DependencyRequest::FileDependency(FileDependency {
+			path: path.into(),
+			ret: FileDependencyType::Unit,
+		})).map(|ret| match ret {
+			DependencyResponse::Unit => (),
+			other => panic!("Unexpected file dependency response: {:?}", other),
+		})
+	}
+
+	pub fn exists<S: Into<String>>(&self, path: S) -> Result<bool> {
+		self.invoke(DependencyRequest::FileDependency(FileDependency {
+			path: path.into(),
+			ret: FileDependencyType::Existence,
+		})).map(|ret| match ret {
+			DependencyResponse::Bool(b) => b,
+			other => panic!("Unexpected file dependency response: {:?}", other),
+		})
+	}
+
+	pub fn contents_of<S: Into<String>>(&self, path: S) -> Result<String> {
+		self.invoke(DependencyRequest::FileDependency(FileDependency {
+			path: path.into(),
+			ret: FileDependencyType::Contents,
+		})).map(|ret| match ret {
+			DependencyResponse::Str(s) => s,
+			other => panic!("Unexpected file dependency response: {:?}", other),
+		})
 	}
 
 	pub fn run(&self, cmd: Command) -> Result<DependencyResponse> {

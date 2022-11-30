@@ -2,9 +2,9 @@ use log::*;
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use trou_common::build;
+use trou_common::build::{self};
 
-use crate::{persist::{DepSet, PersistDependency, Persist}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path::{AnyPath, Relative, Absolute}, err::result_block};
+use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path::{AnyPath, Relative, Absolute}, err::result_block};
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -34,25 +34,25 @@ impl Sandbox {
 	fn collect_paths<'a>(
 		mut project: Mutexed<'a, Project>,
 		dest: &mut HashSet<Relative>,
-		req: DependencyRequest,
+		key: DependencyKey,
 	) -> Result<Mutexed<'a, Project>> {
-		match req {
-			DependencyRequest::FileDependency(ref f) => {
+		match key {
+			DependencyKey::FileDependency(ref f) => {
 				let rel = AnyPath::relative(f.to_owned())?;
 				if dest.contains(&rel) {
 					return Ok(project);
 				}
-				let persist = project.lookup(&req)?
-					.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", req))?;
+				let persist = project.lookup(&key)?
+					.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?;
 				match persist {
 					Persist::File(Some(_)) => {
 						dest.insert(rel);
 					},
 					Persist::Target(target) => {
 						// TODO don't include transitive deps if there is a checksum
-						for (req, _) in target.deps.deps.clone().into_iter() {
-							// TODO wish we didn't need req.to_owned here
-							project = Self::collect_paths(project, dest, req.to_owned())?;
+						for (key, _) in target.deps.deps.clone().into_iter() {
+							// TODO wish we didn't need key.to_owned here
+							project = Self::collect_paths(project, dest, key.to_owned())?;
 						}
 					},
 					_ => (),

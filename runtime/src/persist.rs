@@ -3,26 +3,43 @@ use std::{collections::HashMap, fs, time::UNIX_EPOCH, io};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
-use trou_common::{build::{DependencyRequest, DependencyResponse}, rule::FunctionSpec};
+use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::FunctionSpec};
 
 use crate::project::{ProjectRef, Project, ProjectHandle};
 
-pub enum Cached<T> {
-	Missing,
-	Cached(T), // may be stale
-	Fresh(T), // definitely fresh
-}
-
-pub enum BuildResult<T> {
-	Changed(T),
-	Unchanged(T),
-}
-
-impl<T> BuildResult<T> {
-	pub fn raw(self) -> T {
+impl Into<DependencyRequest> for DependencyKey {
+	fn into(self) -> DependencyRequest {
 		match self {
-			Self::Changed(t) => t,
-			Self::Unchanged(t) => t,
+			DependencyKey::FileDependency(v) => DependencyRequest::FileDependency(FileDependency { path: v, ret: FileDependencyType::Unit }),
+			DependencyKey::WasmCall(v) => DependencyRequest::WasmCall(v),
+			DependencyKey::EnvVar(v) => DependencyRequest::EnvVar(v),
+			DependencyKey::FileSet(v) => DependencyRequest::FileSet(v),
+			DependencyKey::Execute(v) => DependencyRequest::Execute(v),
+			DependencyKey::Universe => DependencyRequest::Universe,
+		}
+	}
+}
+
+// A dependency request stripped of information which only affects the return value (not the built item)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum DependencyKey {
+	FileDependency(String),
+	WasmCall(FunctionSpec),
+	EnvVar(String),
+	FileSet(String),
+	Execute(Command),
+	Universe,
+}
+
+impl From<DependencyRequest> for DependencyKey {
+	fn from(req: DependencyRequest) -> Self {
+		match req {
+			DependencyRequest::FileDependency(v) => DependencyKey::FileDependency(v.path),
+			DependencyRequest::WasmCall(v) => DependencyKey::WasmCall(v),
+			DependencyRequest::EnvVar(v) => DependencyKey::EnvVar(v),
+			DependencyRequest::FileSet(v) => DependencyKey::FileSet(v),
+			DependencyRequest::Execute(v) => DependencyKey::Execute(v),
+			DependencyRequest::Universe => DependencyKey::Universe,
 		}
 	}
 }
@@ -71,11 +88,11 @@ pub struct PersistWasmDependency {
 // dumb workaround for JSON only allowing string keys
 #[derive(Serialize, Deserialize)]
 struct DepStorePersist {
-	items: Vec<(DependencyRequest, Persist)>,
+	items: Vec<(DependencyKey, Persist)>,
 }
 
-impl From<HashMap<DependencyRequest, Persist>> for DepStorePersist {
-	fn from(map: HashMap<DependencyRequest, Persist>) -> Self {
+impl From<HashMap<DependencyKey, Persist>> for DepStorePersist {
+	fn from(map: HashMap<DependencyKey, Persist>) -> Self {
 		Self { items: map.into_iter().collect() }
 	}
 }
@@ -94,7 +111,7 @@ pub struct DepStore {
 	// wasm_cache: HashMap<FunctionSpec, Cached<PersistWasmCall>>,
 	// env_cache: HashMap<String, Cached<String>>,
 	
-	cache: HashMap<DependencyRequest, Persist>
+	cache: HashMap<DependencyKey, Persist>
 }
 
 impl DepStore {
@@ -126,13 +143,13 @@ impl DepStore {
 	}
 
 	// TODO remove these result types if we don't do IO directly...
-	pub fn update(&mut self, request: DependencyRequest, persist: Persist) -> Result<()> {
-		self.cache.insert(request, persist);
+	pub fn update(&mut self, key: DependencyKey, persist: Persist) -> Result<()> {
+		self.cache.insert(key, persist);
 		Ok(())
 	}
 
-	pub fn lookup(&self, request: &DependencyRequest) -> Result<Option<&Persist>> {
-		Ok(self.cache.get(request))
+	pub fn lookup(&self, key: &DependencyKey) -> Result<Option<&Persist>> {
+		Ok(self.cache.get(key))
 	}
 }
 
@@ -214,15 +231,24 @@ impl PersistDependency {
 		}
 	}
 
-	pub fn into_response(self) -> DependencyResponse {
+	pub fn into_response(self, request: &DependencyRequest) -> Result<DependencyResponse> {
 		use PersistDependency::*;
-		match self {
-			File(_) => DependencyResponse::Unit,
+		Ok(match self {
+			File(state) => match request {
+				DependencyRequest::FileDependency(file_dep) => {
+					match file_dep.ret {
+						FileDependencyType::Unit => todo!(),
+						FileDependencyType::Existence => DependencyResponse::Bool(state.is_some()),
+						FileDependencyType::Contents => DependencyResponse::Str(fs::read_to_string(&file_dep.path)?),
+					}
+				},
+				_ => DependencyResponse::Unit,
+			},
 			Env(env) => DependencyResponse::Str(env.0),
 			Wasm(wasm) => DependencyResponse::Str(wasm.result),
 			AlwaysDirty => DependencyResponse::Unit,
 			AlwaysClean => DependencyResponse::Unit,
-		}
+		})
 	}
 
 }
@@ -247,7 +273,7 @@ impl HasDependencies for PersistWasmCall {
 // it's stored in Project, keyed by ActiveBuildToken
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepSet {
-	pub deps: Vec<(DependencyRequest, PersistDependency)>,
+	pub deps: Vec<(DependencyKey, PersistDependency)>,
 }
 
 const EMPTY_DEPSET: DepSet = DepSet { deps: Vec::new() };
@@ -258,7 +284,7 @@ impl DepSet {
 		EMPTY_DEPSET_PTR
 	}
 
-	pub fn add(&mut self, request: DependencyRequest, result: PersistDependency) {
+	pub fn add(&mut self, request: DependencyKey, result: PersistDependency) {
 		self.deps.push((request, result));
 	}
 
@@ -266,11 +292,11 @@ impl DepSet {
 		self.deps.len()
 	}
 
-	pub fn iter(&self) -> std::slice::Iter<(DependencyRequest, PersistDependency)> {
+	pub fn iter(&self) -> std::slice::Iter<(DependencyKey, PersistDependency)> {
 		self.deps.iter()
 	}
 
-	pub fn get(&self, request: &DependencyRequest) -> Option<&PersistDependency> {
+	pub fn get(&self, request: &DependencyKey) -> Option<&PersistDependency> {
 		self.deps.iter().find_map(|(key, dep)| {
 			if key == request {
 				Some(dep)
@@ -285,46 +311,4 @@ impl Default for DepSet {
 	fn default() -> Self {
 		Self { deps: Default::default() }
 	}
-}
-
-/*
-For a TARGET, we want to know whether the current file needs rebuilding.
-Firstly, we take the file itself - its presence and mtime / checksum.
-If it's missing, obviously rebuild.
-If its metadata matches, check its deps.
-
-First dep is always the file used to build this dep.
-Other deps are added via FileDependency requests etc.
-
-For each dep, build. If the persisted value is Some, then it means we need to rebuild
-the current target. We can stop the dependency search at this point, as any targets we still depend on
-will be built as part of the process.
-
-Note that we can short-circuit at the dependency level. e.g. if A -> B -> C -> D. If D has changed,
-we must reuild C. But if its new persisted value is unchanged, then B doesn't need to be rebuilt.
-
-At any point in the chain we can create a cut point by depending on a (wasmModule, args) pair.
-This is logically a target, but it doesn't have a name.
-
-For TARGET LISTING, we need to persist the actual rules. For this we use a serialized structure, making
-sure to use a stable serialization (i.e. we never retun `Equivalent` values, only Unchanged / Changed)
-
------ KINDS -----
-
-	FileDependency(String),
-	-> Key::File(s)
-	
-	WasmCall(FunctionSpec),
-	-> for a target, it's Key::Anonymous(f, serialized), returning nothing
-	-> for a target_rules, it's Key::Anonymous(f, serialized), returning serialized targets
-
-	EnvVar(String),
-	-> Env: (Key::Env(key), value)
-	FileSet(String),
-	Universe,
-
-*/
-struct BuildDependency {
-	request: DependencyRequest,
-	recursive: Vec<DependencyRequest>,
 }

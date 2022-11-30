@@ -44,7 +44,7 @@ fn cargo(c: TargetCtx) -> Result<()> {
 		args.push(package);
 	}
 	// TODO: determine package from Cargo.toml
-	c.run(cmd("cargo").args(args))?;
+	c.run(cmd("cargo").args(args).env_inherit(vec!("HOME", "PATH")))?;
 	Ok(())
 }
 

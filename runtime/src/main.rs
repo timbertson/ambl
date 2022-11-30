@@ -32,7 +32,7 @@ fn main() -> Result<()> {
 	let result = (|| {
 		let args: Vec<String> = env::args().skip(1).collect();
 		for arg in args {
-			Project::build(root.handle().lock("main")?, &DependencyRequest::FileDependency(arg), &BuildReason::Explicit)?;
+			Project::build(root.handle().lock("main")?, &DependencyRequest::FileDependency(FileDependency::new(arg)), &BuildReason::Explicit)?;
 		}
 		Ok(())
 	})();

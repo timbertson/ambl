@@ -12,7 +12,7 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::build::{DependencyRequest, DependencyResponse, self};
+use trou_common::build::{DependencyRequest, DependencyResponse, self, FileDependency, FileDependencyType};
 use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
@@ -118,9 +118,9 @@ impl Project {
 
 		// First, build the module itself and register it as a dependency.
 		// TODO need to enforce a project-rooted path, consistent with rules
-		let request = DependencyRequest::FileDependency(path.to_owned());
+		let request = DependencyRequest::FileDependency(FileDependency::new(path.to_owned()));
 		let (mut project, module_built) = Self::build(project, &request, reason)?;
-		project.register_dependency(reason.parent(), &request, module_built);
+		project.register_dependency(reason.parent(), request.into(), module_built);
 
 		result_block(|| {
 			let self_ref = project.self_ref.clone().unwrap();
@@ -154,9 +154,9 @@ impl Project {
 		debug!("Loading YAML rules {:?} for {:?}", path, reason);
 		// First, build the module itself and register it as a dependency.
 		// TODO need to enforce a project-rooted path, consistent with rules
-		let request = DependencyRequest::FileDependency(path.to_owned());
+		let request = DependencyRequest::FileDependency(FileDependency::new(path.to_owned()));
 		let (mut project, module_built) = Self::build(project, &request, reason)?;
-		project.register_dependency(reason.parent(), &request, module_built);
+		project.register_dependency(reason.parent(), request.into(), module_built);
 
 		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(path)?)?))
 			.with_context(|| format!("Loading rules YAML: {}", path))?;
@@ -297,7 +297,6 @@ impl Project {
 		reason: &BuildReason,
 	) -> Result<(Mutexed<'a, Project>, PersistDependency)> {
 		debug!("build({:?})", request);
-
 		match request {
 			// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
 			DependencyRequest::EnvVar(key) => {
@@ -355,7 +354,9 @@ impl Project {
 				// Ok((project, persist.into_dependency()))
 			},
 
-			DependencyRequest::FileDependency(name) => {
+			DependencyRequest::FileDependency(file_dependency) => {
+				let key: DependencyKey = request.to_owned().into();
+				let name = &file_dependency.path;
 				let empty_chain = Vec::new();
 				let load_chain = match reason {
 					BuildReason::Include(chain) => &chain,
@@ -366,7 +367,9 @@ impl Project {
 					// iterate over all stored dependencies
 					
 					// TODO add another cached type which means "already built in this invocation"
-					let cached = project.build_cache.lookup(&request)?.and_then(|p| p.as_target()).map(|p| p.to_owned());
+					// TODO if we depend on a file via both `exists` and `unit`, will it be built twice?
+
+					let cached = project.build_cache.lookup(&key)?.and_then(|p| p.as_target()).map(|p| p.to_owned());
 					if let Some(cached) = cached {
 						let (project_ret, needs_build) = Self::requires_build(project, &cached)?;
 						project = project_ret;
@@ -395,8 +398,8 @@ impl Project {
 						deps: project.collect_deps(build_token),
 					});
 					project.save_build_result(SaveBuildResult {
+						key,
 						parent: reason.parent(),
-						request: &request,
 						result: &result
 					})?;
 					Ok((project, result.into_dependency()))
@@ -408,10 +411,17 @@ impl Project {
 						},
 						_ => {
 							// treat it as a source file
-							let result = Persist::File(Some(PersistFile::from_stat(fs::symlink_metadata(name)?)?));
+							let persist_file = PersistFile::from_path(name)?;
+
+							// Only allow a missing file if we are explicitly testing for existence
+							if persist_file.is_none() && file_dependency.ret != FileDependencyType::Existence {
+								return Err(anyhow!("No such file or directory: {}", name));
+							}
+
+							let result = Persist::File(persist_file);
 							project.save_build_result(SaveBuildResult {
+								key,
 								parent: reason.parent(),
-								request: &request,
 								result: &result,
 							})?;
 							Ok((project, result.into_dependency()))
@@ -435,13 +445,13 @@ impl Project {
 	// to update both (a) the in-memory understanding of what the parent
 	// task depends on, and (b) the persistent cache of built results.
 	fn save_build_result(&mut self, store: SaveBuildResult) -> Result<()> {
-		let SaveBuildResult { request, result, parent } = store;
+		let SaveBuildResult { key, result, parent } = store;
 
 		// Firstly, if there's a parent build token, it registers this dependency (& result) into that build.
-		self.register_dependency(parent, request, result.clone().into_dependency());
+		self.register_dependency(parent, key.clone(), result.to_owned().into_dependency());
 		
 		// Store the built result of this target
-		self.build_cache.update(request.to_owned(), result.to_owned())?;
+		self.build_cache.update(key, result.to_owned())?;
 		Ok(())
 	}
 
@@ -456,12 +466,12 @@ impl Project {
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
-	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, request: &DependencyRequest, result: PersistDependency) {
+	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: DependencyKey, result: PersistDependency) {
 		if let Some(parent) = parent {
-			debug!("registering dependency {:?} against build {:?} (result: {:?}", &request, parent, &result);
+			debug!("registering dependency {:?} against build {:?} (result: {:?}", &key, parent, &result);
 
 			let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(Default::default);
-			parent_dep_set.add(request.to_owned(), result);
+			parent_dep_set.add(key, result);
 		}
 	}
 	
@@ -473,17 +483,18 @@ impl Project {
 
 		let reason = BuildReason::Speculative;
 
-		for (dep_req, dep_cached) in cached.dep_set().iter() {
-			debug!("Recursing over dependency {:?}", dep_req);
+		for (dep_key, dep_cached) in cached.dep_set().iter() {
+			debug!("Recursing over dependency {:?}", dep_key);
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
-			let (project_ret, dep_latest) = Self::build(project, dep_req, &reason)?;
+			let req: DependencyRequest = dep_key.to_owned().into();
+			let (project_ret, dep_latest) = Self::build(project, &req, &reason)?;
 			project = project_ret;
 			
 			// if the result differs from what this target was based on, rebuild this target
 			if dep_latest.has_changed_since(dep_cached) {
 				debug!("Dependency {:?} state ({:?}) has changed since ({:?}); triggering rebuild of parent",
-					dep_req,
+					dep_key,
 					&dep_latest,
 					dep_cached,
 				);
@@ -495,8 +506,8 @@ impl Project {
 		Ok((project, needs_build))
 	}
 	
-	pub fn lookup(&self, request: &DependencyRequest) -> Result<Option<&Persist>> {
-		self.build_cache.lookup(request)
+	pub fn lookup(&self, key: &DependencyKey) -> Result<Option<&Persist>> {
+		self.build_cache.lookup(key)
 	}
 
 	pub fn save(&self) -> Result<()> {
@@ -506,6 +517,6 @@ impl Project {
 
 struct SaveBuildResult<'a> {
 	parent: Option<ActiveBuildToken>,
-	request: &'a DependencyRequest,
+	key: DependencyKey,
 	result: &'a Persist,
 }
