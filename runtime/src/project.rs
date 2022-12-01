@@ -19,6 +19,7 @@ use wasmtime::*;
 
 use crate::err::*;
 use crate::persist::*;
+use crate::module::*;
 use crate::sandbox::Sandbox;
 use crate::sync::{MutexRef, Mutexed, MutexHandle};
 use crate::{wasm::WasmModule, sync::lock_failed};
@@ -227,7 +228,7 @@ impl Project {
 								&BuildReason::Include(subchain)
 							)?;
 							project = project_ret;
-							module.state.get_rules(&mut module.store, include.get_config())?
+							module.get_rules(include.get_config())?
 						},
 					};
 
@@ -390,7 +391,7 @@ impl Project {
 					let (mut project, mut wasm_module) = Self::load_module_inner(project, &build_module_path, &reason)?;
 
 					let built = project.unlocked_block(|project_handle| {
-						wasm_module.state.run_builder(&mut wasm_module.store, build_token, name, &target, &project_handle)
+						wasm_module.run_builder(build_token, name, &target, &project_handle)
 					})?;
 
 					let result = Persist::Target(PersistTarget {

@@ -10,7 +10,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::BuildModule};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -190,8 +190,8 @@ impl StateRef {
 }
 
 pub struct WasmModule {
-	pub state: StateRef,
-	pub store: Store<()>,
+	state: StateRef,
+	store: Store<()>,
 }
 
 impl WasmModule {
@@ -266,5 +266,15 @@ impl WasmModule {
 		let trou_api_version: TypedFunc<(), u32> = instance.get_typed_func::<(), u32, _>(&mut store, "trou_api_version")?;
 		debug!("API version: {}", trou_api_version.call(&mut store, ())?);
 		Ok(WasmModule { state, store })
+	}
+}
+
+impl BuildModule for WasmModule {
+	fn get_rules(&mut self, config: &trou_common::rule::Config) -> Result<Vec<Rule>> {
+		self.state.get_rules(&mut self.store, config)
+	}
+
+	fn run_builder(&mut self, token: ActiveBuildToken, path: &str, builder: &Target, _unlocked_evidence: &ProjectHandle) -> Result<Option<PersistFile>> {
+		self.state.run_builder(&mut self.store, token, path, builder, _unlocked_evidence)
 	}
 }

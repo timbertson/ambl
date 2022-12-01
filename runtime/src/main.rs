@@ -6,6 +6,7 @@ mod wasm;
 mod err;
 mod sandbox;
 mod path;
+mod module;
 
 use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult, Mutex}, env, collections::{HashMap, hash_map::Entry}};
 use log::*;

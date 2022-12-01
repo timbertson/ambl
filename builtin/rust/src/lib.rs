@@ -24,17 +24,39 @@ macro_rules! ffi {
 #[serde(deny_unknown_fields)]
 pub struct CargoOpts {
 	package: Option<String>,
+	package_path: Option<String>,
 }
 impl Default for CargoOpts {
 	fn default() -> Self {
-		Self { package: Default::default() }
+		Self {
+			package: Default::default(),
+			package_path: Default::default(),
+		}
 	}
+}
+
+#[derive(Serialize, Deserialize)]
+struct CargoPackage {
+	name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CargoMinimal {
+	package: CargoPackage,
 }
 
 ffi!(cargo);
 fn cargo(c: TargetCtx) -> Result<()> {
+	// TODO no need for opts now?
 	let opts: CargoOpts = c.parse_config()?;
 	debug(&format!("Building {} with {:?}", c.target(), &opts));
+
+	// let prefix = opts.package_path.as_deref().unwrap_or(".");
+	// let cargo_contents = c.contents_of(format!("{}/Cargo.toml", prefix))?;
+	// let cargo: CargoMinimal = serde_yaml::from_str(&cargo_contents)
+	// 	.with_context(||format!("loading YAML document:\n```\n{}\n```", &cargo_contents))?;
+
+	// TODO how to handle Cargo.lock and target/
 	// TODO: depend on *.toml, src/**/*.rs
 	c.always_rebuild()?;
 
@@ -50,6 +72,7 @@ fn cargo(c: TargetCtx) -> Result<()> {
 
 ffi!(rules);
 pub fn rules(_: BaseCtx) -> Result<Vec<Rule>> {
+	// TODO allow loading config in this file, so we can customise rules
 	Ok(vec!(
 		target("default", build_fn("cargo")),
 	))
