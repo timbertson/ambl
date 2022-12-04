@@ -24,8 +24,8 @@ use crate::sandbox::Sandbox;
 use crate::sync::{MutexRef, Mutexed, MutexHandle};
 use crate::{wasm::WasmModule, sync::lock_failed};
 
-pub type ProjectRef = MutexRef<Project>;
-pub type ProjectHandle = MutexHandle<Project>;
+pub type ProjectRef<M> = MutexRef<Project<M>>;
+pub type ProjectHandle<M> = MutexHandle<Project<M>>;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub struct ActiveBuildToken(u32);
@@ -65,12 +65,12 @@ impl BuildReason {
 	}
 }
 
-pub struct ModuleCache {
+pub struct ModuleCache<M> {
 	pub engine: Engine,
-	pub modules: HashMap<String, Module>,
+	pub modules: HashMap<String, M>,
 }
 
-impl ModuleCache {
+impl<M> ModuleCache<M> {
 	pub fn new() -> Self {
 		let engine = Engine::default();
 		let modules = HashMap::new();
@@ -79,16 +79,16 @@ impl ModuleCache {
 }
 
 // Represents buildable targets for some subtree of a workspace
-pub struct Project {
-	module_cache: ModuleCache,
+pub struct Project<M: BuildModule> {
+	module_cache: ModuleCache<M::Compiled>,
 	build_cache: DepStore,
 	active_tasks: HashMap<ActiveBuildToken, DepSet>,
 	rules: Vec<Rule>,
-	self_ref: Option<ProjectRef>,
+	self_ref: Option<ProjectRef<M>>,
 }
 
-impl Project {
-	pub fn new() -> Result<ProjectRef> {
+impl<M: BuildModule> Project<M> {
+	pub fn new() -> Result<ProjectRef<M>> {
 		let project = MutexRef::new(Project {
 			build_cache: DepStore::load(),
 			active_tasks: Default::default(),
@@ -105,16 +105,16 @@ impl Project {
 		Ok(project)
 	}
 
-	pub fn load_module_ref(project: &mut ProjectHandle, path: &str, reason: &BuildReason) -> Result<WasmModule> {
+	pub fn load_module_ref(project: &mut ProjectHandle<M>, path: &str, reason: &BuildReason) -> Result<M> {
 		let inner = project.lock("load_module_ref")?;
 		Ok(Self::load_module_inner(inner, path, reason)?.1)
 	}
 
 	pub fn load_module_inner<'a>(
-		project: Mutexed<'a, Project>,
+		project: Mutexed<'a, Project<M>>,
 		path: &str,
 		reason: &BuildReason
-	) -> Result<(Mutexed<'a, Project>, WasmModule)> {
+	) -> Result<(Mutexed<'a, Project<M>>, M)> {
 		debug!("Loading module {:?} for {:?}", path, reason);
 
 		// First, build the module itself and register it as a dependency.
@@ -131,27 +131,29 @@ impl Project {
 			let cached = module_cache.modules.entry(path.to_owned());
 			let module = match cached {
 				Entry::Occupied(entry) => {
+					debug!("module already cached");
 					// https://stackoverflow.com/questions/60129097/entryoccupied-get-returns-a-value-referencing-data-owned-by-the-current-func
 					entry.into_mut()
 				},
 				Entry::Vacant(dest) => {
 					// TODO release lock while evaluating this?
-					let loaded = WasmModule::compile(&module_cache.engine, path)?;
+					debug!("module not found; loading");
+					let loaded = M::compile(&module_cache.engine, path)?;
 					dest.insert(loaded)
 				},
 			};
 			// TODO we make a new store each time we reference a module.
 			// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
-			let module = WasmModule::load(&module_cache.engine, &module, self_ref)?;
+			let module = M::load(&module_cache.engine, &module, self_ref)?;
 			Ok((project, module))
 		}).with_context(|| format!("Loading WASM module: {}", path))
 	}
 
 	pub fn load_yaml_rules<'a>(
-		project: Mutexed<'a, Project>,
+		project: Mutexed<'a, Project<M>>,
 		path: &str,
 		reason: &BuildReason
-	) -> Result<(Mutexed<'a, Project>, Vec<Rule>)> {
+	) -> Result<(Mutexed<'a, Project<M>>, Vec<Rule>)> {
 		debug!("Loading YAML rules {:?} for {:?}", path, reason);
 		// First, build the module itself and register it as a dependency.
 		// TODO need to enforce a project-rooted path, consistent with rules
@@ -173,11 +175,11 @@ impl Project {
 	}
 	
 	pub fn expand_and_filter_rule<'a, 'b>(
-		mut project: Mutexed<'a, Project>,
+		mut project: Mutexed<'a, Project<M>>,
 		rule: &'b mut Rule,
 		name: &str,
 		load_chain: &Vec<Include>, // the chain of includes we're resolving. This is used to prevent recusive loops.
-	) -> Result<(Mutexed<'a, Project>, Option<&'b Target>)> {
+	) -> Result<(Mutexed<'a, Project<M>>, Option<&'b Target>)> {
 		match rule {
 			Rule::Target(t) => {
 				if t.names.iter().any(|n| n == name) {
@@ -209,6 +211,7 @@ impl Project {
 				} else if Self::within_scope(name, include.get_scope()).is_some() {
 					let subchain = iter::once(&*include).chain(load_chain.iter()).map(|include| include.to_owned()).collect();
 					debug!("Loading include {:?} with load_chain {:?}, subchain {:?}", include, &load_chain, &subchain);
+					let ctx = || format!("Loading include: {:?}", include);
 					
 					let rules = match include.get_mode() {
 						IncludeMode::YAML => {
@@ -216,7 +219,7 @@ impl Project {
 								project,
 								include.get_module(),
 								&BuildReason::Include(subchain)
-							)?;
+							).with_context(ctx)?;
 							project = project_ret;
 							rules
 						},
@@ -226,9 +229,9 @@ impl Project {
 								project,
 								include.get_module(),
 								&BuildReason::Include(subchain)
-							)?;
+							).with_context(ctx)?;
 							project = project_ret;
-							module.get_rules(include.get_config())?
+							module.get_rules(include.get_config()).with_context(ctx)?
 						},
 					};
 
@@ -246,10 +249,10 @@ impl Project {
 	}
 
 	pub fn target<'a>(
-		mut project: Mutexed<'a, Project>,
+		mut project: Mutexed<'a, Project<M>>,
 		name: &str,
 		load_chain: &Vec<Include>,
-	) -> Result<(Mutexed<'a, Project>, Option<Target>)> {
+	) -> Result<(Mutexed<'a, Project<M>>, Option<Target>)> {
 		// TODO do this only when needed
 		let mut rules_mut = project.rules.clone();
 
@@ -293,13 +296,109 @@ impl Project {
 	that speculatively-evaluated dep failures cause the parent to rebuild, not to fail.
 	*/
 
-	pub fn build<'a>(project: Mutexed<'a, Project>,
+	pub fn build<'a>(project: Mutexed<'a, Project<M>>,
 		request: &DependencyRequest,
 		reason: &BuildReason,
-	) -> Result<(Mutexed<'a, Project>, PersistDependency)> {
+	) -> Result<(Mutexed<'a, Project<M>>, PersistDependency)> {
 		debug!("build({:?})", request);
 		match request {
-			// TODO it'd be nice if the type of dependency and persisted variant were somehow linked?
+			DependencyRequest::FileDependency(file_dependency) => {
+				let key: DependencyKey = request.to_owned().into();
+				let name = &file_dependency.path;
+				let empty_chain = Vec::new();
+				let load_chain = match reason {
+					BuildReason::Include(chain) => &chain,
+					_ => &empty_chain,
+				};
+				let (mut project, target) = Project::target(project, name, load_chain)?;
+
+				// to_owned releases project borrow
+				let cached = project.build_cache.lookup(&key)?.map(|c| c.to_owned());
+				match cached {
+					Some(Cached::Fresh(cached)) => {
+						// already checked in this invocation, short-circuit
+						debug!("Short circuit, already built {:?}", &cached);
+						return Ok((project, cached.into_dependency()));
+					},
+
+					Some(Cached::Cached(cached)) => {
+						if let Some(ref target) = target {
+							if let Some(cached_target) = cached.as_target() {
+								let (project_ret, needs_build) = Self::requires_build(project, cached_target)?;
+								project = project_ret;
+								if !needs_build {
+									debug!("Marking cached result for {:?} as fresh", &cached_target.file);
+									project.build_cache.update(key.to_owned(), cached.to_owned())?;
+									return Ok((project, cached.into_dependency()));
+								}
+							}
+						}
+					},
+
+					None => (),
+				}
+
+				// If we haven't returned yet, the cached value (if any) is stale so we're building
+				if let Some(target) = target {
+					println!("# {}", name);
+					let build_token = ActiveBuildToken::generate();
+					debug!("created build token {:?} for {:?}", build_token, &request);
+					let reason = BuildReason::Dependency(build_token);
+
+					// TODO track which module the target was defined in
+					let build_module_path = target.build.module.clone().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
+
+					let (mut project, mut wasm_module) = Self::load_module_inner(project, &build_module_path, &reason)?;
+
+					let built = project.unlocked_block(|project_handle| {
+						wasm_module.run_builder(build_token, name, &target, &project_handle)?;
+						PersistFile::from_path(name)
+					})?;
+
+					let result = Persist::Target(PersistTarget {
+						file: built,
+						deps: project.collect_deps(build_token),
+					});
+					project.save_build_result(SaveBuildResult {
+						key,
+						parent: reason.parent(),
+						result: &result
+					})?;
+					Ok((project, result.into_dependency()))
+				} else {
+					debug!("Not a buildable target: {:?}", &request);
+					match reason {
+						BuildReason::Explicit => {
+							return Err(anyhow!("Not a buildable target: {}", name))
+						},
+						_ => {
+							// treat it as a source file
+							let persist_file = PersistFile::from_path(name)?;
+
+							// Only allow a missing file if we are explicitly testing for existence
+							if persist_file.is_none() && file_dependency.ret != FileDependencyType::Existence {
+								return Err(anyhow!("No such file or directory: {}", name));
+							}
+
+							let result = Persist::File(persist_file);
+							project.save_build_result(SaveBuildResult {
+								key,
+								parent: reason.parent(),
+								result: &result,
+							})?;
+							Ok((project, result.into_dependency()))
+						},
+					}
+				}
+			},
+			DependencyRequest::FileSet(_) => todo!("handle FileSet"),
+			DependencyRequest::Execute(cmd) => {
+				// TODO do we need to add any dependencies first?
+				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
+				// need to add that.
+				let project = Sandbox::run(project, cmd, reason)?;
+				Ok((project, PersistDependency::AlwaysClean))
+			},
 			DependencyRequest::EnvVar(key) => {
 				Ok((project, PersistDependency::Env(PersistEnv(std::env::var(key)?))))
 			},
@@ -354,91 +453,6 @@ impl Project {
 
 				// Ok((project, persist.into_dependency()))
 			},
-
-			DependencyRequest::FileDependency(file_dependency) => {
-				let key: DependencyKey = request.to_owned().into();
-				let name = &file_dependency.path;
-				let empty_chain = Vec::new();
-				let load_chain = match reason {
-					BuildReason::Include(chain) => &chain,
-					_ => &empty_chain,
-				};
-				let (mut project, target) = Project::target(project, name, load_chain)?;
-				if let Some(target) = target {
-					// iterate over all stored dependencies
-					
-					// TODO add another cached type which means "already built in this invocation"
-					// TODO if we depend on a file via both `exists` and `unit`, will it be built twice?
-
-					let cached = project.build_cache.lookup(&key)?.and_then(|p| p.as_target()).map(|p| p.to_owned());
-					if let Some(cached) = cached {
-						let (project_ret, needs_build) = Self::requires_build(project, &cached)?;
-						project = project_ret;
-						if !needs_build {
-							debug!("Using cached result for {:?}", &cached.file);
-							return Ok((project, PersistDependency::File(cached.file)));
-						}
-					};
-
-					println!("# {}", name);
-					let build_token = ActiveBuildToken::generate();
-					debug!("created build token {:?} for {:?}", build_token, &request);
-					let reason = BuildReason::Dependency(build_token);
-
-					// TODO track which module the target was defined in
-					let build_module_path = target.build.module.clone().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
-
-					let (mut project, mut wasm_module) = Self::load_module_inner(project, &build_module_path, &reason)?;
-
-					let built = project.unlocked_block(|project_handle| {
-						wasm_module.run_builder(build_token, name, &target, &project_handle)
-					})?;
-
-					let result = Persist::Target(PersistTarget {
-						file: built,
-						deps: project.collect_deps(build_token),
-					});
-					project.save_build_result(SaveBuildResult {
-						key,
-						parent: reason.parent(),
-						result: &result
-					})?;
-					Ok((project, result.into_dependency()))
-				} else {
-					debug!("Not a buildable target: {:?}", &request);
-					match reason {
-						BuildReason::Explicit => {
-							return Err(anyhow!("Not a buildable target: {}", name))
-						},
-						_ => {
-							// treat it as a source file
-							let persist_file = PersistFile::from_path(name)?;
-
-							// Only allow a missing file if we are explicitly testing for existence
-							if persist_file.is_none() && file_dependency.ret != FileDependencyType::Existence {
-								return Err(anyhow!("No such file or directory: {}", name));
-							}
-
-							let result = Persist::File(persist_file);
-							project.save_build_result(SaveBuildResult {
-								key,
-								parent: reason.parent(),
-								result: &result,
-							})?;
-							Ok((project, result.into_dependency()))
-						},
-					}
-				}
-			},
-			DependencyRequest::FileSet(_) => todo!("handle FileSet"),
-			DependencyRequest::Execute(cmd) => {
-				// TODO do we need to add any dependencies first?
-				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
-				// need to add that.
-				let project = Sandbox::run(project, cmd, reason)?;
-				Ok((project, PersistDependency::AlwaysClean))
-			},
-			// other => todo!("unhandled request: {:?}", other),
 		}
 	}
 	
@@ -477,9 +491,9 @@ impl Project {
 	}
 	
 	pub fn requires_build<'a, T: HasDependencies>(
-		mut project: Mutexed<'a, Project>,
+		mut project: Mutexed<'a, Project<M>>,
 		cached: &T,
-	) -> Result<(Mutexed<'a, Project>, bool)> {
+	) -> Result<(Mutexed<'a, Project<M>>, bool)> {
 		let mut needs_build = false;
 
 		let reason = BuildReason::Speculative;
@@ -507,12 +521,41 @@ impl Project {
 		Ok((project, needs_build))
 	}
 	
-	pub fn lookup(&self, key: &DependencyKey) -> Result<Option<&Persist>> {
+	pub fn lookup(&self, key: &DependencyKey) -> Result<Option<&Cached>> {
 		self.build_cache.lookup(key)
 	}
 
 	pub fn save(&self) -> Result<()> {
 		self.build_cache.save()
+	}
+	
+	#[cfg(test)]
+	pub fn replace_rules(&mut self, v: Vec<Rule>) {
+		warn!("replacing rules with: {:?}", &v);
+		self.rules = v;
+	}
+
+	#[cfg(test)]
+	pub fn push_rule(&mut self, r: Rule) {
+		self.rules.push(r)
+	}
+
+	#[cfg(test)]
+	pub fn module_len(&mut self) -> usize {
+		self.module_cache.modules.len()
+	}
+
+	#[cfg(test)]
+	pub fn inject_module<K: ToString>(&mut self, k: K, v: M::Compiled) {
+		let s = k.to_string();
+		warn!("injecting module: {}", &s);
+		self.module_cache.modules.insert(s, v);
+	}
+
+	#[cfg(test)]
+	pub fn inject_cache(&mut self, k: DependencyKey, v: Persist) -> Result<()> {
+		warn!("injecting cache state: {:?}={:?}", &k, &v);
+		self.build_cache.update(k, v)
 	}
 }
 

@@ -44,7 +44,7 @@ impl From<DependencyRequest> for DependencyKey {
 	}
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistTarget {
 	pub file: Option<PersistFile>,
 	pub deps: DepSet,
@@ -52,7 +52,7 @@ pub struct PersistTarget {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistFile {
-	mtime: u128,
+	pub mtime: u128,
 	// TODO add hash for checksumming
 }
 impl PersistFile {
@@ -73,13 +73,13 @@ impl PersistFile {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistEnv(pub String);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistWasmCall {
 	pub deps: DepSet,
 	pub call: PersistWasmDependency,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistWasmDependency {
 	pub spec: FunctionSpec,
 	pub result: String,
@@ -91,15 +91,48 @@ struct DepStorePersist {
 	items: Vec<(DependencyKey, Persist)>,
 }
 
-impl From<HashMap<DependencyKey, Persist>> for DepStorePersist {
-	fn from(map: HashMap<DependencyKey, Persist>) -> Self {
-		Self { items: map.into_iter().collect() }
+impl From<HashMap<DependencyKey, Cached>> for DepStorePersist {
+	fn from(map: HashMap<DependencyKey, Cached>) -> Self {
+		Self {
+			items: map
+				.into_iter()
+				.map(|(k,v)| (k, v.into_raw()))
+				.collect()
+		}
 	}
 }
 
 impl From<DepStorePersist> for DepStore {
 	fn from(store: DepStorePersist) -> Self {
-		Self { cache: store.items.into_iter().collect() }
+		Self {
+			cache: store.items
+				.into_iter()
+				.map(|(k,v)| (k, Cached::Cached(v)))
+				.collect()
+		}
+	}
+}
+
+#[derive(Clone, Debug)]
+pub enum Cached {
+	Fresh(Persist),
+	Cached(Persist),
+	// Missing(Persist),
+}
+
+impl Cached {
+	pub fn raw(&self) -> &Persist {
+		match self {
+			Cached::Fresh(r) => r,
+			Cached::Cached(r) => r,
+		}
+	}
+
+	pub fn into_raw(self) -> Persist {
+		match self {
+			Cached::Fresh(r) => r,
+			Cached::Cached(r) => r,
+		}
 	}
 }
 
@@ -111,7 +144,7 @@ pub struct DepStore {
 	// wasm_cache: HashMap<FunctionSpec, Cached<PersistWasmCall>>,
 	// env_cache: HashMap<String, Cached<String>>,
 	
-	cache: HashMap<DependencyKey, Persist>
+	cache: HashMap<DependencyKey, Cached>
 }
 
 impl DepStore {
@@ -144,11 +177,11 @@ impl DepStore {
 
 	// TODO remove these result types if we don't do IO directly...
 	pub fn update(&mut self, key: DependencyKey, persist: Persist) -> Result<()> {
-		self.cache.insert(key, persist);
+		self.cache.insert(key, Cached::Fresh(persist));
 		Ok(())
 	}
 
-	pub fn lookup(&self, key: &DependencyKey) -> Result<Option<&Persist>> {
+	pub fn lookup(&self, key: &DependencyKey) -> Result<Option<&Cached>> {
 		Ok(self.cache.get(key))
 	}
 }
@@ -159,7 +192,7 @@ impl Default for DepStore {
 	}
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Persist {
 	File(Option<PersistFile>),
 	Target(PersistTarget),
@@ -206,7 +239,7 @@ impl Persist {
 // in a DepSet. This is not the canonical store of a dependency,
 // it's a snapshot of a dependency without including that dependency's
 // own (recursive) dependencies.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PersistDependency {
 	File(Option<PersistFile>),
 	Env(PersistEnv),
@@ -271,7 +304,7 @@ impl HasDependencies for PersistWasmCall {
 
 // the in-memory struct to collect deps during the build of a target.
 // it's stored in Project, keyed by ActiveBuildToken
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DepSet {
 	pub deps: Vec<(DependencyKey, PersistDependency)>,
 }

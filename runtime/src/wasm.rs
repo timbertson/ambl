@@ -175,7 +175,14 @@ impl StateRef {
 		self.call_serde(store, rules_ffi, &BaseCtx::new(config.value().to_owned()))
 	}
 
-	pub fn run_builder<C: AsContextMut>(&self, mut store: C, token: ActiveBuildToken, path: &str, builder: &Target, _unlocked_evidence: &ProjectHandle) -> Result<Option<PersistFile>> {
+	pub fn run_builder<C: AsContextMut>(
+		&self,
+		mut store: C,
+		token: ActiveBuildToken,
+		path: &str,
+		builder: &Target,
+		_unlocked_evidence: &ProjectHandle<WasmModule>
+	) -> Result<()> {
 		debug!("run_builder");
 		let mut write = self.write();
 		let state = write.as_ref()?;
@@ -184,8 +191,7 @@ impl StateRef {
 		let target = TargetCtx::new(path.to_owned(), config.to_owned(), token.raw());
 		drop(write);
 		debug!("run_builder call_serde");
-		let result: () = self.call_serde::<TargetCtx, (), C>(store, f, &target)?;
-		PersistFile::from_path(path)
+		self.call_serde::<TargetCtx, (), C>(store, f, &target)
 	}
 }
 
@@ -194,13 +200,15 @@ pub struct WasmModule {
 	store: Store<()>,
 }
 
-impl WasmModule {
-	pub fn compile(engine: &Engine, path: &str) -> Result<Module> {
+impl BuildModule for WasmModule {
+	type Compiled = Module;
+
+	fn compile(engine: &Engine, path: &str) -> Result<Module> {
 		debug!("Loading {}", path);
 		Ok(Module::from_file(&engine, &path)?)
 	}
 	
-	pub fn load(engine: &Engine, module: &Module, project: ProjectRef) -> Result<WasmModule> {
+	fn load(engine: &Engine, module: &Module, project: ProjectRef<Self>) -> Result<WasmModule> {
 		let mut linker = Linker::new(&engine);
 
 		let mut state = StateRef::empty();
@@ -267,14 +275,12 @@ impl WasmModule {
 		debug!("API version: {}", trou_api_version.call(&mut store, ())?);
 		Ok(WasmModule { state, store })
 	}
-}
 
-impl BuildModule for WasmModule {
 	fn get_rules(&mut self, config: &trou_common::rule::Config) -> Result<Vec<Rule>> {
 		self.state.get_rules(&mut self.store, config)
 	}
 
-	fn run_builder(&mut self, token: ActiveBuildToken, path: &str, builder: &Target, _unlocked_evidence: &ProjectHandle) -> Result<Option<PersistFile>> {
+	fn run_builder(&mut self, token: ActiveBuildToken, path: &str, builder: &Target, _unlocked_evidence: &ProjectHandle<Self>) -> Result<()> {
 		self.state.run_builder(&mut self.store, token, path, builder, _unlocked_evidence)
 	}
 }

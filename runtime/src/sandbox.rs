@@ -4,7 +4,7 @@ use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symli
 use anyhow::*;
 use trou_common::build::{self};
 
-use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path::{AnyPath, Relative, Absolute}, err::result_block};
+use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path::{AnyPath, Relative, Absolute}, err::result_block, module::BuildModule};
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -31,11 +31,11 @@ impl Sandbox {
 		}).with_context(|| format!("Installing symlink {:?} (in root {:?})", rel, roots.tmp))
 	}
 	
-	fn collect_paths<'a>(
-		mut project: Mutexed<'a, Project>,
+	fn collect_paths<'a, M: BuildModule>(
+		mut project: Mutexed<'a, Project<M>>,
 		dest: &mut HashSet<Relative>,
 		key: DependencyKey,
-	) -> Result<Mutexed<'a, Project>> {
+	) -> Result<Mutexed<'a, Project<M>>> {
 		match key {
 			DependencyKey::FileDependency(ref f) => {
 				let rel = AnyPath::relative(f.to_owned())?;
@@ -43,7 +43,8 @@ impl Sandbox {
 					return Ok(project);
 				}
 				let persist = project.lookup(&key)?
-					.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?;
+					.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
+					.raw();
 				match persist {
 					Persist::File(Some(_)) => {
 						dest.insert(rel);
@@ -63,10 +64,10 @@ impl Sandbox {
 		Ok(project)
 	}
 
-	pub fn run<'a>(mut project: Mutexed<'a, Project>,
+	pub fn run<'a, M: BuildModule>(mut project: Mutexed<'a, Project<M>>,
 		command: &build::Command,
 		reason: &BuildReason,
-	) -> Result<Mutexed<'a, Project>> {
+	) -> Result<Mutexed<'a, Project<M>>> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
 		let mut rel_paths = Default::default();
 		for (dep, state) in dep_set.deps.into_iter() {
@@ -79,7 +80,7 @@ impl Sandbox {
 
 		cmd.env_clear();
 		for k in env_inherit {
-			let (project_ret, value) = Project::build(project, &DependencyRequest::EnvVar(k.to_owned()), reason)?;
+			let (project_ret, value) = Project::<M>::build(project, &DependencyRequest::EnvVar(k.to_owned()), reason)?;
 			match value {
 				PersistDependency::Env(value) => {
 					cmd.env(k, value.0);

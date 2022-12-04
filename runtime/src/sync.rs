@@ -79,6 +79,13 @@ impl<T> MutexHandle<T> {
 		let guard: MutexGuard<T> = self.0.lock().map_err(|_| lock_failed(desc))?;
 		Ok(Mutexed { arc, guard: Some(guard) })
 	}
+	
+	#[cfg(test)]
+	pub unsafe fn unsafe_lock<'a>(&'a self, desc: &'static str) -> Result<Mutexed<'a, T>> {
+		let arc = Arc::clone(&self.0);
+		let guard: MutexGuard<T> = self.0.lock().map_err(|_| lock_failed(desc))?;
+		Ok(Mutexed { arc, guard: Some(guard) })
+	}
 }
 
 // Mutexed is an actively locked resource. You can drop it, or unlock()
