@@ -1,19 +1,21 @@
 use log::*;
 use core::fmt;
-use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, default::Default, sync::{Arc, Mutex}};
+use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, default::Default, sync::{Arc, Mutex}, fs, path::Path};
 
 use anyhow::*;
 use tempdir::TempDir;
-use trou_common::{rule::{Target, Rule, dsl}, build::{DependencyRequest, FileDependency}};
+use trou_common::{rule::{Target, Rule, dsl}, build::{DependencyRequest, FileDependency, DependencyResponse}, ctx::{TargetCtx, Invoker}};
 use wasmtime::Engine;
 
 use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block};
+
+type BuilderFn = Box<dyn Fn(&TestProject, TargetCtx) -> Result<()> + Sync + Send>;
 
 #[derive(Clone)]
 pub struct TestModule<'a> {
 	project: &'a TestProject<'a>,
 	rules: Vec<Rule>,
-	builders: Rc<HashMap<String, Box<dyn Fn(&TestProject) -> Result<()>>>>,
+	builders: Arc<HashMap<String, BuilderFn>>,
 }
 
 impl<'a> TestModule<'a> {
@@ -21,9 +23,9 @@ impl<'a> TestModule<'a> {
 		Self { project, rules: Default::default(), builders: Default::default() }
 	}
 	
-	pub fn builder<K: ToString, F: Fn(&TestProject) -> Result<()> + 'static>(mut self, k: K, f: F) -> Self
+	pub fn builder<K: ToString, F: Fn(&TestProject, TargetCtx) -> Result<()> + 'static + Sync + Send>(mut self, k: K, f: F) -> Self
 	{
-		Rc::get_mut(&mut self.builders).expect("builder()").insert(k.to_string(), Box::new(f));
+		Arc::get_mut(&mut self.builders).expect("builder()").insert(k.to_string(), Box::new(f));
 		self
 	}
 
@@ -85,10 +87,64 @@ impl<'a> BuildModule for TestModule<'a> {
 		builder: &Target,
 		_unlocked_evidence: &ProjectHandle<Self>
 	) -> Result<()> {
+		debug!("running builder for {} with token {:?}", path, token);
 		let fn_name = &builder.build.fn_name;
 		let f = self.builders.get(fn_name)
 			.ok_or_else(|| anyhow!("no such builder: {}", fn_name))?;
-		f(self.project)
+		let mut ctx = TargetCtx::new(path.to_owned(), None, token.raw());
+
+		ctx._override_invoker(Box::new(TestInvoker { token }));
+		TestInvoker::wrap(self.project, token, || {
+			f(self.project, ctx)
+		})
+	}
+}
+
+lazy_static::lazy_static! {
+	static ref INVOKE_REFERENCES: Arc<Mutex<HashMap<ActiveBuildToken, &'static TestProject<'static>>>> = Arc::new(Mutex::new(HashMap::new()));
+}
+
+struct TestInvoker {
+	token: ActiveBuildToken,
+}
+impl TestInvoker {
+	fn wrap<'a, R, F: FnOnce() -> R>(
+		project: &'a TestProject<'a>,
+		token: ActiveBuildToken,
+		f: F
+	) -> R {
+		// we can pretend it's 'static, because we remove it from the map before 'a ends
+		let static_project = unsafe { std::mem::transmute::<
+			&'a TestProject<'a>,
+			&'static TestProject<'static>
+		>(project) };
+
+		let arc = Arc::clone(&INVOKE_REFERENCES);
+		let mut map = arc.lock().unwrap();
+		let old = map.insert(token, static_project);
+		drop(map);
+
+		debug!("invoker::wrap({:?})", token);
+		let result = f();
+
+		let mut map = arc.lock().unwrap();
+		match old {
+			Some(old) => { map.insert(token, old); },
+			None => { map.remove(&token); },
+		}
+		result
+	}
+}
+impl Invoker for TestInvoker {
+	fn invoke(&self, request: DependencyRequest) -> Result<DependencyResponse> {
+		let arc = Arc::clone(&INVOKE_REFERENCES);
+		let map = arc.lock().unwrap();
+		let project = map.get(&self.token).ok_or_else(|| format!("No invoke reference found for token {:?}", &self.token)).unwrap().lock();
+		drop(map);
+
+		debug!("TestInvoker building {:?}", &request);
+		let dep = Project::build(project, &request, &BuildReason::Dependency(self.token))?.1;
+		dep.into_response(&request)
 	}
 }
 
@@ -98,6 +154,8 @@ pub struct TestProject<'a> {
 	root: TempDir,
 	log: Log,
 }
+
+const FAKE_FILE: PersistFile = PersistFile { mtime: 0 };
 
 impl<'a> TestProject<'a> {
 	fn new() -> Result<Self> {
@@ -137,7 +195,7 @@ impl<'a> TestProject<'a> {
 	}
 	
 	// all-in one: adds an anonymous module for this rule, and pushes a rule
-	pub fn target_builder<S: ToString, F: Fn(&TestProject) -> Result<()> + 'static>(&'a self, target_name: S, f: F) -> &Self {
+	pub fn target_builder<S: ToString, F: Fn(&TestProject, TargetCtx) -> Result<()> + 'static + Sync + Send>(&'a self, target_name: S, f: F) -> &Self {
 		// including the current module size guarantees a unique module name
 		// let p = self.lock();
 		let mod_name = format!("anon-{}", self.lock().module_len());
@@ -164,15 +222,23 @@ impl<'a> TestProject<'a> {
 		// mark the module file as fresh to skip having to write an actual file
 		p.inject_cache(
 			DependencyKey::FileDependency(s),
-			Persist::File(Some(PersistFile { mtime: 0 }))
+			Persist::File(Some(FAKE_FILE.clone()))
 		).expect("inject_module");
 		drop(p);
 		self
 	}
 
 	pub fn build_file_res(&self, f: &str) -> Result<&Self> {
+		// testcases run multiple builds, make sure we don't short-circuit between them
+		let mut project = self.lock();
+		project.cache_mut().invalidate_if(|dep| {
+			match dep.as_file() {
+				Some(f) if f == &FAKE_FILE => false,
+				_ => true,
+			}
+		});
 		Project::build(
-			self.lock(),
+			project,
 			&DependencyRequest::FileDependency(FileDependency::new(f.to_owned())),
 			&BuildReason::Explicit)?;
 		Ok(self)
@@ -180,6 +246,15 @@ impl<'a> TestProject<'a> {
 
 	pub fn build_file(&self, f: &str) -> &Self {
 		self.build_file_res(f).expect("build_file")
+	}
+
+	pub fn write_file<F: AsRef<Path>, S: AsRef<[u8]>>(&self, path: F, contents: S) -> &Self {
+		debug!("Testcase is writing file {} within {}",
+			path.as_ref().display(),
+			env::current_dir().unwrap().display()
+		);
+		fs::write(path, contents).unwrap();
+		self
 	}
 
 	pub fn log(&self) -> Log {

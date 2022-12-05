@@ -41,11 +41,18 @@ impl BaseCtx {
 	}
 }
 
+pub trait Invoker {
+	fn invoke(&self, request: DependencyRequest) -> Result<DependencyResponse>;
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TargetCtx {
 	pub target: String,
 	pub config: Option<serde_json::Value>,
 	pub token: u32,
+	
+	#[serde(skip)] // used in tests, doesn't require serialization boundary
+	invoker: Option<Box<dyn Invoker>>,
 }
 
 impl TargetCtx {
@@ -54,6 +61,7 @@ impl TargetCtx {
 			target,
 			config,
 			token,
+			invoker: None,
 		}
 	}
 
@@ -68,7 +76,7 @@ impl TargetCtx {
 		}
 	}
 
-	pub fn invoke<'de>(&self, request: DependencyRequest) -> Result<DependencyResponse> {
+	fn invoke_ffi(&self, request: DependencyRequest) -> Result<DependencyResponse> {
 		let tagged = TaggedDependencyRequest { token: self.token, request };
 		let buf = serde_json::to_vec(&tagged)?;
 		let mut response = SizedPtr::empty();
@@ -77,6 +85,18 @@ impl TargetCtx {
 			response.to_slice()
 		};
 		ResultFFI::deserialize(response_slice)
+	}
+
+	fn invoke(&self, request: DependencyRequest) -> Result<DependencyResponse> {
+		match &self.invoker {
+			None => self.invoke_ffi(request),
+			Some(invoker) => invoker.invoke(request),
+		}
+	}
+	
+	// ideally cfg(test), but that doesn't work cross-module
+	pub fn _override_invoker(&mut self, v: Box<dyn Invoker>) {
+		self.invoker = Some(v)
 	}
 
 	// invoke shortcuts
@@ -100,7 +120,7 @@ impl TargetCtx {
 		})
 	}
 
-	pub fn contents_of<S: Into<String>>(&self, path: S) -> Result<String> {
+	pub fn read_file<S: Into<String>>(&self, path: S) -> Result<String> {
 		self.invoke(DependencyRequest::FileDependency(FileDependency {
 			path: path.into(),
 			ret: FileDependencyType::Contents,

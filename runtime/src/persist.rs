@@ -175,6 +175,23 @@ impl DepStore {
 		Ok(fs::write(".trou.cache", str).context("writing cache file")?)
 	}
 
+	// Mark all Fresh entries as Cached
+	pub fn invalidate(&mut self) -> () {
+		self.invalidate_if(|_| true)
+	}
+
+	// advanced use (in tests)
+	pub fn invalidate_if<F: Fn(&Persist) -> bool>(&mut self, f: F) -> () {
+		// Mark all Fresh entries as Cached
+		debug!("Invalidating cache ...");
+		for (k,v) in self.cache.iter_mut() {
+			match v {
+				Cached::Fresh(raw) if f(raw) => *v = Cached::Cached(raw.to_owned()), // TODO can we skip this clone?
+				_ => (),
+			}
+		}
+	}
+
 	// TODO remove these result types if we don't do IO directly...
 	pub fn update(&mut self, key: DependencyKey, persist: Persist) -> Result<()> {
 		self.cache.insert(key, Cached::Fresh(persist));

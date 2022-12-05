@@ -16,3 +16,5 @@ env_logger = "0.9"
 
 [dev-dependencies]
 ctor = "0.1"
+lazy_static = "1"
+serial_test = "0.9"

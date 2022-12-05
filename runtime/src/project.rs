@@ -131,13 +131,13 @@ impl<M: BuildModule> Project<M> {
 			let cached = module_cache.modules.entry(path.to_owned());
 			let module = match cached {
 				Entry::Occupied(entry) => {
-					debug!("module already cached");
+					debug!("module already cached: {}", path);
 					// https://stackoverflow.com/questions/60129097/entryoccupied-get-returns-a-value-referencing-data-owned-by-the-current-func
 					entry.into_mut()
 				},
 				Entry::Vacant(dest) => {
 					// TODO release lock while evaluating this?
-					debug!("module not found; loading");
+					debug!("module not cached; loading {}", path);
 					let loaded = M::compile(&module_cache.engine, path)?;
 					dest.insert(loaded)
 				},
@@ -342,13 +342,13 @@ impl<M: BuildModule> Project<M> {
 				if let Some(target) = target {
 					println!("# {}", name);
 					let build_token = ActiveBuildToken::generate();
-					debug!("created build token {:?} for {:?}", build_token, &request);
-					let reason = BuildReason::Dependency(build_token);
+					debug!("created build token {:?} beneath {:?} for {:?}", build_token, reason.parent(), &request);
+					let child_reason = BuildReason::Dependency(build_token);
 
 					// TODO track which module the target was defined in
 					let build_module_path = target.build.module.clone().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
 
-					let (mut project, mut wasm_module) = Self::load_module_inner(project, &build_module_path, &reason)?;
+					let (mut project, mut wasm_module) = Self::load_module_inner(project, &build_module_path, &child_reason)?;
 
 					let built = project.unlocked_block(|project_handle| {
 						wasm_module.run_builder(build_token, name, &target, &project_handle)?;
@@ -359,6 +359,7 @@ impl<M: BuildModule> Project<M> {
 						file: built,
 						deps: project.collect_deps(build_token),
 					});
+					debug!("built {:?} with token {:?}, saving against parent {:?}", name, build_token, reason.parent());
 					project.save_build_result(SaveBuildResult {
 						key,
 						parent: reason.parent(),
@@ -472,7 +473,7 @@ impl<M: BuildModule> Project<M> {
 
 	fn collect_deps(&mut self, token: ActiveBuildToken) -> DepSet {
 		let collected = self.active_tasks.remove(&token).unwrap_or_else(Default::default);
-		debug!("Collected {:?} deps for token {:?}", collected.len(), token);
+		debug!("Collected {:?} deps for token {:?}: {:?}", collected.len(), token, &collected);
 		collected
 	}
 
@@ -499,7 +500,7 @@ impl<M: BuildModule> Project<M> {
 		let reason = BuildReason::Speculative;
 
 		for (dep_key, dep_cached) in cached.dep_set().iter() {
-			debug!("Recursing over dependency {:?}", dep_key);
+			debug!("requires_build() recursing over dependency {:?}", dep_key);
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
 			let req: DependencyRequest = dep_key.to_owned().into();
@@ -529,6 +530,15 @@ impl<M: BuildModule> Project<M> {
 		self.build_cache.save()
 	}
 	
+	pub fn invalidate_cache(&mut self) -> () {
+		self.build_cache.invalidate()
+	}
+
+	#[cfg(test)]
+	pub fn cache_mut(&mut self) -> &mut DepStore {
+		&mut self.build_cache
+	}
+
 	#[cfg(test)]
 	pub fn replace_rules(&mut self, v: Vec<Rule>) {
 		warn!("replacing rules with: {:?}", &v);
