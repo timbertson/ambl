@@ -80,6 +80,10 @@ impl<'a> BuildModule for TestModule<'a> {
 		Ok(self.rules.to_owned())
 	}
 
+	fn call<Ctx: serde::Serialize>(&mut self, f: &trou_common::rule::FunctionSpec, arg: &Ctx) -> Result<Vec<u8>> {
+		todo!()
+	}
+
 	fn run_builder(
 		&mut self,
 		token: ActiveBuildToken,
