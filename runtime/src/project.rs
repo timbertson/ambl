@@ -88,7 +88,11 @@ pub struct Project<M: BuildModule> {
 	self_ref: Option<ProjectRef<M>>,
 }
 
+type ProjectMutex<'a, M> = Mutexed<'a, Project<M>>;
+type ProjectMutexPair<'a, M, T> = (Mutexed<'a, Project<M>>, T);
+
 impl<M: BuildModule> Project<M> {
+
 	pub fn new() -> Result<ProjectRef<M>> {
 		let project = MutexRef::new(Project {
 			build_cache: DepStore::load(),
@@ -112,10 +116,10 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	pub fn load_module_inner<'a>(
-		project: Mutexed<'a, Project<M>>,
+		project: ProjectMutex<'a, M>,
 		path: &str,
 		reason: &BuildReason
-	) -> Result<(Mutexed<'a, Project<M>>, M)> {
+	) -> Result<ProjectMutexPair<'a, M, M>> {
 		debug!("Loading module {:?} for {:?}", path, reason);
 
 		// First, build the module itself and register it as a dependency.
@@ -151,10 +155,10 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	pub fn load_yaml_rules<'a>(
-		project: Mutexed<'a, Project<M>>,
+		project: ProjectMutex<'a, M>,
 		path: &str,
 		reason: &BuildReason
-	) -> Result<(Mutexed<'a, Project<M>>, Vec<Rule>)> {
+	) -> Result<ProjectMutexPair<'a, M, Vec<Rule>>> {
 		debug!("Loading YAML rules {:?} for {:?}", path, reason);
 		// First, build the module itself and register it as a dependency.
 		// TODO need to enforce a project-rooted path, consistent with rules
@@ -176,11 +180,11 @@ impl<M: BuildModule> Project<M> {
 	}
 	
 	pub fn expand_and_filter_rule<'a, 'b>(
-		mut project: Mutexed<'a, Project<M>>,
+		mut project: ProjectMutex<'a, M>,
 		rule: &'b mut Rule,
 		name: &str,
 		load_chain: &Vec<Include>, // the chain of includes we're resolving. This is used to prevent recusive loops.
-	) -> Result<(Mutexed<'a, Project<M>>, Option<&'b Target>)> {
+	) -> Result<ProjectMutexPair<'a, M, Option<&'b Target>>> {
 		match rule {
 			Rule::Target(t) => {
 				if t.names.iter().any(|n| n == name) {
@@ -254,10 +258,10 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	pub fn target<'a>(
-		mut project: Mutexed<'a, Project<M>>,
+		mut project: ProjectMutex<'a, M>,
 		name: &str,
 		load_chain: &Vec<Include>,
-	) -> Result<(Mutexed<'a, Project<M>>, Option<Target>)> {
+	) -> Result<ProjectMutexPair<'a, M, Option<Target>>> {
 		// TODO do this only when needed
 		let mut rules_mut = project.rules.clone();
 
@@ -304,14 +308,14 @@ impl<M: BuildModule> Project<M> {
 	// - fresh (already built)
 	// - cached, but does not need rebuilding (after potentially building dependencies)
 	fn build_with_cache_awareness<'a, NeedsRebuild, Build>(
-		mut project: Mutexed<'a, Project<M>>,
+		mut project: ProjectMutex<'a, M>,
 		reason: &BuildReason,
 		key: DependencyKey,
 		needs_rebuild: NeedsRebuild,
 		build_fn: Build
-	) -> Result<(Mutexed<'a, Project<M>>, PersistDependency)> where
-		NeedsRebuild: FnOnce(Mutexed<'a, Project<M>>, &Persist) -> Result<(Mutexed<'a, Project<M>>, bool)>,
-		Build: FnOnce(Mutexed<'a, Project<M>>, ActiveBuildToken) -> Result<(Mutexed<'a, Project<M>>, Persist)>
+	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> where
+		NeedsRebuild: FnOnce(ProjectMutex<'a, M>, &Persist) -> Result<ProjectMutexPair<'a, M, bool>>,
+		Build: FnOnce(ProjectMutex<'a, M>, ActiveBuildToken) -> Result<ProjectMutexPair<'a, M, Persist>>
 	{
 		// to_owned releases project borrow
 		let from_cache = match project.build_cache.lookup(&key)?.map(|c| c.to_owned()) {
@@ -354,10 +358,10 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, result))
 	}
 
-	pub fn build<'a>(project: Mutexed<'a, Project<M>>,
+	pub fn build<'a>(project: ProjectMutex<'a, M>,
 		request: &DependencyRequest,
 		reason: &BuildReason,
-	) -> Result<(Mutexed<'a, Project<M>>, PersistDependency)> {
+	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> {
 		debug!("build({:?})", request);
 
 		match request {
@@ -521,9 +525,9 @@ impl<M: BuildModule> Project<M> {
 	}
 	
 	pub fn requires_build<'a, T: HasDependencies>(
-		mut project: Mutexed<'a, Project<M>>,
+		mut project: ProjectMutex<'a, M>,
 		cached: &T,
-	) -> Result<(Mutexed<'a, Project<M>>, bool)> {
+	) -> Result<ProjectMutexPair<'a, M, bool>> {
 		let mut needs_build = false;
 
 		let reason = BuildReason::Speculative;
