@@ -1,40 +1,17 @@
 use log::*;
-use serde::de::DeserializeOwned;
+use std::ops::{Deref, DerefMut};
+use serde::{de::DeserializeOwned, Serialize};
 use core::fmt;
-use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, default::Default, sync::{Arc, Mutex}, fs, path::Path};
+use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, default::Default, sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}}, fs, path::Path};
 
 use anyhow::*;
 use tempdir::TempDir;
-use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse}, ctx::{TargetCtx, Invoker}};
+use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
 use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
-
-#[derive(Clone)]
-pub struct TestModule<'a> {
-	project: &'a TestProject<'a>,
-	rules: Vec<Rule>,
-	builders: Arc<HashMap<String, BuilderFn>>,
-}
-
-impl<'a> TestModule<'a> {
-	pub fn new(project: &'a TestProject<'a>) -> Self {
-		Self { project, rules: Default::default(), builders: Default::default() }
-	}
-	
-	pub fn builder<K: ToString, F: Fn(&TestProject, &TargetCtx) -> Result<()> + 'static + Sync + Send>(mut self, k: K, f: F) -> Self
-	{
-		Arc::get_mut(&mut self.builders).expect("builder()").insert(k.to_string(), Box::new(f));
-		self
-	}
-
-	pub fn rule(mut self, v: Rule) -> Self {
-		self.rules.push(v);
-		self
-	}
-}
 
 #[derive(Clone, Default)]
 pub struct Log(Arc<Mutex<Vec<String>>>);
@@ -64,6 +41,70 @@ impl<'a> PartialEq<Vec<&'a str>> for Log {
 	}
 }
 
+#[derive(Clone)]
+pub struct TestModule<'a> {
+	pub name: String,
+	pub scope: Option<String>,
+	pub project: &'a TestProject<'a>,
+	_rules: Vec<Rule>,
+	rule_fn: Option<fn(&TestModule<'a>, &BaseCtx) -> Vec<Rule>>,
+	builders: Arc<HashMap<String, BuilderFn>>,
+}
+
+pub const DEFAULT_BUILD_FN: &'static str = "build";
+
+impl<'a> TestModule<'a> {
+	pub fn new(project: &'a TestProject<'a>) -> Self {
+		let name = project.next_module_name();
+		Self {
+			name,
+			project,
+			scope: Default::default(),
+			_rules: Default::default(),
+			rule_fn: Default::default(),
+			builders: Default::default()
+		}
+	}
+	
+	pub fn builder<F: Fn(&TestProject, &TargetCtx) -> Result<()> + 'static + Sync + Send>(mut self, f: F) -> Self
+	{
+		Arc::get_mut(&mut self.builders).expect("builder()").insert(DEFAULT_BUILD_FN.to_string(), Box::new(f));
+		self
+	}
+
+	pub fn set_name<S: ToString>(mut self, v: S) -> Self {
+		self.name = v.to_string();
+		self
+	}
+
+	pub fn set_scope<S: ToString>(mut self, v: S) -> Self {
+		self.scope = Some(v.to_string());
+		self
+	}
+
+	pub fn rule(mut self, v: Rule) -> Self {
+		self._rules.push(v);
+		self
+	}
+
+	pub fn rules(&self, ctx: &BaseCtx) -> Vec<Rule> {
+		if let Some(ref f) = self.rule_fn {
+			f(self, ctx)
+		} else {
+			self._rules.clone()
+		}
+	}
+	
+	pub fn default_build_fn(&self) -> FunctionSpec {
+		dsl::build_fn(DEFAULT_BUILD_FN).module(&self.name)
+	}
+
+	pub fn rule_fn(mut self, f: fn(&TestModule<'a>, &BaseCtx) -> Vec<Rule>) -> Self {
+		self.rule_fn = Some(f);
+		self
+	}
+}
+
 impl<'a> BuildModule for TestModule<'a> {
 	type Compiled = Self;
 
@@ -77,7 +118,10 @@ impl<'a> BuildModule for TestModule<'a> {
 
 	fn call<Ctx: serde::Serialize>(&mut self, f: &FunctionSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
 		if f.fn_name == "get_rules" {
-			Ok(serde_json::to_vec(&self.rules)?)
+			let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
+			TestInvoker::wrap(self.project, &mut ctx, |ctx| {
+				Ok(self.rules(ctx))
+			})
 		} else {
 			// go to and from JSON so I can have an owned version (and avoid unsafe casts)
 			let mut ctx: TargetCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
@@ -89,10 +133,8 @@ impl<'a> BuildModule for TestModule<'a> {
 			let f = self.builders.get(fn_name)
 				.ok_or_else(|| anyhow!("no such builder {:?} in {:?}", fn_name, &self.builders.keys()))?;
 
-			let token = ActiveBuildToken::from_raw(token);
-			ctx._override_invoker(Box::new(TestInvoker { token }));
-			TestInvoker::wrap(self.project, token, || {
-				f(self.project, &ctx)
+			TestInvoker::wrap(self.project, &mut ctx, |ctx| {
+				f(self.project, &*ctx)
 			})?;
 			Ok(serde_json::to_vec(&())?)
 		}
@@ -100,7 +142,9 @@ impl<'a> BuildModule for TestModule<'a> {
 }
 
 lazy_static::lazy_static! {
-	static ref INVOKE_REFERENCES: Arc<Mutex<HashMap<ActiveBuildToken, &'static TestProject<'static>>>> = Arc::new(Mutex::new(HashMap::new()));
+	static ref INVOKE_REFERENCES
+		: Arc<Mutex<HashMap<ActiveBuildToken, &'static TestProject<'static>>>>
+		= Arc::new(Mutex::new(HashMap::new()));
 }
 
 #[derive(Clone)]
@@ -108,11 +152,15 @@ struct TestInvoker {
 	token: ActiveBuildToken,
 }
 impl TestInvoker {
-	fn wrap<'a, R, F: FnOnce() -> R>(
+	fn wrap<'a, R: Serialize, C: AsRef<BaseCtx> + AsMut<BaseCtx>, F: FnOnce(&C) -> Result<R>>(
 		project: &'a TestProject<'a>,
-		token: ActiveBuildToken,
+		ctx: &mut C,
 		f: F
-	) -> R {
+	) -> Result<Vec<u8>> {
+		let ctx_mut = ctx.as_mut();
+		let token = ActiveBuildToken::from_raw(ctx_mut.token);
+		ctx_mut._override_invoker(Box::new(TestInvoker { token }));
+
 		// we can pretend it's 'static, because we remove it from the map before 'a ends
 		let static_project = unsafe { std::mem::transmute::<
 			&'a TestProject<'a>,
@@ -125,14 +173,14 @@ impl TestInvoker {
 		drop(map);
 
 		debug!("invoker::wrap({:?})", token);
-		let result = f();
+		let result = f(&*ctx);
 
 		let mut map = arc.lock().unwrap();
 		match old {
 			Some(old) => { map.insert(token, old); },
 			None => { map.remove(&token); },
 		}
-		result
+		Ok(serde_json::to_vec(&result?)?)
 	}
 }
 impl Invoker for TestInvoker {
@@ -153,6 +201,7 @@ pub struct TestProject<'a> {
 	handle: ProjectHandle<TestModule<'a>>,
 	root: TempDir,
 	log: Log,
+	module_count: AtomicUsize,
 }
 
 const FAKE_FILE: PersistFile = PersistFile { mtime: 0 };
@@ -162,7 +211,8 @@ impl<'a> TestProject<'a> {
 		let project = Project::new()?;
 		let handle = project.handle();
 		let root = TempDir::new("troutest")?;
-		let s = Self { project, handle, root, log: Default::default() };
+		let module_count = AtomicUsize::new(0);
+		let s = Self { project, handle, root, log: Default::default(), module_count };
 		s.lock().replace_rules(vec!());
 		Ok(s)
 	}
@@ -194,30 +244,42 @@ impl<'a> TestProject<'a> {
 		unsafe { self.handle.unsafe_lock("tests").expect("lock() failed") }
 	}
 	
+	fn next_module_name(&self) -> String {
+		format!("mod-{}", self.module_count.fetch_add(1, Ordering::Relaxed))
+	}
+	
 	// all-in one: adds an anonymous module for this rule, and pushes a rule
-	pub fn target_builder<S: ToString, F: Fn(&TestProject, &TargetCtx) -> Result<()> + 'static + Sync + Send>(&'a self, target_name: S, f: F) -> &Self {
-		// including the current module len cheaply guarantees a unique module name
-		let mod_name = format!("anon-{}", self.lock().module_len());
-		let fn_name = "build";
+	pub fn target_builder<S: ToString, F: Fn(&TestProject, &TargetCtx) -> Result<()> + 'static + Sync + Send>
+		(&'a self, target_name: S, f: F) -> &Self
+	{
 		let target_name = target_name.to_string();
-		let m = self.new_module().builder(fn_name, f);
+		let m = self.new_module().builder(f);
 		self
-			.push_raw_rule(dsl::target(&target_name, dsl::build_via(&mod_name, fn_name)))
-			.inject_raw_module(mod_name, m)
+			.inject_rule(dsl::target(&target_name, dsl::build_via(&m.name, DEFAULT_BUILD_FN)))
+			.inject_module(m)
 	}
 	
 	// low-level module / rule modification
-	pub fn push_raw_rule(&self, v: Rule) -> &Self {
+	pub fn inject_rule(&self, v: Rule) -> &Self {
 		let mut p = self.lock();
 		p.push_rule(v);
 		drop(p);
 		self
 	}
 
-	pub fn inject_raw_module<K: ToString>(&self, k: K, v: TestModule<'a>) -> &Self {
+	pub fn inject_rules_module(&self, m: TestModule<'a>) -> &Self {
+		let mut mod_rule = dsl::module(&m.name);
+		if let Some(ref scope) = m.scope {
+			mod_rule = mod_rule.scope(scope);
+		}
+		self.inject_rule(dsl::include(mod_rule));
+		self.inject_module(m)
+	}
+
+	pub fn inject_module(&self, v: TestModule<'a>) -> &Self {
 		let mut p = self.lock();
-		let s = k.to_string();
-		p.inject_module(k, v);
+		let s = v.name.to_owned();
+		p.inject_module(&s, v);
 		// mark the module file as fresh to skip having to write an actual file
 		p.inject_cache(
 			DependencyKey::FileDependency(s),

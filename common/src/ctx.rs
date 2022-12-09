@@ -1,3 +1,5 @@
+use std::ops::{Deref};
+
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
@@ -16,56 +18,19 @@ pub unsafe fn trou_invoke(_: *const u8, _: u32, _: &mut *mut u8, _: &mut u32) { 
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn trou_debug(_: *const u8, _: u32) {}
 
-
 #[derive(Serialize, Deserialize)]
 pub struct BaseCtx {
-	pub config: Option<serde_json::Value>,
-}
-
-pub fn parse_config<T: DeserializeOwned + Default>(config: &Option<serde_json::Value>) -> Result<T> {
-	if let Some(ref v) = config {
-		let r: Result<T> = serde_json::from_value(v.to_owned()).map_err(|e| e.into());
-		Ok(r.with_context(|| format!("parsing config: {:?}", v))?)
-	} else {
-		Ok(Default::default())
-	}
-}
-
-impl BaseCtx {
-	pub fn new(config: Option<serde_json::Value>) -> Self {
-		Self { config }
-	}
-
-	pub fn parse_config<T: DeserializeOwned + Default>(&self) -> Result<T> {
-		parse_config(&self.config)
-	}
-}
-
-pub trait Invoker {
-	fn invoke(&self, request: DependencyRequest) -> Result<DependencyResponse>;
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TargetCtx {
-	pub target: String,
-	pub config: Option<serde_json::Value>,
 	pub token: u32,
-	
+	pub config: Option<serde_json::Value>,
+
 	#[serde(skip)] // used in tests, doesn't require serialization boundary
 	invoker: Option<Box<dyn Invoker>>,
 }
 
-impl TargetCtx {
-	pub fn new(target: String, config: Option<serde_json::Value>, token: u32) -> Self {
-		Self {
-			target,
-			config,
-			token,
-			invoker: None,
-		}
+impl BaseCtx {
+	pub fn new(config: Option<serde_json::Value>, token: u32) -> Self {
+		Self { config, token, invoker: None }
 	}
-
-	pub fn target(&self) -> &str { &self.target }
 
 	pub fn parse_config<T: DeserializeOwned + Default>(&self) -> Result<T> {
 		if let Some(ref v) = self.config {
@@ -136,5 +101,61 @@ impl TargetCtx {
 
 	pub fn always_rebuild(&self) -> Result<()> {
 		self.invoke(DependencyRequest::Universe).map(|_|())
+	}
+}
+
+impl AsRef<BaseCtx> for BaseCtx {
+	fn as_ref(&self) -> &BaseCtx {
+		self
+	}
+}
+
+impl AsMut<BaseCtx> for BaseCtx {
+	fn as_mut(&mut self) -> &mut BaseCtx {
+		self
+	}
+}
+
+
+pub trait Invoker {
+	fn invoke(&self, request: DependencyRequest) -> Result<DependencyResponse>;
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TargetCtx {
+	target: String,
+
+	#[serde(flatten)]
+	base: BaseCtx,
+}
+
+impl TargetCtx {
+	pub fn new(target: String, config: Option<serde_json::Value>, token: u32) -> Self {
+		Self {
+			target,
+			base: BaseCtx::new(config, token),
+		}
+	}
+
+	pub fn target(&self) -> &str { &self.target }
+}
+
+impl Deref for TargetCtx {
+	type Target = BaseCtx;
+
+	fn deref(&self) -> &BaseCtx {
+		&self.base
+	}
+}
+
+impl AsRef<BaseCtx> for TargetCtx {
+	fn as_ref(&self) -> &BaseCtx {
+		&self.base
+	}
+}
+
+impl AsMut<BaseCtx> for TargetCtx {
+	fn as_mut(&mut self) -> &mut BaseCtx {
+		&mut self.base
 	}
 }

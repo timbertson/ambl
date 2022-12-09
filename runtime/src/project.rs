@@ -536,7 +536,7 @@ impl<M: BuildModule> Project<M> {
 					project = project_ret;
 
 					let result: String = project.unlocked_block(|project_handle| {
-						let ctx = BaseCtx::new(spec.config.value().to_owned());
+						let ctx = BaseCtx::new(spec.config.value().to_owned(), build_token.raw());
 						let bytes = wasm_module.call(spec, &ctx, &project_handle)?;
 						Ok(String::from_utf8(bytes)?)
 					})?;
