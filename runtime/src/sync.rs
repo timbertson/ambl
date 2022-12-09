@@ -1,10 +1,14 @@
-use std::{sync::{TryLockResult, RwLockReadGuard, RwLockWriteGuard, Arc, Mutex, MutexGuard}, ops::{Deref, DerefMut}};
+use std::{sync::{TryLockResult, RwLockReadGuard, RwLockWriteGuard, Arc, Mutex, MutexGuard, RwLock}, ops::{Deref, DerefMut}};
 
 use log::*;
 use anyhow::*;
 
 pub fn lock_failed(desc: &str) -> Error {
 	anyhow!("Failed to acquire lock: {}", desc)
+}
+
+pub fn lock_poisioned() -> Error {
+	anyhow!("Failed to acquire poisoned lock")
 }
 
 // rwlock*ref provides a convenient wrapper to pretend StateRef contains a State instead of Option<State>
@@ -134,9 +138,96 @@ impl<'a, T> Deref for Mutexed<'a, T> {
 	}
 }
 
-
 impl<'a, T> DerefMut for Mutexed<'a, T> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.guard.as_mut().expect("guard is None")
+	}
+}
+
+#[derive(Debug)]
+pub struct RwRef<T>(Arc<RwLock<T>>);
+
+impl<T> RwRef<T> {
+	pub fn new(v: T) -> Self {
+		Self(Arc::new(RwLock::new(v)))
+	}
+
+	pub fn handle(&self) -> RwHandle<T> {
+		RwHandle(Arc::clone(&self.0))
+	}
+}
+
+impl<T> Clone for RwRef<T> {
+	fn clone(&self) -> Self {
+		Self(Arc::clone(&self.0))
+	}
+}
+
+pub struct RwHandle<T>(Arc<RwLock<T>>);
+impl<T> RwHandle<T> {
+	pub fn read(&mut self) -> Result<RwReadGuard<T>> {
+		let guard = self.0.read().map_err(|_| lock_poisioned())?;
+		Ok(RwReadGuard {
+			arc: Arc::clone(&self.0),
+			guard
+		})
+	}
+
+	pub fn write(&mut self) -> Result<RwWriteGuard<T>> {
+		let guard = self.0.write().map_err(|_| lock_poisioned())?;
+		Ok(RwWriteGuard {
+			arc: Arc::clone(&self.0),
+			guard
+		})
+	}
+
+	pub fn with_write<'a, R, F>
+	(&'a mut self, f: F) -> Result<R>
+		where for<'b> F: FnOnce(&'b mut T) -> Result<R>
+	{
+		f(self.write()?.deref_mut())
+	}
+}
+
+pub struct RwReadGuard<'a, T> {
+	arc: Arc<RwLock<T>>,
+	guard: RwLockReadGuard<'a, T>,
+}
+impl<'a, T> RwReadGuard<'a, T> {
+	pub fn unlock(self) -> RwHandle<T> {
+		RwHandle(self.arc)
+	}
+}
+
+impl<'a, T> Deref for RwReadGuard<'a, T> {
+	type Target = T;
+
+	fn deref(&self) -> &Self::Target {
+		self.guard.deref()
+	}
+}
+
+pub struct RwWriteGuard<'a, T> {
+	arc: Arc<RwLock<T>>,
+	guard: RwLockWriteGuard<'a, T>,
+}
+
+impl<'a, T> RwWriteGuard<'a, T> {
+	pub fn unlock(self) -> RwHandle<T> {
+		RwHandle(self.arc)
+	}
+}
+
+impl<'a, T> Deref for RwWriteGuard<'a, T> {
+	type Target = T;
+
+	fn deref(&self) -> &Self::Target {
+		self.guard.deref()
+	}
+}
+
+impl<'a, T> DerefMut for RwWriteGuard<'a, T> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.guard.deref_mut()
 	}
 }

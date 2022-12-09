@@ -109,7 +109,6 @@ pub enum Rule {
 	Alias(Alias),
 	Target(Target),
 	Include(Include),
-	Nested(NestedRule),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

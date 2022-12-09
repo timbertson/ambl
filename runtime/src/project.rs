@@ -1,10 +1,13 @@
 #![allow(unreachable_code)]
+use std::cell::RefCell;
 use std::collections::{HashMap, LinkedList};
 use std::collections::hash_map::Entry;
 use std::process::{Command, Stdio};
-use std::sync::atomic;
+use std::rc::Rc;
+use std::sync::{atomic, RwLock};
 use std::{fs, iter};
 use std::ops::DerefMut;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use log::*;
@@ -13,7 +16,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
 use trou_common::build::{DependencyRequest, DependencyResponse, self, FileDependency, FileDependencyType};
-use trou_common::ctx::BaseCtx;
+use trou_common::ctx::{BaseCtx, TargetCtx};
 use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
@@ -22,7 +25,7 @@ use crate::err::*;
 use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::Sandbox;
-use crate::sync::{MutexRef, Mutexed, MutexHandle};
+use crate::sync::{MutexRef, Mutexed, MutexHandle, RwRef, RwHandle, RwReadGuard};
 use crate::{wasm::WasmModule, sync::lock_failed};
 
 pub type ProjectRef<M> = MutexRef<Project<M>>;
@@ -47,11 +50,50 @@ impl ActiveBuildToken {
 	}
 }
 
+#[derive(Clone, Debug)]
+pub struct Nested {
+	rules: Vec<ProjectRule>,
+	scope: Option<String>,
+}
+
+// superset of Rule with the addition of Nested, which
+// tracks the results of expanding an Include.
+#[derive(Clone, Debug)]
+pub enum ProjectRule {
+	// Immutable types
+	Alias(Alias),
+	Target(Target),
+	Mutable(RwRef<MutableRule>),
+}
+
+// A wrapper encapsulating a single include's state,
+// from initial -> loading -> loaded
+#[derive(Clone, Debug)]
+pub enum MutableRule {
+	Include(Include), // before loading
+	Nested(Nested), // after loading
+	Loading(), // during loading.
+	// TODO when we support parallelism, this will need to indicate
+	// the logical thread(s) which are waiting on it. Other threads
+	// can wait, but any already-waiting thread is a circular dep
+}
+
+impl From<Rule> for ProjectRule {
+	fn from(rule: Rule) -> Self {
+		match rule {
+			Rule::Alias(v) => ProjectRule::Alias(v),
+			Rule::Target(v) => ProjectRule::Target(v),
+			Rule::Include(v) => ProjectRule::Mutable(RwRef::new(MutableRule::Include(v))),
+		}
+	}
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum BuildReason {
 	Dependency(ActiveBuildToken),
 	Speculative, // speculative execution of a build target, not associated with an active build
-	Include(Vec<Include>), // module import, tracking the stack / chain of imports for cycle detection
+	Import, // Importing a module to evaluate its rules. This doesn't cause
+	// dependencies to be registered, but the get_rules() call may
 	Explicit, // explicit user request, fail if not a target
 }
 
@@ -60,7 +102,7 @@ impl BuildReason {
 		match self {
 			BuildReason::Dependency(p) => Some(*p),
 			BuildReason::Speculative => None,
-			BuildReason::Include(_) => None,
+			BuildReason::Import => None,
 			BuildReason::Explicit => None,
 		}
 	}
@@ -84,7 +126,7 @@ pub struct Project<M: BuildModule> {
 	module_cache: ModuleCache<M::Compiled>,
 	build_cache: DepStore,
 	active_tasks: HashMap<ActiveBuildToken, DepSet>,
-	rules: Vec<Rule>,
+	root_rule: Arc<ProjectRule>,
 	self_ref: Option<ProjectRef<M>>,
 }
 
@@ -99,7 +141,7 @@ impl<M: BuildModule> Project<M> {
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
 			self_ref: None,
-			rules: vec!(dsl::include(dsl::yaml("trou.yaml"))),
+			root_rule: Arc::new(dsl::include(dsl::yaml("trou.yaml")).into()),
 		});
 
 		// lock the project to populate self_ref
@@ -179,24 +221,54 @@ impl<M: BuildModule> Project<M> {
 		}
 	}
 	
-	pub fn expand_and_filter_rule<'a, 'b>(
-		mut project: ProjectMutex<'a, M>,
-		rule: &'b mut Rule,
+	/*
+	Although imported modules and YAML files cause targets to be rebuilt, they're not
+	directly registered as dependencies here.
+	
+	Instead, we rely on the fact that _finding_ the target for a given path will
+	depend on the result of its get_rules(). That is itself a first class cacheable
+	target, which depends on the module file itself.
+	*/
+	fn expand_and_filter_rule<'a, 'b>(
+		project: ProjectMutex<'a, M>,
+		rule: &'b ProjectRule,
 		name: &str,
-		load_chain: &Vec<Include>, // the chain of includes we're resolving. This is used to prevent recusive loops.
-	) -> Result<ProjectMutexPair<'a, M, Option<&'b Target>>> {
+	) -> Result<ProjectMutexPair<'a, M, Option<Target>>> {
 		match rule {
-			Rule::Target(t) => {
+			ProjectRule::Target(t) => {
 				if t.names.iter().any(|n| n == name) {
-					Ok((project, Some(&*t)))
+					Ok((project, Some(t.to_owned())))
 				} else {
 					Ok((project, None))
 				}
 			},
-			Rule::Nested(ref mut nested) => {
+			ProjectRule::Alias(x) => {
+				debug!("TODO: skipping alias... {:?}", x);
+				Ok((project, None))
+			},
+			ProjectRule::Mutable(rule_ref) => {
+				return Self::handle_importable_rule(project, rule_ref, name);
+			},
+		}
+	}
+
+	fn handle_importable_rule<'a>(
+		mut project: ProjectMutex<'a, M>,
+		rule_ref: &RwRef< MutableRule>,
+		name: &str,
+	) -> Result<ProjectMutexPair<'a, M, Option<Target>>> {
+		let mut handle = rule_ref.handle();
+		let readable = handle.read()?;
+		match readable.deref() {
+			MutableRule::Loading() => {
+				debug!("Encountered recursive include searching for target {:?}. Skipping.", name);
+				Ok((project, None))
+			},
+
+			MutableRule::Nested(ref nested) => {
 				if let Some(name) = Self::within_scope(name, &nested.scope) {
-					for rule in nested.rules.iter_mut() {
-						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name, load_chain)?;
+					for rule in nested.rules.iter() {
+						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name)?;
 						project = project_ret;
 						if target.is_some() {
 							return Ok((project, target));
@@ -205,51 +277,67 @@ impl<M: BuildModule> Project<M> {
 				}
 				Ok((project, None))
 			},
-			Rule::Alias(x) => {
-				debug!("TODO: skipping alias... {:?}", x);
-				Ok((project, None))
-			},
-			Rule::Include(include) => {
-				if load_chain.contains(include) {
-					debug!("Encountered recursive include {:?} while searching for target {:?}. Skipping.", include, name);
-					Ok((project, None))
-				} else if Self::within_scope(name, include.get_scope()).is_some() {
-					let subchain = iter::once(&*include).chain(load_chain.iter()).map(|include| include.to_owned()).collect();
-					debug!("Loading include {:?} with load_chain {:?}, subchain {:?}", include, &load_chain, &subchain);
-					let ctx = || format!("Loading include: {:?}", include);
-					let child_reason = BuildReason::Include(subchain);
+
+			MutableRule::Include(include) => {
+				if Self::within_scope(name, include.get_scope()).is_some() {
+					// release borrow of rule
+					let include = include.to_owned();
+					debug!("Loading include {:?}", &include);
 					
+					// remove the Include node to prevent infinite recursion
+					let ctx = || format!("Loading include: {:?}", &include);
+					let mut handle = readable.unlock();
+					handle.with_write(|writeable| {
+						*writeable = MutableRule::Loading();
+						Ok(())
+					})?;
+
 					let rules = match include.get_mode() {
 						IncludeMode::YAML => {
 							let (project_ret, rules) = Self::load_yaml_rules(
 								project,
 								include.get_module(),
-								&child_reason
+								&BuildReason::Import
 							).with_context(ctx)?;
 							project = project_ret;
 							rules
 						},
 
 						IncludeMode::WASM => {
-							let (project_ret, mut module) = Self::load_module_inner(
-								project,
-								include.get_module(),
-								&child_reason
-							).with_context(ctx)?;
+							let request = DependencyRequest::WasmCall(FunctionSpec {
+								fn_name: "get_rules".to_string(),
+								module: Some(include.get_module().to_owned()),
+								config: include.get_config().to_owned(),
+							});
+
+							let (project_ret, persist_dep) = result_block(|| {
+								let (project, persist_dep) = Project::build(project,
+									&request,
+									&BuildReason::Import)?;
+								Ok((project, persist_dep))
+							}).with_context(ctx)?;
+
+							let rules: Vec<Rule> = match persist_dep.into_response(&request)? {
+								DependencyResponse::Str(json) => serde_json::from_str(&json)?,
+								other => {
+									return Err(anyhow!("Unexpected wasm call response: {:?}", other));
+								},
+							};
 							project = project_ret;
-							// TODO: invoke project.build? What happens if it reentrantly needs another target?
-							// Can build_chain handle this?
-							// do we replace with a "Pending" marker and then replace again?
-							module.get_rules(include.get_config()).with_context(ctx)?
+							rules
 						},
 					};
 
-					*rule = Rule::Nested(NestedRule {
-						scope: include.get_scope().to_owned(),
-						rules,
-					});
+					handle.with_write(|writeable| {
+						*writeable = MutableRule::Nested(Nested {
+							rules: rules.into_iter().map(|rule| rule.into()).collect(),
+							scope: include.get_scope().to_owned(),
+						});
+						Ok(())
+					})?;
+
 					// reevaluate after replacing, this will drop into the Rule::Nested branch
-					Self::expand_and_filter_rule(project, rule, name, load_chain)
+					Self::handle_importable_rule(project, rule_ref, name)
 				} else {
 					Ok((project, None))
 				}
@@ -258,29 +346,16 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	pub fn target<'a>(
-		mut project: ProjectMutex<'a, M>,
+		project: ProjectMutex<'a, M>,
 		name: &str,
-		load_chain: &Vec<Include>,
 	) -> Result<ProjectMutexPair<'a, M, Option<Target>>> {
-		// TODO do this only when needed
-		let mut rules_mut = project.rules.clone();
-
-		let mut result = None;
-
-		for rule in rules_mut.iter_mut() {
-			let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name, load_chain)?;
-			project = project_ret;
-			if target.is_some() {
-				// TODO can we return a reference instead of cloning here?
-				result = target.map(|t| t.to_owned());
-				break;
-			}
-		}
-		
-		project.rules = rules_mut;
-
-		debug!("target for {}: {:?}", name, result);
-		Ok((project, result))
+		let root_rule = Arc::clone(&project.root_rule);
+		let (project, target) = Self::expand_and_filter_rule(
+			project,
+			&root_rule,
+			name)?;
+		debug!("target for {}: {:?}", name, target);
+		Ok((project, target))
 	}
 
 	/* Build this dependency, persisting (and returning) its result
@@ -368,12 +443,7 @@ impl<M: BuildModule> Project<M> {
 			DependencyRequest::FileDependency(file_dependency) => {
 				let key: DependencyKey = request.to_owned().into();
 				let name = &file_dependency.path;
-				let empty_chain = Vec::new();
-				let load_chain = match reason {
-					BuildReason::Include(chain) => &chain,
-					_ => &empty_chain,
-				};
-				let (project, target) = Project::target(project, name, load_chain)?;
+				let (project, target) = Project::target(project, name)?;
 
 				let needs_rebuild = |project, cached: &Persist| {
 					if let Some(ref target) = &target {
@@ -392,11 +462,25 @@ impl<M: BuildModule> Project<M> {
 						// TODO track which module the target was defined in
 						let build_module_path = target.build.module.clone().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
 
-						let (project_ret, mut wasm_module) = Self::load_module_inner(project, &build_module_path, &child_reason)?;
+						let (project_ret, mut wasm_module) = Self::load_module_inner(
+							project,
+							&build_module_path,
+							&child_reason)?;
 						project = project_ret;
 
 						let built = project.unlocked_block(|project_handle| {
-							wasm_module.run_builder(build_token, name, &target, &project_handle)?;
+							let ctx = TargetCtx::new(
+								name.to_owned(),
+								target.build.config.0.to_owned(),
+								build_token.raw());
+
+							// TODO can we have a FunctionSpec with references?
+							let bytes = wasm_module.call(& FunctionSpec {
+								fn_name: target.build.fn_name.to_owned(),
+								module: Some(build_module_path),
+								config: target.build.config.to_owned(),
+							}, &ctx, project_handle)?;
+							let _: () = serde_json::from_slice(&bytes)?;
 							PersistFile::from_path(name)
 						})?;
 
@@ -430,10 +514,7 @@ impl<M: BuildModule> Project<M> {
 					project, reason, key,
 					needs_rebuild, do_build)
 			},
-			// TODO: is it possible this wasm call wouldn't be required by the latest version of
-			// the build function? If we always evaluate things in sequence order then probably not,
-			// but if we parallelize then it's possible that some earlier input will change, causing
-			// this wasm call to not be made, or be made with different arguments.
+
 			DependencyRequest::WasmCall(spec) => {
 				// This should be made impossible via types but I don't want to duplicate DependencyRequest yet
 				let module_path = spec.module.to_owned().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
@@ -454,17 +535,17 @@ impl<M: BuildModule> Project<M> {
 						&BuildReason::Dependency(build_token))?;
 					project = project_ret;
 
-					let result = project.unlocked_block(|project_handle| {
+					let result: String = project.unlocked_block(|project_handle| {
 						let ctx = BaseCtx::new(spec.config.value().to_owned());
-						wasm_module.call(spec, &ctx)
+						let bytes = wasm_module.call(spec, &ctx, &project_handle)?;
+						Ok(String::from_utf8(bytes)?)
 					})?;
-					todo!();
 					
 					let persist = Persist::Wasm(PersistWasmCall {
 						deps: project.collect_deps(build_token),
 						call: PersistWasmDependency {
 							spec: spec.to_owned(),
-							result: String::from_utf8(result)?,
+							result,
 						}
 					});
 					Ok((project, persist))
@@ -489,20 +570,6 @@ impl<M: BuildModule> Project<M> {
 
 		}
 	}
-	
-	// Called after every successful target build or file dependency declaration,
-	// to update both (a) the in-memory understanding of what the parent
-	// task depends on, and (b) the persistent cache of built results.
-	// fn save_build_result(&mut self, store: SaveBuildResult) -> Result<()> {
-	// 	let SaveBuildResult { key, result, parent } = store;
-
-	// 	// Firstly, if there's a parent build token, it registers this dependency (& result) into that build.
-	// 	self.register_dependency(parent, key.clone(), result.to_owned().into_dependency());
-		
-	// 	// Store the built result of this target
-	// 	self.build_cache.update(key, result.to_owned())?;
-	// 	Ok(())
-	// }
 
 	fn collect_deps(&mut self, token: ActiveBuildToken) -> DepSet {
 		let collected = self.active_tasks.remove(&token).unwrap_or_else(Default::default);
@@ -574,13 +641,31 @@ impl<M: BuildModule> Project<M> {
 
 	#[cfg(test)]
 	pub fn replace_rules(&mut self, v: Vec<Rule>) {
-		warn!("replacing rules with: {:?}", &v);
-		self.rules = v;
+		warn!("replacing root rule with: {:?}", &v);
+		self.root_rule = Arc::new(ProjectRule::Mutable(RwRef::new(MutableRule::Nested(Nested {
+			rules: v.into_iter().map(|r| r.into()).collect(),
+			scope: None,
+		}))));
 	}
 
 	#[cfg(test)]
 	pub fn push_rule(&mut self, r: Rule) {
-		self.rules.push(r)
+		match self.root_rule.as_ref() {
+			ProjectRule::Mutable(mutable) => {
+				let mut h = mutable.handle();
+				return h.with_write(|w| {
+					match w {
+						MutableRule::Nested(n) => {
+							n.rules.push(r.into());
+						},
+						_ => (),
+					}
+					Ok(())
+				}).unwrap()
+			},
+			_ => (),
+		}
+		panic!("can't push_rule; root is {:?}", self.root_rule);
 	}
 
 	#[cfg(test)]

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ops::Index};
 
 use anyhow::*;
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use trou_common::rule::{Target, Rule, FunctionSpec};
 use wasmtime::Engine;
 
@@ -14,17 +14,10 @@ pub trait BuildModule : Sized {
 	
 	fn load(engine: &Engine, module: &Self::Compiled, project: ProjectRef<Self>) -> Result<Self>;
 
-	fn get_rules(
-		&mut self, config: &trou_common::rule::Config
-	) -> Result<Vec<Rule>>;
-
-	fn call<Ctx: Serialize>(&mut self, f: &FunctionSpec, arg: &Ctx) -> Result<Vec<u8>>;
-
-	fn run_builder(
+	fn call<Ctx: Serialize>(
 		&mut self,
-		token: ActiveBuildToken,
-		path: &str,
-		builder: &Target,
+		f: &FunctionSpec,
+		arg: &Ctx,
 		_unlocked_evidence: &ProjectHandle<Self>
-	) -> Result<()>;
+	) -> Result<Vec<u8>>;
 }

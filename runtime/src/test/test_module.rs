@@ -1,15 +1,16 @@
 use log::*;
+use serde::de::DeserializeOwned;
 use core::fmt;
 use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, default::Default, sync::{Arc, Mutex}, fs, path::Path};
 
 use anyhow::*;
 use tempdir::TempDir;
-use trou_common::{rule::{Target, Rule, dsl}, build::{DependencyRequest, FileDependency, DependencyResponse}, ctx::{TargetCtx, Invoker}};
+use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse}, ctx::{TargetCtx, Invoker}};
 use wasmtime::Engine;
 
 use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block};
 
-type BuilderFn = Box<dyn Fn(&TestProject, TargetCtx) -> Result<()> + Sync + Send>;
+type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
 #[derive(Clone)]
 pub struct TestModule<'a> {
@@ -23,7 +24,7 @@ impl<'a> TestModule<'a> {
 		Self { project, rules: Default::default(), builders: Default::default() }
 	}
 	
-	pub fn builder<K: ToString, F: Fn(&TestProject, TargetCtx) -> Result<()> + 'static + Sync + Send>(mut self, k: K, f: F) -> Self
+	pub fn builder<K: ToString, F: Fn(&TestProject, &TargetCtx) -> Result<()> + 'static + Sync + Send>(mut self, k: K, f: F) -> Self
 	{
 		Arc::get_mut(&mut self.builders).expect("builder()").insert(k.to_string(), Box::new(f));
 		self
@@ -74,33 +75,27 @@ impl<'a> BuildModule for TestModule<'a> {
 		Ok(module.to_owned())
 	}
 
-	fn get_rules(
-		&mut self, config: &trou_common::rule::Config
-	) -> Result<Vec<Rule>> {
-		Ok(self.rules.to_owned())
-	}
+	fn call<Ctx: serde::Serialize>(&mut self, f: &FunctionSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+		if f.fn_name == "get_rules" {
+			Ok(serde_json::to_vec(&self.rules)?)
+		} else {
+			// go to and from JSON so I can have an owned version (and avoid unsafe casts)
+			let mut ctx: TargetCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
 
-	fn call<Ctx: serde::Serialize>(&mut self, f: &trou_common::rule::FunctionSpec, arg: &Ctx) -> Result<Vec<u8>> {
-		todo!()
-	}
+			let path = ctx.target();
+			let token = ctx.token;
+			debug!("running builder for {} with token {:?}", path, token);
+			let fn_name = &f.fn_name;
+			let f = self.builders.get(fn_name)
+				.ok_or_else(|| anyhow!("no such builder {:?} in {:?}", fn_name, &self.builders.keys()))?;
 
-	fn run_builder(
-		&mut self,
-		token: ActiveBuildToken,
-		path: &str,
-		builder: &Target,
-		_unlocked_evidence: &ProjectHandle<Self>
-	) -> Result<()> {
-		debug!("running builder for {} with token {:?}", path, token);
-		let fn_name = &builder.build.fn_name;
-		let f = self.builders.get(fn_name)
-			.ok_or_else(|| anyhow!("no such builder: {}", fn_name))?;
-		let mut ctx = TargetCtx::new(path.to_owned(), None, token.raw());
-
-		ctx._override_invoker(Box::new(TestInvoker { token }));
-		TestInvoker::wrap(self.project, token, || {
-			f(self.project, ctx)
-		})
+			let token = ActiveBuildToken::from_raw(token);
+			ctx._override_invoker(Box::new(TestInvoker { token }));
+			TestInvoker::wrap(self.project, token, || {
+				f(self.project, &ctx)
+			})?;
+			Ok(serde_json::to_vec(&())?)
+		}
 	}
 }
 
@@ -108,6 +103,7 @@ lazy_static::lazy_static! {
 	static ref INVOKE_REFERENCES: Arc<Mutex<HashMap<ActiveBuildToken, &'static TestProject<'static>>>> = Arc::new(Mutex::new(HashMap::new()));
 }
 
+#[derive(Clone)]
 struct TestInvoker {
 	token: ActiveBuildToken,
 }
@@ -199,9 +195,8 @@ impl<'a> TestProject<'a> {
 	}
 	
 	// all-in one: adds an anonymous module for this rule, and pushes a rule
-	pub fn target_builder<S: ToString, F: Fn(&TestProject, TargetCtx) -> Result<()> + 'static + Sync + Send>(&'a self, target_name: S, f: F) -> &Self {
-		// including the current module size guarantees a unique module name
-		// let p = self.lock();
+	pub fn target_builder<S: ToString, F: Fn(&TestProject, &TargetCtx) -> Result<()> + 'static + Sync + Send>(&'a self, target_name: S, f: F) -> &Self {
+		// including the current module len cheaply guarantees a unique module name
 		let mod_name = format!("anon-{}", self.lock().module_len());
 		let fn_name = "build";
 		let target_name = target_name.to_string();

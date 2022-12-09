@@ -128,11 +128,6 @@ impl StateRef {
 		Ok((buf_offset, strlen))
 	}
 	
-	// serialize an argument and call a guest function taking (buf, len, buf_out, len_out). Return the deserialized output
-	fn call_serde<I: Serialize, O: DeserializeOwned, C: AsContextMut>(&self, store: C, f: TypedFunc<(u32, u32, u32, u32), ()>, arg: &I) -> Result<O> {
-		self.call_str(store, f, &serde_json::to_string(arg)?, |b| ResultFFI::deserialize(&b))
-	}
-
 	fn call_str<O, FO: FnOnce(Vec<u8>) -> Result<O>, C: AsContextMut>(&self, mut store: C, f: TypedFunc<(u32, u32, u32, u32), ()>, arg: &str, fo: FO) -> Result<O> {
 		let (buf, len) = self.send_string(store.as_context_mut(), arg)?;
 
@@ -165,17 +160,7 @@ impl StateRef {
 		Ok(())
 	}
 
-	pub fn get_rules<C: AsContextMut>(&self, mut store: C, config: &trou_common::rule::Config) -> Result<Vec<Rule>> {
-		debug!("get_rules");
-		let mut write = self.write();
-		let state = write.as_ref()?;
-		let rules_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(
-			store.as_context_mut(), "rules_ffi")?;
-		drop(write);
-		self.call_serde(store, rules_ffi, &BaseCtx::new(config.value().to_owned()))
-	}
-
-	pub fn call<C: AsContextMut, Ctx: Serialize>(&self, mut store: C, f: &FunctionSpec, arg: &Ctx) -> Result<Vec<u8>> {
+	pub fn call<C: AsContextMut, Ctx: Serialize>(&self, mut store: C, f: &FunctionSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>) -> Result<Vec<u8>> {
 		debug!("call({:?})", f);
 		let mut write = self.write();
 		let state = write.as_ref()?;
@@ -183,25 +168,6 @@ impl StateRef {
 			store.as_context_mut(), &f.fn_name)?;
 		drop(write);
 		self.call_str(store, call_ffi, &serde_json::to_string(arg)?, |b| Ok(b))
-	}
-
-	pub fn run_builder<C: AsContextMut>(
-		&self,
-		mut store: C,
-		token: ActiveBuildToken,
-		path: &str,
-		builder: &Target,
-		_unlocked_evidence: &ProjectHandle<WasmModule>
-	) -> Result<()> {
-		debug!("run_builder");
-		let mut write = self.write();
-		let state = write.as_ref()?;
-		let f = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(store.as_context_mut(), &builder.build.fn_name)?;
-		let config = builder.build.config.value();
-		let target = TargetCtx::new(path.to_owned(), config.to_owned(), token.raw());
-		drop(write);
-		debug!("run_builder call_serde");
-		self.call_serde::<TargetCtx, (), C>(store, f, &target)
 	}
 }
 
@@ -286,15 +252,7 @@ impl BuildModule for WasmModule {
 		Ok(WasmModule { state, store })
 	}
 
-	fn get_rules(&mut self, config: &trou_common::rule::Config) -> Result<Vec<Rule>> {
-		self.state.get_rules(&mut self.store, config)
-	}
-
-	fn call<Ctx: Serialize>(&mut self, f: &FunctionSpec, arg: &Ctx) -> Result<Vec<u8>> {
-		self.state.call(&mut self.store, f, arg)
-	}
-
-	fn run_builder(&mut self, token: ActiveBuildToken, path: &str, builder: &Target, _unlocked_evidence: &ProjectHandle<Self>) -> Result<()> {
-		self.state.run_builder(&mut self.store, token, path, builder, _unlocked_evidence)
+	fn call<Ctx: Serialize>(&mut self, f: &FunctionSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+		self.state.call(&mut self.store, f, arg, _unlocked_evidence)
 	}
 }
