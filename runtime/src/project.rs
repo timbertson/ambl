@@ -396,7 +396,7 @@ impl<M: BuildModule> Project<M> {
 		let from_cache = match project.build_cache.lookup(&key)?.map(|c| c.to_owned()) {
 			Some(Cached::Fresh(cached)) => {
 				// already checked in this invocation, short-circuit
-				debug!("Short circuit, already built {:?}", &cached);
+				debug!("Short circuit, already built {:?} ({:?})", &key, &cached);
 				Some(cached.into_dependency())
 			},
 
@@ -404,7 +404,7 @@ impl<M: BuildModule> Project<M> {
 				let (project_ret, needs_build) = needs_rebuild(project, &cached)?;
 				project = project_ret;
 				if !needs_build {
-					debug!("Marking cached result for {:?} as fresh", &cached);
+					debug!("Marking cached result for {:?} ({:?}) as fresh", &key, &cached);
 					project.build_cache.update(key.to_owned(), cached.to_owned())?;
 					Some(cached.into_dependency())
 				} else {

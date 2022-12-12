@@ -1,4 +1,5 @@
 // test utilities
+mod util;
 mod test_module;
 
 // modules that define tests

@@ -1,5 +1,5 @@
 use log::*;
-use std::ops::{Deref, DerefMut};
+use std::{ops::{Deref, DerefMut}, path::PathBuf};
 use serde::{de::DeserializeOwned, Serialize};
 use core::fmt;
 use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, default::Default, sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}}, fs, path::Path};
@@ -202,6 +202,7 @@ pub struct TestProject<'a> {
 	root: TempDir,
 	log: Log,
 	module_count: AtomicUsize,
+	monotonic_clock: AtomicUsize,
 }
 
 const FAKE_FILE: PersistFile = PersistFile { mtime: 0 };
@@ -212,26 +213,20 @@ impl<'a> TestProject<'a> {
 		let handle = project.handle();
 		let root = TempDir::new("troutest")?;
 		let module_count = AtomicUsize::new(0);
-		let s = Self { project, handle, root, log: Default::default(), module_count };
+		let monotonic_clock = AtomicUsize::new(1);
+		let s = Self { project, handle, root, log: Default::default(), module_count, monotonic_clock };
 		s.lock().replace_rules(vec!());
 		Ok(s)
 	}
 
-	pub fn in_tempdir<F, R>(f: F) -> R
-		where for<'b> F: FnOnce(&'b TestProject<'b>) -> R
+	pub fn in_tempdir<F, R>(f: F) -> Result<R>
+		where for<'b> F: FnOnce(&'b TestProject<'b>) -> Result<R>
 	{
-		result_block(|| {
-			let tp = TestProject::new()?;
+		let tp = TestProject::new()?;
+		env::set_current_dir(tp.root.path())?;
+		debug!("TestProject running in {:?}", tp.root.path());
 
-			let original_cwd = env::current_dir()?;
-			env::set_current_dir(tp.root.path())?;
-			debug!("TestProject running in {:?}", tp.root.path());
-
-			let ret = f(&tp);
-
-			env::set_current_dir(original_cwd)?;
-			Ok(ret)
-		}).unwrap()
+		f(&tp)
 	}
 
 	pub fn new_module(&'a self) -> TestModule<'a> {
@@ -242,6 +237,12 @@ impl<'a> TestProject<'a> {
 		where 'a : 'b // project liftime outlives lock lifetime
 	{
 		unsafe { self.handle.unsafe_lock("tests").expect("lock() failed") }
+	}
+
+	pub fn with_lock<'b, R, F: FnOnce(Mutexed<'b, Project<TestModule<'a>>>) -> R>(&'b self, f: F) -> R
+		where 'a : 'b // project liftime outlives lock lifetime
+	{
+		f(self.lock())
 	}
 	
 	fn next_module_name(&self) -> String {
@@ -289,33 +290,44 @@ impl<'a> TestProject<'a> {
 		self
 	}
 
-	pub fn build_file_res(&self, f: &str) -> Result<&Self> {
+	pub fn touch_fake<S: Into<String>>(&self, v: S) -> &Self {
+		let mut p = self.lock();
+		let stat = PersistFile { mtime: self.monotonic_clock.fetch_add(1, Ordering::Relaxed) as u128 };
+		p.inject_cache(
+			DependencyKey::FileDependency(v.into()),
+			Persist::File(Some(stat))
+		).expect("touch_fake");
+		drop(p);
+		self
+	}
+
+	pub fn build_file(&self, f: &str) -> Result<&Self> {
+		let project = self.lock();
+		println!("\n=== start build_file({})", f);
+		let (mut project, _dep) = Project::build(
+			project,
+			&DependencyRequest::FileDependency(FileDependency::new(f.to_owned())),
+			&BuildReason::Explicit)?;
+
 		// testcases run multiple builds, make sure we don't short-circuit between them
-		let mut project = self.lock();
+		println!("=== end build_file({})\n", f);
 		project.cache_mut().invalidate_if(|dep| {
 			match dep.as_file() {
 				Some(f) if f == &FAKE_FILE => false,
 				_ => true,
 			}
 		});
-		Project::build(
-			project,
-			&DependencyRequest::FileDependency(FileDependency::new(f.to_owned())),
-			&BuildReason::Explicit)?;
+
 		Ok(self)
 	}
 
-	pub fn build_file(&self, f: &str) -> &Self {
-		self.build_file_res(f).expect("build_file")
-	}
-
-	pub fn write_file<F: AsRef<Path>, S: AsRef<[u8]>>(&self, path: F, contents: S) -> &Self {
+	pub fn write_file<F: AsRef<Path>, S: AsRef<[u8]>>(&self, path: F, contents: S) -> Result<&Self> {
 		debug!("Testcase is writing file {} within {}",
 			path.as_ref().display(),
-			env::current_dir().unwrap().display()
+			env::current_dir()?.display()
 		);
-		fs::write(path, contents).unwrap();
-		self
+		fs::write(path, contents)?;
+		Ok(self)
 	}
 
 	pub fn log(&self) -> Log {
