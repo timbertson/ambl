@@ -168,7 +168,6 @@ impl<M: BuildModule> Project<M> {
 		// TODO need to enforce a project-rooted path, consistent with rules
 		let request = DependencyRequest::FileDependency(FileDependency::new(path.to_owned()));
 		let (mut project, module_built) = Self::build(project, &request, reason)?;
-		project.register_dependency(reason.parent(), request.into(), module_built);
 
 		result_block(|| {
 			let self_ref = project.self_ref.clone().unwrap();
@@ -443,6 +442,8 @@ impl<M: BuildModule> Project<M> {
 			DependencyRequest::FileDependency(file_dependency) => {
 				let key: DependencyKey = request.to_owned().into();
 				let name = &file_dependency.path;
+				
+				// TODO rearrange logic so we don't even need to evaluate the target if cache is fresh
 				let (project, target) = Project::target(project, name)?;
 
 				let needs_rebuild = |project, cached: &Persist| {
@@ -646,26 +647,6 @@ impl<M: BuildModule> Project<M> {
 			rules: v.into_iter().map(|r| r.into()).collect(),
 			scope: None,
 		}))));
-	}
-
-	#[cfg(test)]
-	pub fn push_rule(&mut self, r: Rule) {
-		match self.root_rule.as_ref() {
-			ProjectRule::Mutable(mutable) => {
-				let mut h = mutable.handle();
-				return h.with_write(|w| {
-					match w {
-						MutableRule::Nested(n) => {
-							n.rules.push(r.into());
-						},
-						_ => (),
-					}
-					Ok(())
-				}).unwrap()
-			},
-			_ => (),
-		}
-		panic!("can't push_rule; root is {:?}", self.root_rule);
 	}
 
 	#[cfg(test)]

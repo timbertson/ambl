@@ -109,9 +109,11 @@ fn equivalent_rule_module_does_not_cause_rebuild() -> Result<()> {
 
 		p.build_file("a")?;
 
+		eq!(p.log().reset(), vec!("get_rules", "build"));
+
 		p.touch_fake(&m_name);
 		p.build_file("a")?;
-		eq!(p.log(), vec!("get_rules", "get_rules", "build"));
+		eq!(p.log(), vec!("get_rules"));
 		Ok(())
 	})
 }

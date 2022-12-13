@@ -197,6 +197,9 @@ impl Invoker for TestInvoker {
 }
 
 pub struct TestProject<'a> {
+	// Project mutates rules at it loads them, so we store a pristine copy
+	rules: Mutex<Vec<Rule>>,
+
 	project: ProjectRef<TestModule<'a>>,
 	handle: ProjectHandle<TestModule<'a>>,
 	root: TempDir,
@@ -208,13 +211,28 @@ pub struct TestProject<'a> {
 const FAKE_FILE: PersistFile = PersistFile { mtime: 0 };
 
 impl<'a> TestProject<'a> {
+	fn reset(&self) {
+		let mut p = self.lock();
+		let rules = self.rules.lock().unwrap();
+		p.replace_rules(rules.clone());
+
+		p.cache_mut().invalidate_if(|dep| {
+			match dep.as_file() {
+				Some(f) if f == &FAKE_FILE => false,
+				_ => true,
+			}
+		});
+	}
+
 	fn new() -> Result<Self> {
 		let project = Project::new()?;
 		let handle = project.handle();
 		let root = TempDir::new("troutest")?;
 		let module_count = AtomicUsize::new(0);
 		let monotonic_clock = AtomicUsize::new(1);
-		let s = Self { project, handle, root, log: Default::default(), module_count, monotonic_clock };
+		let log = Default::default();
+		let rules = Default::default();
+		let s = Self { project, handle, root, log, module_count, monotonic_clock, rules };
 		s.lock().replace_rules(vec!());
 		Ok(s)
 	}
@@ -262,8 +280,10 @@ impl<'a> TestProject<'a> {
 	
 	// low-level module / rule modification
 	pub fn inject_rule(&self, v: Rule) -> &Self {
+		let mut r = self.rules.lock().unwrap();
+		r.push(v);
 		let mut p = self.lock();
-		p.push_rule(v);
+		p.replace_rules(r.clone());
 		drop(p);
 		self
 	}
@@ -304,19 +324,16 @@ impl<'a> TestProject<'a> {
 	pub fn build_file(&self, f: &str) -> Result<&Self> {
 		let project = self.lock();
 		println!("\n=== start build_file({})", f);
-		let (mut project, _dep) = Project::build(
+		let (project, _dep) = Project::build(
 			project,
 			&DependencyRequest::FileDependency(FileDependency::new(f.to_owned())),
 			&BuildReason::Explicit)?;
 
-		// testcases run multiple builds, make sure we don't short-circuit between them
+		drop(project);
 		println!("=== end build_file({})\n", f);
-		project.cache_mut().invalidate_if(|dep| {
-			match dep.as_file() {
-				Some(f) if f == &FAKE_FILE => false,
-				_ => true,
-			}
-		});
+
+		// testcases run multiple builds, make sure we don't short-circuit between them
+		self.reset();
 
 		Ok(self)
 	}
@@ -333,7 +350,7 @@ impl<'a> TestProject<'a> {
 	pub fn log(&self) -> Log {
 		self.log.clone()
 	}
-	
+
 	pub fn record<S: ToString>(&self, s: S) {
 		self.log.record(s)
 	}

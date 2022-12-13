@@ -211,3 +211,7 @@ pseudo-checksum tasks? depend on foo.checksum?
  - does the answer dffer from <x>?
 
 Could these be provided by modules? Probably not, we'd need a way to reference these functions freely. New versions might not expose the same function or break the types.
+
+# simpler DSL for rules
+
+Make it easier to provide a function / block directly. If get_rules evaluation is deterministic, we could reference each rule by its index (encoded in Context), and use that to invoke a block directly instead of having to write its name.
