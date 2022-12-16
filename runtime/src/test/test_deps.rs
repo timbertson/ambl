@@ -2,7 +2,7 @@ use std::{fs, sync::{Arc, Mutex}};
 use serial_test::serial;
 
 use anyhow::*;
-use crate::{module::*, test::test_module::{TestModule, TestProject}, project::{Project, BuildReason}};
+use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::{Project, BuildReason}};
 use trou_common::{rule::dsl::*, build::{DependencyRequest, FileDependency}};
 use super::util::*;
 
@@ -128,13 +128,13 @@ fn rebuild_on_transitive_dep_change() -> Result<()> {
 		p.target_builder("b", |p, c| {
 			let contents = c.read_file("a")?;
 			p.record("build b");
-			fs::write(c.path(), format!("{} -> b", contents))?;
+			fs::write(c.dest(), format!("{} -> b", contents))?;
 			Ok(())
 		});
 		p.target_builder("c", |p, c| {
 			let contents = c.read_file("b")?;
 			p.record("build c");
-			fs::write(c.path(), format!("{} -> c", contents))?;
+			fs::write(c.dest(), format!("{} -> c", contents))?;
 			Ok(())
 		});
 		p.write_file("a", "1")?;
@@ -143,8 +143,7 @@ fn rebuild_on_transitive_dep_change() -> Result<()> {
 		eq!(p.log().reset(), vec!("build b", "build c"));
 
 		p.build_file("c")?;
-		eq!(p.log().reset(), vec!());
-
+		assert_prop!(p.log().reset(), Log::is_empty);
 
 		p.write_file("a", "2")?;
 		eq!(p.build_file_contents("c")?, "2 -> b -> c");

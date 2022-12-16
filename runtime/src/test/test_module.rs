@@ -9,7 +9,7 @@ use tempdir::TempDir;
 use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse, FileDependencyType}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::AnyPath};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
@@ -24,6 +24,10 @@ impl Log {
 	pub fn record<S: ToString>(&self, s: S) {
 		self.0.lock().unwrap().push(s.to_string());
 	}
+	
+	pub fn is_empty(&self) -> bool { self.0.lock().unwrap().is_empty() }
+
+	pub fn raw(&self) -> Vec<String> { self.0.lock().unwrap().clone() }
 }
 
 impl fmt::Debug for Log {
@@ -38,6 +42,13 @@ impl<'a> PartialEq<Vec<&'a str>> for Log {
 			self.0.lock().unwrap().iter(),
 			other.iter(),
 		)
+	}
+}
+
+impl<'a> PartialEq<Vec<String>> for Log {
+	fn eq(&self, other: &Vec<String>) -> bool {
+		let refs: Vec<&str> = other.iter().map(|s| s.as_str()).collect();
+		self.eq(&refs)
 	}
 }
 
@@ -225,9 +236,12 @@ impl<'a> TestProject<'a> {
 	}
 
 	fn new() -> Result<Self> {
-		let project = Project::new()?;
-		let handle = project.handle();
 		let root = TempDir::new("troutest")?;
+		// solly mac has a /tmp symlink
+		let root_abs = fs::canonicalize(root.path())?;
+		let project = Project::new(AnyPath::absolute(root_abs.to_str().unwrap().to_owned())?)?;
+
+		let handle = project.handle();
 		let module_count = AtomicUsize::new(0);
 		let monotonic_clock = AtomicUsize::new(1);
 		let log = Default::default();

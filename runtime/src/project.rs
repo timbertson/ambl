@@ -2,11 +2,11 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, LinkedList};
 use std::collections::hash_map::Entry;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{atomic, RwLock};
-use std::{fs, iter};
+use std::{fs, iter, env, io};
 use std::ops::DerefMut;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
@@ -22,7 +22,8 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::err::*;
+use crate::{err::*, path_util};
+use crate::path_util::{Absolute, AnyPath};
 use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::Sandbox;
@@ -124,6 +125,7 @@ impl<M> ModuleCache<M> {
 
 // Represents buildable targets for some subtree of a workspace
 pub struct Project<M: BuildModule> {
+	root: Absolute,
 	module_cache: ModuleCache<M::Compiled>,
 	build_cache: DepStore,
 	active_tasks: HashMap<ActiveBuildToken, DepSet>,
@@ -136,8 +138,9 @@ type ProjectMutexPair<'a, M, T> = (Mutexed<'a, Project<M>>, T);
 
 impl<M: BuildModule> Project<M> {
 
-	pub fn new() -> Result<ProjectRef<M>> {
+	pub fn new(root: Absolute) -> Result<ProjectRef<M>> {
 		let project = MutexRef::new(Project {
+			root,
 			build_cache: DepStore::load(),
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
@@ -216,7 +219,7 @@ impl<M: BuildModule> Project<M> {
 	
 	fn within_scope<'a>(name: &'a str, scope: &'a Option<String>) -> Option<&'a str> {
 		match scope {
-			Some(scope) => scope.strip_prefix(scope).and_then(|s| s.strip_prefix("/")),
+			Some(scope) => name.strip_prefix(scope).and_then(|s| s.strip_prefix("/")),
 			None => Some(name)
 		}
 	}
@@ -339,6 +342,7 @@ impl<M: BuildModule> Project<M> {
 					// reevaluate after replacing, this will drop into the Rule::Nested branch
 					Self::handle_importable_rule(project, rule_ref, name)
 				} else {
+					debug!("Skipping irrelevant include: {:?}", &include);
 					Ok((project, None))
 				}
 			},
@@ -382,49 +386,57 @@ impl<M: BuildModule> Project<M> {
 	// Return the PersistDependency if the value is either:
 	// - fresh (already built)
 	// - cached, but does not need rebuilding (after potentially building dependencies)
-	fn build_with_cache_awareness<'a, NeedsRebuild, Build>(
+	fn build_with_cache_awareness<'a, Ctx, ComputeCtx, NeedsRebuild, Build>(
 		mut project: ProjectMutex<'a, M>,
 		reason: &BuildReason,
 		key: DependencyKey,
+		get_ctx: ComputeCtx,
 		needs_rebuild: NeedsRebuild,
 		build_fn: Build
 	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> where
-		NeedsRebuild: FnOnce(ProjectMutex<'a, M>, &Persist) -> Result<ProjectMutexPair<'a, M, bool>>,
-		Build: FnOnce(ProjectMutex<'a, M>, ActiveBuildToken) -> Result<ProjectMutexPair<'a, M, Persist>>
+		ComputeCtx: FnOnce(ProjectMutex<'a, M>) -> Result<ProjectMutexPair<'a, M, Ctx>>,
+		NeedsRebuild: FnOnce(ProjectMutex<'a, M>, &Ctx, &Persist) -> Result<ProjectMutexPair<'a, M, bool>>,
+		Build: FnOnce(ProjectMutex<'a, M>, &Ctx, ActiveBuildToken) -> Result<ProjectMutexPair<'a, M, Persist>>
 	{
 		// to_owned releases project borrow
 		let from_cache = match project.build_cache.lookup(&key)?.map(|c| c.to_owned()) {
 			Some(Cached::Fresh(cached)) => {
 				// already checked in this invocation, short-circuit
 				debug!("Short circuit, already built {:?} ({:?})", &key, &cached);
-				Some(cached.into_dependency())
+				CacheAware::Fresh(cached.into_dependency())
 			},
 
 			Some(Cached::Cached(cached)) => {
-				let (project_ret, needs_build) = needs_rebuild(project, &cached)?;
+				let (project_ret, ctx) = get_ctx(project)?;
+				let (project_ret, needs_build) = needs_rebuild(project_ret, &ctx, &cached)?;
 				project = project_ret;
 				if !needs_build {
 					debug!("Marking cached result for {:?} ({:?}) as fresh", &key, &cached);
 					project.build_cache.update(key.to_owned(), cached.to_owned())?;
-					Some(cached.into_dependency())
+					CacheAware::Fresh(cached.into_dependency())
 				} else {
-					None
+					CacheAware::Stale(ctx)
 				}
 			},
 
-			None => None,
+			None => {
+				let (project_ret, ctx) = get_ctx(project)?;
+				project = project_ret;
+				CacheAware::Stale(ctx)
+			},
 		};
 		
-		let result = if let Some(fresh) = from_cache {
-			fresh
-		} else {
-			let build_token = ActiveBuildToken::generate();
-			debug!("created build token {:?} beneath {:?} for {:?}", build_token, reason.parent(), &key);
-			let (project_ret, built) = build_fn(project, build_token)?;
-			project = project_ret;
-			debug!("built {:?} with token {:?}, saving against parent {:?}", &key, build_token, reason.parent());
-			project.build_cache.update(key.clone(), built.clone())?;
-			built.into_dependency()
+		let result = match from_cache {
+			CacheAware::Fresh(dep) => dep,
+			CacheAware::Stale(ctx) => {
+				let build_token = ActiveBuildToken::generate();
+				debug!("created build token {:?} beneath {:?} for {:?}", build_token, reason.parent(), &key);
+				let (project_ret, built) = build_fn(project, &ctx, build_token)?;
+				project = project_ret;
+				debug!("built {:?} with token {:?}, saving against parent {:?}", &key, build_token, reason.parent());
+				project.build_cache.update(key.clone(), built.clone())?;
+				built.into_dependency()
+			},
 		};
 		
 		// always register dependency on parent, even if we returned a cached value
@@ -443,12 +455,10 @@ impl<M: BuildModule> Project<M> {
 			DependencyRequest::FileDependency(file_dependency) => {
 				let key: DependencyKey = request.to_owned().into();
 				let name = &file_dependency.path;
-				
-				// TODO rearrange logic so we don't even need to evaluate the target if cache is fresh
-				let (project, target) = Project::target(project, name)?;
+				let get_target = |project| Project::target(project, name);
 
-				let needs_rebuild = |project, cached: &Persist| {
-					if let Some(ref target) = &target {
+				let needs_rebuild = |project, target: &Option<Target>, cached: &Persist| {
+					if let Some(target) = target {
 						if let Some(cached_target) = cached.as_target() {
 							return Self::requires_build(project, cached_target);
 						}
@@ -456,7 +466,7 @@ impl<M: BuildModule> Project<M> {
 					Ok((project, true))
 				};
 
-				let do_build = |mut project, build_token| {
+				let do_build = |mut project, target: &Option<Target>, build_token| {
 					let persist = if let Some(target) = &target {
 						println!("# {}", name);
 						let child_reason = BuildReason::Dependency(build_token);
@@ -469,11 +479,13 @@ impl<M: BuildModule> Project<M> {
 							&build_module_path,
 							&child_reason)?;
 						project = project_ret;
+						let tmp_path = project.tmp_path(name)?;
+						path_util::rm_rf_and_ensure_parent(&tmp_path)?;
 
 						let built = project.unlocked_block(|project_handle| {
 							let ctx = TargetCtx::new(
 								name.to_owned(),
-								PathBuf::from(name), // TODO .trou/output or similar?
+								tmp_path.to_owned(),
 								target.build.config.0.to_owned(),
 								build_token.raw());
 
@@ -486,13 +498,26 @@ impl<M: BuildModule> Project<M> {
 							let _: () = serde_json::from_slice(&bytes)?;
 							PersistFile::from_path(name)
 						})?;
+						
+						let dest_path = project.dest_path(name)?;
+						path_util::rm_rf_and_ensure_parent(&dest_path)?;
+						match path_util::lstat_opt::<&Path>(tmp_path.as_ref())? {
+							Some(_) => {
+								debug!("promoting temp path {:?} to {:?}", &tmp_path, &dest_path);
+								fs::rename(&tmp_path, &dest_path)?
+							},
+							None => {
+								// write a dummy file to register the build time
+								fs::write(&dest_path, "")?;
+							},
+						}
 
 						Persist::Target(PersistTarget {
 							file: built,
 							deps: project.collect_deps(build_token),
 						})
 					} else {
-						debug!("Not a buildable target: {:?}", &request);
+						debug!("Treating dependency as a plain file: {:?}", &request);
 						match reason {
 							BuildReason::Explicit => {
 								return Err(anyhow!("Not a buildable target: {}", name))
@@ -515,7 +540,7 @@ impl<M: BuildModule> Project<M> {
 				
 				Self::build_with_cache_awareness(
 					project, reason, key,
-					needs_rebuild, do_build)
+					get_target, needs_rebuild, do_build)
 			},
 
 			DependencyRequest::WasmCall(spec) => {
@@ -523,7 +548,7 @@ impl<M: BuildModule> Project<M> {
 				let module_path = spec.module.to_owned().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
 				let key: DependencyKey = request.to_owned().into();
 
-				let needs_rebuild = |project, cached: &Persist| {
+				let needs_rebuild = |project, _ctx: &(), cached: &Persist| {
 					if let Persist::Wasm(cached_call) = cached {
 						Self::requires_build(project, cached_call)
 					} else {
@@ -531,7 +556,7 @@ impl<M: BuildModule> Project<M> {
 					}
 				};
 
-				let do_build = |mut project, build_token| {
+				let do_build = |mut project, _ctx: &(), build_token| {
 					let (project_ret, mut wasm_module) = Self::load_module_inner(
 						project,
 						&module_path,
@@ -554,9 +579,10 @@ impl<M: BuildModule> Project<M> {
 					Ok((project, persist))
 				};
 
+				let get_ctx = |project| Ok((project, ()));
 				Self::build_with_cache_awareness(
 					project, reason, key,
-					needs_rebuild, do_build)
+					get_ctx, needs_rebuild, do_build)
 			},
 			DependencyRequest::FileSet(_) => todo!("handle FileSet"),
 			DependencyRequest::Execute(cmd) => {
@@ -636,6 +662,29 @@ impl<M: BuildModule> Project<M> {
 	pub fn invalidate_cache(&mut self) -> () {
 		self.build_cache.invalidate()
 	}
+	
+	fn _path(&self, base: &str, name: &str) -> Result<PathBuf> {
+		// TODO name should be a Normalized in the first place
+		// TODO pass in the scope
+		let norm = AnyPath::relative(name.to_owned())?.normalize_in(None);
+		// TODO should we really allow `../` in normalized paths? It causes heck here...
+		if norm.as_ref().starts_with('.') {
+			todo!();
+		}
+		let mut ret: PathBuf = self.root.to_owned().into();
+		ret.push(".trou");
+		ret.push(base);
+		ret.push::<PathBuf>(norm.into());
+		Ok(ret)
+	}
+
+	fn tmp_path(&self, name: &str) -> Result<PathBuf> {
+		self._path("tmp", name)
+	}
+
+	fn dest_path(&self, name: &str) -> Result<PathBuf> {
+		self._path("out", name)
+	}
 
 	#[cfg(test)]
 	pub fn cache_mut(&mut self) -> &mut DepStore {
@@ -644,7 +693,6 @@ impl<M: BuildModule> Project<M> {
 
 	#[cfg(test)]
 	pub fn replace_rules(&mut self, v: Vec<Rule>) {
-		warn!("replacing root rule with: {:?}", &v);
 		self.root_rule = Arc::new(ProjectRule::Mutable(RwRef::new(MutableRule::Nested(Nested {
 			rules: v.into_iter().map(|r| r.into()).collect(),
 			scope: None,
@@ -670,8 +718,15 @@ impl<M: BuildModule> Project<M> {
 	}
 }
 
-struct SaveBuildResult<'a> {
-	parent: Option<ActiveBuildToken>,
-	key: DependencyKey,
-	result: &'a Persist,
+// helper for build_with_cache_awareness
+enum CacheAware<Ctx> {
+	Fresh(PersistDependency),
+	Stale(Ctx),
+}
+
+// TODO more references instead of owned?
+struct FoundTarget<'a> {
+	target: Target,
+	module: String,
+	name: &'a str,
 }

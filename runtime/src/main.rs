@@ -5,7 +5,7 @@ mod sync;
 mod wasm;
 mod err;
 mod sandbox;
-mod path;
+mod path_util;
 mod module;
 mod init;
 
@@ -16,6 +16,7 @@ use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{A
 use log::*;
 
 use anyhow::*;
+use path_util::AnyPath;
 use project::{Project, ModuleCache, BuildReason};
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
@@ -28,7 +29,8 @@ use wasmtime::*;
 fn main() -> Result<()> {
 	crate::init::init();
 	
-	let root = Project::<WasmModule>::new()?;
+	let cwd = AnyPath::path(env::current_dir()?).into_absolute()?;
+	let root = Project::<WasmModule>::new(cwd)?;
 	let result = (|| {
 		let args: Vec<String> = env::args().skip(1).collect();
 		for arg in args {

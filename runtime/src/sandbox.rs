@@ -4,7 +4,7 @@ use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symli
 use anyhow::*;
 use trou_common::build::{self};
 
-use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path::{AnyPath, Relative, Absolute}, err::result_block, module::BuildModule};
+use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{AnyPath, Relative, Absolute}, err::result_block, module::BuildModule};
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -97,8 +97,8 @@ impl Sandbox {
 			let tmp = tempdir::TempDir::new("trou")?;
 			debug!("created command sandbox {:?}", &tmp);
 			let roots = Roots {
-				tmp: AnyPath::path(tmp.path())?.into_absolute()?,
-				project: AnyPath::path(current_dir()?)?.into_absolute()?,
+				tmp: AnyPath::path(tmp.path().to_owned()).into_absolute()?,
+				project: AnyPath::path(current_dir()?).into_absolute()?,
 			};
 			
 			cmd.args(args);

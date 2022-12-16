@@ -36,7 +36,7 @@ In your root `trou.yaml`, you would add:
 
 This includes the subproject within the `cli` scope. The on-disk location of `cli/trou.yaml` doesn't matter, though it typically matches the `scope` field. If you have an import without a scope, all of its targets will be merged into the current project.
 
-In `clu/trou.yaml` and any modules included in this subproject, paths are relative to `cli/`. This makes projects modular - you can move `cli/` to another location or include it in another project without having to rewrite all its paths.
+In `cli/trou.yaml` and any modules included from this subproject, paths are relative to `cli/`. This makes projects modular - you can move `cli/` to another location or include it in another project without having to rewrite all its paths.
 
 When referring to targets across paths, you should use relative paths.
 
