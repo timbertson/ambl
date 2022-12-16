@@ -232,15 +232,18 @@ impl<M: BuildModule> Project<M> {
 	depend on the result of its get_rules(). That is itself a first class cacheable
 	target, which depends on the module file itself.
 	*/
-	fn expand_and_filter_rule<'a, 'b>(
+	fn expand_and_filter_rule<'a, 'b, 'c>(
 		project: ProjectMutex<'a, M>,
 		rule: &'b ProjectRule,
-		name: &str,
-	) -> Result<ProjectMutexPair<'a, M, Option<Target>>> {
+		name: &'c str,
+	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
 		match rule {
 			ProjectRule::Target(t) => {
 				if t.names.iter().any(|n| n == name) {
-					Ok((project, Some(t.to_owned())))
+					Ok((project, Some(FoundTarget {
+						target: t.to_owned(),
+						name: name.to_owned(),
+					})))
 				} else {
 					Ok((project, None))
 				}
@@ -255,11 +258,11 @@ impl<M: BuildModule> Project<M> {
 		}
 	}
 
-	fn handle_importable_rule<'a>(
+	fn handle_importable_rule<'a, 'b>(
 		mut project: ProjectMutex<'a, M>,
 		rule_ref: &RwRef< MutableRule>,
-		name: &str,
-	) -> Result<ProjectMutexPair<'a, M, Option<Target>>> {
+		name: &'b str,
+	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
 		let mut handle = rule_ref.handle();
 		let readable = handle.read()?;
 		match readable.deref() {
@@ -349,10 +352,10 @@ impl<M: BuildModule> Project<M> {
 		}
 	}
 
-	pub fn target<'a>(
+	pub fn target<'a, 'b>(
 		project: ProjectMutex<'a, M>,
-		name: &str,
-	) -> Result<ProjectMutexPair<'a, M, Option<Target>>> {
+		name: &'b str,
+	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
 		let root_rule = Arc::clone(&project.root_rule);
 		let (project, target) = Self::expand_and_filter_rule(
 			project,
@@ -457,7 +460,7 @@ impl<M: BuildModule> Project<M> {
 				let name = &file_dependency.path;
 				let get_target = |project| Project::target(project, name);
 
-				let needs_rebuild = |project, target: &Option<Target>, cached: &Persist| {
+				let needs_rebuild = |project, target: &Option<FoundTarget>, cached: &Persist| {
 					if let Some(target) = target {
 						if let Some(cached_target) = cached.as_target() {
 							return Self::requires_build(project, cached_target);
@@ -466,13 +469,14 @@ impl<M: BuildModule> Project<M> {
 					Ok((project, true))
 				};
 
-				let do_build = |mut project, target: &Option<Target>, build_token| {
-					let persist = if let Some(target) = &target {
+				let do_build = |mut project, found_target: &Option<FoundTarget>, build_token| {
+					let persist = if let Some(found_target) = &found_target {
+						let FoundTarget { target, name: scoped_name } = found_target;
 						println!("# {}", name);
 						let child_reason = BuildReason::Dependency(build_token);
 
 						// TODO track which module the target was defined in
-						let build_module_path = target.build.module.clone().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
+						let build_module_path = found_target.target.build.module.clone().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
 						
 						let (project_ret, mut wasm_module) = Self::load_module_inner(
 							project,
@@ -484,7 +488,7 @@ impl<M: BuildModule> Project<M> {
 
 						let built = project.unlocked_block(|project_handle| {
 							let ctx = TargetCtx::new(
-								name.to_owned(),
+								scoped_name.to_owned(),
 								tmp_path.to_owned(),
 								target.build.config.0.to_owned(),
 								build_token.raw());
@@ -725,8 +729,8 @@ enum CacheAware<Ctx> {
 }
 
 // TODO more references instead of owned?
-struct FoundTarget<'a> {
+#[derive(Debug)]
+pub struct FoundTarget {
 	target: Target,
-	module: String,
-	name: &'a str,
+	name: String, // original name, but with any scoping removed so that the name is relative to the target's module
 }
