@@ -287,12 +287,12 @@ impl PersistDependency {
 			File(state) => match request {
 				DependencyRequest::FileDependency(file_dep) => {
 					match file_dep.ret {
-						FileDependencyType::Unit => todo!(),
+						FileDependencyType::Unit => DependencyResponse::Unit,
 						FileDependencyType::Existence => DependencyResponse::Bool(state.is_some()),
 						FileDependencyType::Contents => DependencyResponse::Str(fs::read_to_string(&file_dep.path)?),
 					}
 				},
-				_ => DependencyResponse::Unit,
+				other => panic!("file response with non-file request: {:?}", other),
 			},
 			Env(env) => DependencyResponse::Str(env.0),
 			Wasm(wasm) => DependencyResponse::Str(wasm.result),

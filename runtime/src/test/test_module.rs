@@ -6,10 +6,10 @@ use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, de
 
 use anyhow::*;
 use tempdir::TempDir;
-use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse}, ctx::{TargetCtx, Invoker, BaseCtx}};
+use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse, FileDependencyType}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
@@ -322,12 +322,22 @@ impl<'a> TestProject<'a> {
 	}
 
 	pub fn build_file(&self, f: &str) -> Result<&Self> {
+		self.build_file_as(f, FileDependencyType::Unit)?;
+		Ok(self)
+	}
+
+	pub fn build_file_contents(&self, f: &str) -> Result<String> {
+		self.build_file_as(f, FileDependencyType::Contents)?.try_into()
+	}
+
+	pub fn build_file_as(&self, f: &str, ret: FileDependencyType) -> Result<DependencyResponse> {
 		let project = self.lock();
 		println!("\n=== start build_file({})", f);
-		let (project, _dep) = Project::build(
-			project,
-			&DependencyRequest::FileDependency(FileDependency::new(f.to_owned())),
-			&BuildReason::Explicit)?;
+		let req = DependencyRequest::FileDependency(FileDependency {
+			path: f.to_owned(),
+			ret,
+		});
+		let (project, result) = Project::build(project, &req, &BuildReason::Explicit)?;
 
 		drop(project);
 		println!("=== end build_file({})\n", f);
@@ -335,7 +345,7 @@ impl<'a> TestProject<'a> {
 		// testcases run multiple builds, make sure we don't short-circuit between them
 		self.reset();
 
-		Ok(self)
+		result.into_response(&req)
 	}
 
 	pub fn write_file<F: AsRef<Path>, S: AsRef<[u8]>>(&self, path: F, contents: S) -> Result<&Self> {

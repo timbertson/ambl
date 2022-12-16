@@ -1,3 +1,4 @@
+use anyhow::*;
 use std::collections::BTreeMap;
 
 use serde::{Serialize, Deserialize};
@@ -20,7 +21,6 @@ pub enum DependencyRequest {
 	Universe,
 }
 
-
 // Used to associate a request with the implicit build context
 // in which this code is running
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -36,6 +36,28 @@ pub enum DependencyResponse {
 	Bool(bool),
 	Str(String),
 	FileSet(String),
+}
+
+impl TryInto<String> for DependencyResponse {
+	type Error = anyhow::Error;
+
+	fn try_into(self) -> Result<String> {
+		match self {
+			Self::Str(s) => Ok(s),
+			other => Err(anyhow!("Expected string, got {:?}", other)),
+		}
+	}
+}
+
+impl TryInto<bool> for DependencyResponse {
+	type Error = anyhow::Error;
+
+	fn try_into(self) -> Result<bool> {
+		match self {
+			Self::Bool(b) => Ok(b),
+			other => Err(anyhow!("Expected bool, got {:?}", other)),
+		}
+	}
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]

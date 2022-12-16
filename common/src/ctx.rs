@@ -1,4 +1,4 @@
-use std::ops::{Deref};
+use std::{ops::{Deref}, path::{PathBuf, Path}};
 
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
@@ -123,21 +123,25 @@ pub trait Invoker {
 
 #[derive(Serialize, Deserialize)]
 pub struct TargetCtx {
-	target: String,
+	target: String, // logical target name, relative to module root
+	path: PathBuf, // physical file location, relative to CWD (or absolute?)
 
 	#[serde(flatten)]
 	base: BaseCtx,
 }
 
 impl TargetCtx {
-	pub fn new(target: String, config: Option<serde_json::Value>, token: u32) -> Self {
+	pub fn new(target: String, path: PathBuf, config: Option<serde_json::Value>, token: u32) -> Self {
 		Self {
 			target,
+			path,
 			base: BaseCtx::new(config, token),
 		}
 	}
 
 	pub fn target(&self) -> &str { &self.target }
+
+	pub fn path(&self) -> &Path { self.path.as_path() }
 }
 
 impl Deref for TargetCtx {

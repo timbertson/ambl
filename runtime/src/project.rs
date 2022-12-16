@@ -2,6 +2,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, LinkedList};
 use std::collections::hash_map::Entry;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{atomic, RwLock};
@@ -462,7 +463,7 @@ impl<M: BuildModule> Project<M> {
 
 						// TODO track which module the target was defined in
 						let build_module_path = target.build.module.clone().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
-
+						
 						let (project_ret, mut wasm_module) = Self::load_module_inner(
 							project,
 							&build_module_path,
@@ -472,6 +473,7 @@ impl<M: BuildModule> Project<M> {
 						let built = project.unlocked_block(|project_handle| {
 							let ctx = TargetCtx::new(
 								name.to_owned(),
+								PathBuf::from(name), // TODO .trou/output or similar?
 								target.build.config.0.to_owned(),
 								build_token.raw());
 
