@@ -31,11 +31,11 @@ impl Sandbox {
 		}).with_context(|| format!("Installing symlink {:?} (in root {:?})", rel, roots.tmp))
 	}
 	
-	fn collect_paths<'a, M: BuildModule>(
-		mut project: Mutexed<'a, Project<M>>,
-		dest: &mut HashSet<Normalized>,
-		key: DependencyKey,
-	) -> Result<Mutexed<'a, Project<M>>> {
+	fn collect_paths<'a, 'b, M: BuildModule>(
+		project: &'a Project<M>,
+		dest: &mut HashSet<&'b Normalized>,
+		key: &'b DependencyKey,
+	) -> Result<()> where 'a : 'b {
 		match key {
 			DependencyKey::FileDependency(FileDependencyKey::Complex(_)) => {
 				// TODO proper sandboxing would allow us to shadow all paths, but currently we can
@@ -43,20 +43,19 @@ impl Sandbox {
 			},
 			DependencyKey::FileDependency(FileDependencyKey::Simple(ref rel)) => {
 				if dest.contains(rel) {
-					return Ok(project);
+					return Ok(());
 				}
 				let persist = project.lookup(&key)?
 					.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
 					.raw();
 				match persist {
 					Persist::File(Some(_)) => {
-						dest.insert(rel.to_owned());
+						dest.insert(rel);
 					},
 					Persist::Target(target) => {
 						// TODO don't include transitive deps if there is a checksum
-						for (key, _) in target.deps.deps.clone().into_iter() {
-							// TODO wish we didn't need key.to_owned here
-							project = Self::collect_paths(project, dest, key.to_owned())?;
+						for (key, _) in target.deps.deps.iter() {
+							Self::collect_paths(project, dest, key)?;
 						}
 					},
 					_ => (),
@@ -64,7 +63,7 @@ impl Sandbox {
 			},
 			_ => (), // not a file or target dependency
 		}
-		Ok(project)
+		Ok(())
 	}
 
 	pub fn run<'a, M: BuildModule>(mut project: Mutexed<'a, Project<M>>,
@@ -73,10 +72,13 @@ impl Sandbox {
 	) -> Result<Mutexed<'a, Project<M>>> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
 		let mut rel_paths = Default::default();
-		for (dep, state) in dep_set.deps.into_iter() {
-			project = Self::collect_paths(project, &mut rel_paths, dep.to_owned())
+		for (dep, state) in dep_set.deps.iter() {
+			Self::collect_paths(&project, &mut rel_paths, dep)
 				.context("initializing command sandbox")?;
 		}
+		
+		// relieve borrow on project
+		let rel_paths: Vec<Normalized> = rel_paths.into_iter().map(|ptr| ptr.to_owned()).collect();
 
 		let build::Command { exe, args, cwd, env, env_inherit, output, input } = command;
 		let mut cmd = Command::new(exe);
@@ -126,7 +128,7 @@ impl Sandbox {
 
 			debug!("Installing {} symlinks", rel_paths.len());
 			for rel in rel_paths {
-				Self::install_symlink(&roots, &rel.into())?;
+				Self::install_symlink(&roots, &rel.to_owned().into())?;
 			}
 
 			cmd.current_dir::<PathBuf>(if let Some(cwd) = cwd {
