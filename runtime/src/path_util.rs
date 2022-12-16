@@ -1,5 +1,6 @@
 use anyhow::*;
 use log::*;
+use serde::{Deserialize, Serialize};
 use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::prelude::PermissionsExt};
 use walkdir::{WalkDir, DirEntry};
 
@@ -8,7 +9,7 @@ use walkdir::{WalkDir, DirEntry};
 pub struct Relative(String);
 
 impl Relative {
-	pub fn normalize_in(&self, scope: Option<&Normalized>) -> Normalized {
+	pub fn normalize_in(&self, scope: Option<&Normalized>) -> Option<Normalized> {
 		let base: PathBuf = scope.map(|s| s.to_owned().into()).unwrap_or_else(|| PathBuf::new());
 
 		let suffix: PathBuf = self.clone().into();
@@ -19,14 +20,14 @@ impl Relative {
 				Component::CurDir => (),
 				Component::ParentDir => {
 					if !result.pop() {
-						result.push("..");
+						return None
 					}
 				},
 				Component::Normal(s) => result.push(s),
 				Component::Prefix(_) | Component::RootDir => { panic!("Invalid relative path: {:?}", self) },
 			}
 		}
-		Normalized(result)
+		Some(Normalized(result.into_os_string().into_string().expect("invalid path")))
 	}
 }
 
@@ -44,10 +45,11 @@ mod test {
 
 	#[test]
 	fn test_normalize() {
-		assert_eq!(rel("foo/bar/../baz").normalize_in(None), norm("foo/baz"));
-		assert_eq!(rel("foo/bar/../baz").normalize_in(Some(&norm("x/y"))), norm("x/y/foo/baz"));
-		assert_eq!(rel("../z").normalize_in(Some(&norm("x/y"))), norm("x/z"));
-		assert_eq!(rel("x/").normalize_in(None), norm("x"));
+		assert_eq!(rel("foo/bar/../baz").normalize_in(None), Some(norm("foo/baz")));
+		assert_eq!(rel("foo/.//bar/../baz").normalize_in(Some(&norm("x/y"))), Some(norm("x/y/foo/baz")));
+		assert_eq!(rel("../z").normalize_in(Some(&norm("x/y"))), Some(norm("x/z")));
+		assert_eq!(rel("../../z").normalize_in(Some(&norm("x"))), None);
+		assert_eq!(rel("x/").normalize_in(None), Some(norm("x")));
 	}
 }
 
@@ -63,18 +65,30 @@ impl Into<PathBuf> for Relative {
 	}
 }
 
-// relative _and_ normalized (../ only appear at the start)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Normalized(PathBuf);
+// relative _and_ normalized (no ../ or ./ coponents, no trailing slash)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Normalized(String);
 impl AsRef<str> for Normalized {
 	fn as_ref(&self) -> &str {
-		self.0.to_str().expect("invalid path")
+		self.0.as_ref()
 	}
 }
 
 impl Into<PathBuf> for Normalized {
 	fn into(self) -> PathBuf {
 		PathBuf::from(self.0)
+	}
+}
+
+impl Into<Relative> for Normalized {
+	fn into(self) -> Relative {
+		Relative(self.0)
+	}
+}
+
+impl Into<String> for Normalized {
+	fn into(self) -> String {
+		self.0
 	}
 }
 
@@ -97,6 +111,13 @@ impl Into<PathBuf> for Absolute {
 		PathBuf::from(self.0)
 	}
 }
+
+impl Into<String> for Absolute {
+	fn into(self) -> String {
+		self.0
+	}
+}
+
 impl AsRef<str> for Absolute {
 	fn as_ref(&self) -> &str {
 		&self.0
@@ -143,8 +164,23 @@ impl AnyPath {
 		let s = p.into_os_string().into_string().expect("non UTF path");
 		Self::new(s)
 	}
+
+	pub fn normalize_in(&self, scope: Option<&Normalized>) -> Option<Normalized> {
+		match self {
+			AnyPath::Relative(rel) => rel.normalize_in(scope),
+			AnyPath::Absolute(_) => None,
+		}
+	}
 }
 
+impl Into<String> for AnyPath {
+	fn into(self) -> String {
+		match self {
+			AnyPath::Relative(v) => v.into(),
+			AnyPath::Absolute(v) => v.into(),
+		}
+	}
+}
 
 pub fn rm_rf_and_ensure_parent<P: AsRef<Path>>(p: P) -> Result<()> {
 	let p = p.as_ref();

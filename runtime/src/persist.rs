@@ -5,12 +5,15 @@ use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::FunctionSpec};
 
-use crate::project::{ProjectRef, Project, ProjectHandle};
+use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Normalized, AnyPath}};
 
 impl Into<DependencyRequest> for DependencyKey {
 	fn into(self) -> DependencyRequest {
 		match self {
-			DependencyKey::FileDependency(v) => DependencyRequest::FileDependency(FileDependency { path: v, ret: FileDependencyType::Unit }),
+			DependencyKey::FileDependency(v) => DependencyRequest::FileDependency(FileDependency {
+				path: v.into(),
+				ret: FileDependencyType::Unit
+			}),
 			DependencyKey::WasmCall(v) => DependencyRequest::WasmCall(v),
 			DependencyKey::EnvVar(v) => DependencyRequest::EnvVar(v),
 			DependencyKey::FileSet(v) => DependencyRequest::FileSet(v),
@@ -23,7 +26,7 @@ impl Into<DependencyRequest> for DependencyKey {
 // A dependency request stripped of information which only affects the return value (not the built item)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum DependencyKey {
-	FileDependency(String),
+	FileDependency(FileDependencyKey),
 	WasmCall(FunctionSpec),
 	EnvVar(String),
 	FileSet(String),
@@ -34,12 +37,37 @@ pub enum DependencyKey {
 impl From<DependencyRequest> for DependencyKey {
 	fn from(req: DependencyRequest) -> Self {
 		match req {
-			DependencyRequest::FileDependency(v) => DependencyKey::FileDependency(v.path),
+			DependencyRequest::FileDependency(v) => DependencyKey::FileDependency(
+				FileDependencyKey::from(v.path, todo!())),
 			DependencyRequest::WasmCall(v) => DependencyKey::WasmCall(v),
 			DependencyRequest::EnvVar(v) => DependencyKey::EnvVar(v),
 			DependencyRequest::FileSet(v) => DependencyKey::FileSet(v),
 			DependencyRequest::Execute(v) => DependencyKey::Execute(v),
 			DependencyRequest::Universe => DependencyKey::Universe,
+		}
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum FileDependencyKey {
+	Simple(Normalized),
+	Complex(String), // may be relative or absolute
+}
+
+impl FileDependencyKey {
+	fn from(s: String, scope: Option<&Normalized>) -> Self {
+		let path = AnyPath::new(s);
+		let normalized = path.normalize_in(scope);
+		normalized.map(FileDependencyKey::Simple)
+			.unwrap_or_else(|| FileDependencyKey::Complex(path.into()))
+	}
+}
+
+impl Into<String> for FileDependencyKey {
+	fn into(self) -> String {
+		match self {
+			FileDependencyKey::Simple(v) => v.into(),
+			FileDependencyKey::Complex(v) => v,
 		}
 	}
 }

@@ -670,11 +670,7 @@ impl<M: BuildModule> Project<M> {
 	fn _path(&self, base: &str, name: &str) -> Result<PathBuf> {
 		// TODO name should be a Normalized in the first place
 		// TODO pass in the scope
-		let norm = AnyPath::relative(name.to_owned())?.normalize_in(None);
-		// TODO should we really allow `../` in normalized paths? It causes heck here...
-		if norm.as_ref().starts_with('.') {
-			todo!();
-		}
+		let norm = AnyPath::relative(name.to_owned())?.normalize_in(None).expect("TODO");
 		let mut ret: PathBuf = self.root.to_owned().into();
 		ret.push(".trou");
 		ret.push(base);

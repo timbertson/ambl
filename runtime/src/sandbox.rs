@@ -2,9 +2,9 @@ use log::*;
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use trou_common::build::{self};
+use trou_common::build::{self, FileDependency};
 
-use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{AnyPath, Relative, Absolute}, err::result_block, module::BuildModule};
+use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey, FileDependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{AnyPath, Relative, Absolute, Normalized}, err::result_block, module::BuildModule};
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -33,13 +33,16 @@ impl Sandbox {
 	
 	fn collect_paths<'a, M: BuildModule>(
 		mut project: Mutexed<'a, Project<M>>,
-		dest: &mut HashSet<Relative>,
+		dest: &mut HashSet<Normalized>,
 		key: DependencyKey,
 	) -> Result<Mutexed<'a, Project<M>>> {
 		match key {
-			DependencyKey::FileDependency(ref f) => {
-				let rel = AnyPath::relative(f.to_owned())?;
-				if dest.contains(&rel) {
+			DependencyKey::FileDependency(FileDependencyKey::Complex(_)) => {
+				// TODO proper sandboxing would allow us to shadow all paths, but currently we can
+				// only shadow paths within the workspace
+			},
+			DependencyKey::FileDependency(FileDependencyKey::Simple(ref rel)) => {
+				if dest.contains(rel) {
 					return Ok(project);
 				}
 				let persist = project.lookup(&key)?
@@ -47,7 +50,7 @@ impl Sandbox {
 					.raw();
 				match persist {
 					Persist::File(Some(_)) => {
-						dest.insert(rel);
+						dest.insert(rel.to_owned());
 					},
 					Persist::Target(target) => {
 						// TODO don't include transitive deps if there is a checksum
@@ -123,7 +126,7 @@ impl Sandbox {
 
 			debug!("Installing {} symlinks", rel_paths.len());
 			for rel in rel_paths {
-				Self::install_symlink(&roots, &rel)?;
+				Self::install_symlink(&roots, &rel.into())?;
 			}
 
 			cmd.current_dir::<PathBuf>(if let Some(cwd) = cwd {
