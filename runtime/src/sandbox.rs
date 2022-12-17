@@ -4,7 +4,7 @@ use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symli
 use anyhow::*;
 use trou_common::build::{self, FileDependency};
 
-use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey, FileDependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{AnyPath, Relative, Absolute, Normalized}, err::result_block, module::BuildModule};
+use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey, FileDependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{AnyPath, Relative, Absolute, Normalized, Scope}, err::result_block, module::BuildModule};
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -67,6 +67,7 @@ impl Sandbox {
 	}
 
 	pub fn run<'a, M: BuildModule>(mut project: Mutexed<'a, Project<M>>,
+		scope: &Scope,
 		command: &build::Command,
 		reason: &BuildReason,
 	) -> Result<Mutexed<'a, Project<M>>> {
@@ -85,7 +86,7 @@ impl Sandbox {
 
 		cmd.env_clear();
 		for k in env_inherit {
-			let (project_ret, value) = Project::<M>::build(project, &DependencyRequest::EnvVar(k.to_owned()), reason)?;
+			let (project_ret, value) = Project::<M>::build(project, scope, &DependencyRequest::EnvVar(k.to_owned()), reason)?;
 			match value {
 				PersistDependency::Env(value) => {
 					cmd.env(k, value.0);
@@ -131,12 +132,16 @@ impl Sandbox {
 				Self::install_symlink(&roots, &rel.to_owned().into())?;
 			}
 
-			cmd.current_dir::<PathBuf>(if let Some(cwd) = cwd {
-				let rel = AnyPath::relative(cwd.to_owned())?;
-				roots.tmp.join(&rel).into()
-			} else {
-				roots.tmp.into()
-			});
+			// build up actual CWD from temp + scope + explicit CWD
+			let mut full_cwd: PathBuf = roots.tmp.to_owned().into();
+			if let Some(scope) = scope.into_normalized() {
+				full_cwd.push::<&str>(scope.as_ref());
+			}
+			if let Some(cwd) = cwd {
+				// TODO warn if CWD is absolute?
+				full_cwd.push(cwd);
+			}
+			cmd.current_dir(full_cwd);
 
 			info!("+ {:?}", &cmd);
 

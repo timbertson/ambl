@@ -1,7 +1,8 @@
 use anyhow::*;
 use log::*;
+use std::{ops::Deref, sync::Arc};
 use serde::{Deserialize, Serialize};
-use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::prelude::PermissionsExt};
+use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::prelude::PermissionsExt, borrow::{Cow, Borrow}};
 use walkdir::{WalkDir, DirEntry};
 
 // relative, but may contain ../ etc
@@ -9,8 +10,10 @@ use walkdir::{WalkDir, DirEntry};
 pub struct Relative(String);
 
 impl Relative {
-	pub fn normalize_in(&self, scope: Option<&Normalized>) -> Option<Normalized> {
-		let base: PathBuf = scope.map(|s| s.to_owned().into()).unwrap_or_else(|| PathBuf::new());
+	// TODO this could be a simple Arc::clone if the path is already normalized
+	pub fn normalize_in(&self, scope: &Scope) -> Option<Normalized> {
+		let scope_s: Option<String> = scope.into_normalized().map(|x| x.to_owned().into());
+		let base: PathBuf = scope_s.map(PathBuf::from).unwrap_or_else(|| PathBuf::new());
 
 		let suffix: PathBuf = self.clone().into();
 		let mut result = base.clone();
@@ -124,6 +127,7 @@ impl AsRef<str> for Absolute {
 	}
 }
 
+#[derive(Debug)]
 pub enum AnyPath {
 	Relative(Relative),
 	Absolute(Absolute),
@@ -165,7 +169,12 @@ impl AnyPath {
 		Self::new(s)
 	}
 
-	pub fn normalize_in(&self, scope: Option<&Normalized>) -> Option<Normalized> {
+	// TODO this could return a possibly-borrowed scope?
+	pub fn normalize_in(&self, scope: &Scope) -> Result<Normalized> {
+		self.normalize_in_opt(scope).ok_or_else(|| anyhow!("Normalized scope reqired, got {:?}", self))
+	}
+
+	pub fn normalize_in_opt(&self, scope: &Scope) -> Option<Normalized> {
 		match self {
 			AnyPath::Relative(rel) => rel.normalize_in(scope),
 			AnyPath::Absolute(_) => None,
@@ -230,5 +239,75 @@ pub fn lstat_opt<P: AsRef<Path>>(p: P) -> Result<Option<fs::Metadata>> {
 		Result::Ok(m) => Ok(Some(m)),
 		Result::Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
 		Result::Err(e) => Err(e.into()),
+	}
+}
+
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Scope(Option<Arc<Normalized>>);
+
+impl Scope {
+	pub fn root() -> Self {
+		Scope(None)
+	}
+
+	pub fn new(n: Normalized) -> Self {
+		Scope(Some(Arc::new(n)))
+	}
+	
+	pub fn into_normalized(&self) -> Option<&Normalized> {
+		self.0.as_ref().map(|x| x.deref())
+	}
+
+	fn join(&self, sub: &Scope) -> Scope {
+		match (&self.0, &sub.0) {
+			(Some(base), Some(sub)) => {
+				let base_str: &str = base.as_ref().as_ref();
+				let sub_str: &str = sub.as_ref().as_ref();
+				Self(Some(Arc::new(Normalized(format!("{}/{}", base_str, sub_str)))))
+			},
+			(None, _) => sub.clone(),
+			(_, None) => self.clone(),
+		}
+	}
+
+	pub fn within_scope<'a, 'b>(&'a self, name: &'b str, sub: &Scope) -> Option<Scoped<&'b str>> {
+		match sub.0 {
+			Some(ref sub_normalized) => {
+				let sub_str : &str = sub_normalized.as_ref().as_ref();
+				name.strip_prefix(sub_str).and_then(|s| s.strip_prefix("/")).map(|new_name| {
+					let full_scope: Scope = self.join(sub);
+					Scoped { scope: full_scope, value: new_name }
+				})
+			},
+			None => Some(Scoped {
+				scope: self.clone(),
+				value: name
+			}),
+		}
+	}
+}
+
+impl Clone for Scope {
+	fn clone(&self) -> Self {
+		Self(self.0.as_ref().map(Arc::clone))
+	}
+}
+
+#[derive(Debug)]
+pub struct Scoped<T> {
+	pub scope: Scope,
+	pub value: T,
+}
+
+impl<T> Scoped<T> {
+	pub fn new(scope: Scope, value: T) -> Self {
+		Self { scope, value }
+	}
+}
+
+impl<'a> Scoped<&'a str> {
+	pub fn within_scope(&'a self, sub: &Scope) -> Option<Scoped<&'a str>> {
+		self.scope.within_scope(self.value, sub)
 	}
 }

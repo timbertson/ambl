@@ -16,7 +16,7 @@ use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{A
 use log::*;
 
 use anyhow::*;
-use path_util::AnyPath;
+use path_util::{AnyPath, Scope};
 use project::{Project, ModuleCache, BuildReason};
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
@@ -30,17 +30,23 @@ fn main() -> Result<()> {
 	crate::init::init();
 	
 	let cwd = AnyPath::path(env::current_dir()?).into_absolute()?;
-	let root = Project::<WasmModule>::new(cwd)?;
+	let project = Project::<WasmModule>::new(cwd)?;
 	let result = (|| {
 		let args: Vec<String> = env::args().skip(1).collect();
+		let mut handle = project.handle();
+		let mut project_mutexed = handle.lock("main")?;
 		for arg in args {
-			Project::build(root.handle().lock("main")?, &DependencyRequest::FileDependency(FileDependency::new(arg)), &BuildReason::Explicit)?;
+			let request = DependencyRequest::FileDependency(FileDependency::new(arg));
+			let reason = BuildReason::Explicit;
+			let scope = Scope::root();
+			let (project_ret, _) = Project::build(project_mutexed, &scope, &request, &reason)?;
+			project_mutexed = project_ret;
 		}
 		Ok(())
 	})();
 	
 	// TODO: persist as we go, probably?
-	root.handle().lock("save")?.save()?;
+	project.handle().lock("save")?.save()?;
 
 	result
 }

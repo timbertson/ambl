@@ -1,4 +1,5 @@
 #![allow(unreachable_code)]
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, LinkedList};
 use std::collections::hash_map::Entry;
@@ -23,7 +24,7 @@ use trou_common::rule::*;
 use wasmtime::*;
 
 use crate::{err::*, path_util};
-use crate::path_util::{Absolute, AnyPath};
+use crate::path_util::{Absolute, AnyPath, Normalized, Scope, Scoped};
 use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::Sandbox;
@@ -55,7 +56,16 @@ impl ActiveBuildToken {
 #[derive(Clone, Debug)]
 pub struct Nested {
 	rules: Vec<ProjectRule>,
-	scope: Option<String>,
+	scope: Scope,
+}
+
+#[derive(Clone, Debug)]
+// just like Include but the scope type is Scope, not String
+pub struct ScopedInclude {
+	pub module: String,
+	pub scope: Scope,
+	pub config: trou_common::rule::Config,
+	pub mode: IncludeMode, // TODO this is bad modelling, YAML doesn't use config
 }
 
 // superset of Rule with the addition of Nested, which
@@ -72,7 +82,7 @@ pub enum ProjectRule {
 // from initial -> loading -> loaded
 #[derive(Clone, Debug)]
 pub enum MutableRule {
-	Include(Include), // before loading
+	Include(ScopedInclude), // before loading
 	Nested(Nested), // after loading
 	Loading(), // during loading.
 	// TODO when we support parallelism, this will need to indicate
@@ -80,12 +90,24 @@ pub enum MutableRule {
 	// can wait, but any already-waiting thread is a circular dep
 }
 
-impl From<Rule> for ProjectRule {
-	fn from(rule: Rule) -> Self {
+impl ProjectRule {
+	fn from_rule(rule: Rule, base_scope: &Scope) -> Result<Self> {
 		match rule {
-			Rule::Alias(v) => ProjectRule::Alias(v),
-			Rule::Target(v) => ProjectRule::Target(v),
-			Rule::Include(v) => ProjectRule::Mutable(RwRef::new(MutableRule::Include(v))),
+			Rule::Alias(v) => Ok(ProjectRule::Alias(v)),
+			Rule::Target(v) => Ok(ProjectRule::Target(v)),
+			Rule::Include(spec) => {
+				let scope = match spec.get_scope() {
+					Some(sub) => Scope::new(AnyPath::new(sub.to_owned()).normalize_in(base_scope)?),
+					None => base_scope.to_owned(),
+				};
+				let include = ScopedInclude {
+					module: spec.get_module().to_owned(),
+					config: spec.get_config().to_owned(),
+					mode: spec.get_mode(),
+					scope,
+				};
+				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(include))))
+			},
 		}
 	}
 }
@@ -128,7 +150,7 @@ pub struct Project<M: BuildModule> {
 	root: Absolute,
 	module_cache: ModuleCache<M::Compiled>,
 	build_cache: DepStore,
-	active_tasks: HashMap<ActiveBuildToken, DepSet>,
+	active_tasks: HashMap<ActiveBuildToken, Scoped<DepSet>>,
 	root_rule: Arc<ProjectRule>,
 	self_ref: Option<ProjectRef<M>>,
 }
@@ -139,13 +161,14 @@ type ProjectMutexPair<'a, M, T> = (Mutexed<'a, Project<M>>, T);
 impl<M: BuildModule> Project<M> {
 
 	pub fn new(root: Absolute) -> Result<ProjectRef<M>> {
+		let root_scope = Scope::root();
 		let project = MutexRef::new(Project {
 			root,
 			build_cache: DepStore::load(),
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
 			self_ref: None,
-			root_rule: Arc::new(dsl::include(dsl::yaml("trou.yaml")).into()),
+			root_rule: Arc::new(ProjectRule::from_rule(dsl::include(dsl::yaml("trou.yaml")), &root_scope)?),
 		});
 
 		// lock the project to populate self_ref
@@ -156,13 +179,11 @@ impl<M: BuildModule> Project<M> {
 		Ok(project)
 	}
 
-	pub fn load_module_ref(project: &mut ProjectHandle<M>, path: &str, reason: &BuildReason) -> Result<M> {
-		let inner = project.lock("load_module_ref")?;
-		Ok(Self::load_module_inner(inner, path, reason)?.1)
-	}
-
-	pub fn load_module_inner<'a>(
+	fn load_module_inner<'a>(
 		project: ProjectMutex<'a, M>,
+		
+		// TODO Scoped<str>
+		scope: &Scope,
 		path: &str,
 		reason: &BuildReason
 	) -> Result<ProjectMutexPair<'a, M, M>> {
@@ -171,7 +192,7 @@ impl<M: BuildModule> Project<M> {
 		// First, build the module itself and register it as a dependency.
 		// TODO need to enforce a project-rooted path, consistent with rules
 		let request = DependencyRequest::FileDependency(FileDependency::new(path.to_owned()));
-		let (mut project, module_built) = Self::build(project, &request, reason)?;
+		let (mut project, module_built) = Self::build(project, scope, &request, reason)?;
 
 		result_block(|| {
 			let self_ref = project.self_ref.clone().unwrap();
@@ -201,6 +222,7 @@ impl<M: BuildModule> Project<M> {
 
 	pub fn load_yaml_rules<'a>(
 		project: ProjectMutex<'a, M>,
+		scope: &Scope,
 		path: &str,
 		reason: &BuildReason
 	) -> Result<ProjectMutexPair<'a, M, Vec<Rule>>> {
@@ -208,11 +230,16 @@ impl<M: BuildModule> Project<M> {
 		// First, build the module itself and register it as a dependency.
 		// TODO need to enforce a project-rooted path, consistent with rules
 		let request = DependencyRequest::FileDependency(FileDependency::new(path.to_owned()));
-		let (mut project, module_built) = Self::build(project, &request, reason)?;
-		project.register_dependency(reason.parent(), request.into(), module_built);
+		let (mut project, module_built) = Self::build(project, scope, &request, reason)?;
+		
+		let key = DependencyKey::from(request, scope);
+		project.register_dependency(reason.parent(), key, module_built)?;
+		
+		let path_n = AnyPath::relative(path.to_owned())?.normalize_in(scope).ok_or_else(|| anyhow!("Invalid scope: {:?}", path))?;
+		let path_s = path_n.as_ref();
 
-		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(path)?)?))
-			.with_context(|| format!("Loading rules YAML: {}", path))?;
+		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string::<&str>(path_s)?)?) )
+			.with_context(|| format!("Loading rules YAML: {}", path_s))?;
 		
 		Ok((project, rules))
 	}
@@ -223,7 +250,7 @@ impl<M: BuildModule> Project<M> {
 			None => Some(name)
 		}
 	}
-	
+
 	/*
 	Although imported modules and YAML files cause targets to be rebuilt, they're not
 	directly registered as dependencies here.
@@ -235,14 +262,14 @@ impl<M: BuildModule> Project<M> {
 	fn expand_and_filter_rule<'a, 'b, 'c>(
 		project: ProjectMutex<'a, M>,
 		rule: &'b ProjectRule,
-		name: &'c str,
+		name: &Scoped<&'c str>,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
 		match rule {
 			ProjectRule::Target(t) => {
-				if t.names.iter().any(|n| n == name) {
+				if t.names.iter().any(|n| n == name.value) {
 					Ok((project, Some(FoundTarget {
 						target: t.to_owned(),
-						name: name.to_owned(),
+						name: Scoped { scope: name.scope.clone(), value: name.value.to_owned() },
 					})))
 				} else {
 					Ok((project, None))
@@ -261,7 +288,7 @@ impl<M: BuildModule> Project<M> {
 	fn handle_importable_rule<'a, 'b>(
 		mut project: ProjectMutex<'a, M>,
 		rule_ref: &RwRef< MutableRule>,
-		name: &'b str,
+		name: &Scoped<&'b str>,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
 		let mut handle = rule_ref.handle();
 		let readable = handle.read()?;
@@ -272,9 +299,9 @@ impl<M: BuildModule> Project<M> {
 			},
 
 			MutableRule::Nested(ref nested) => {
-				if let Some(name) = Self::within_scope(name, &nested.scope) {
+				if let Some(scoped) = name.within_scope(&nested.scope) {
 					for rule in nested.rules.iter() {
-						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, name)?;
+						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, &scoped)?;
 						project = project_ret;
 						if target.is_some() {
 							return Ok((project, target));
@@ -285,7 +312,7 @@ impl<M: BuildModule> Project<M> {
 			},
 
 			MutableRule::Include(include) => {
-				if Self::within_scope(name, include.get_scope()).is_some() {
+				if name.within_scope(&include.scope).is_some() {
 					// release borrow of rule
 					let include = include.to_owned();
 					debug!("Loading include {:?}", &include);
@@ -298,11 +325,12 @@ impl<M: BuildModule> Project<M> {
 						Ok(())
 					})?;
 
-					let rules = match include.get_mode() {
+					let rules = match include.mode {
 						IncludeMode::YAML => {
 							let (project_ret, rules) = Self::load_yaml_rules(
 								project,
-								include.get_module(),
+								&name.scope,
+								&include.module,
 								&BuildReason::Import
 							).with_context(ctx)?;
 							project = project_ret;
@@ -312,12 +340,13 @@ impl<M: BuildModule> Project<M> {
 						IncludeMode::WASM => {
 							let request = DependencyRequest::WasmCall(FunctionSpec {
 								fn_name: "get_rules".to_string(),
-								module: Some(include.get_module().to_owned()),
-								config: include.get_config().to_owned(),
+								module: Some(include.module.to_owned()),
+								config: include.config.to_owned(),
 							});
 
 							let (project_ret, persist_dep) = result_block(|| {
 								let (project, persist_dep) = Project::build(project,
+									&include.scope,
 									&request,
 									&BuildReason::Import)?;
 								Ok((project, persist_dep))
@@ -336,8 +365,10 @@ impl<M: BuildModule> Project<M> {
 
 					handle.with_write(|writeable| {
 						*writeable = MutableRule::Nested(Nested {
-							rules: rules.into_iter().map(|rule| rule.into()).collect(),
-							scope: include.get_scope().to_owned(),
+							rules: rules.into_iter()
+								.map(|rule| ProjectRule::from_rule(rule, &name.scope))
+								.collect::<Result<Vec<ProjectRule>>>()?,
+							scope: include.scope,
 						});
 						Ok(())
 					})?;
@@ -354,14 +385,14 @@ impl<M: BuildModule> Project<M> {
 
 	pub fn target<'a, 'b>(
 		project: ProjectMutex<'a, M>,
-		name: &'b str,
+		name: &Scoped<&'b str>,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
 		let root_rule = Arc::clone(&project.root_rule);
 		let (project, target) = Self::expand_and_filter_rule(
 			project,
 			&root_rule,
-			name)?;
-		debug!("target for {}: {:?}", name, target);
+			&name)?;
+		debug!("target for {}: {:?}", &name.value, target);
 		Ok((project, target))
 	}
 
@@ -391,6 +422,7 @@ impl<M: BuildModule> Project<M> {
 	// - cached, but does not need rebuilding (after potentially building dependencies)
 	fn build_with_cache_awareness<'a, Ctx, ComputeCtx, NeedsRebuild, Build>(
 		mut project: ProjectMutex<'a, M>,
+		scope: &Scope,
 		reason: &BuildReason,
 		key: DependencyKey,
 		get_ctx: ComputeCtx,
@@ -434,6 +466,10 @@ impl<M: BuildModule> Project<M> {
 			CacheAware::Stale(ctx) => {
 				let build_token = ActiveBuildToken::generate();
 				debug!("created build token {:?} beneath {:?} for {:?}", build_token, reason.parent(), &key);
+
+				// Need to record the scope so WASM requests can pull it out. This seems a bit odd but it works for now
+				project.active_tasks.insert(build_token, Scoped::new(scope.to_owned(), Default::default()));
+
 				let (project_ret, built) = build_fn(project, &ctx, build_token)?;
 				project = project_ret;
 				debug!("built {:?} with token {:?}, saving against parent {:?}", &key, build_token, reason.parent());
@@ -443,12 +479,14 @@ impl<M: BuildModule> Project<M> {
 		};
 		
 		// always register dependency on parent, even if we returned a cached value
-		project.register_dependency(reason.parent(), key, result.to_owned());
+		project.register_dependency(reason.parent(), key, result.to_owned())?;
 		
 		Ok((project, result))
 	}
 
 	pub fn build<'a>(project: ProjectMutex<'a, M>,
+		// TODO should this just be Scoped<DependencyRequest>? Maybe the refs are too awkward
+		scope: &Scope,
 		request: &DependencyRequest,
 		reason: &BuildReason,
 	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> {
@@ -456,9 +494,14 @@ impl<M: BuildModule> Project<M> {
 
 		match request {
 			DependencyRequest::FileDependency(file_dependency) => {
-				let key: DependencyKey = request.to_owned().into();
+				// dependency key is independent of scope, it's always as if loaded from root
+				let key: DependencyKey = DependencyKey::from(request.to_owned(), scope);
 				let name = &file_dependency.path;
-				let get_target = |project| Project::target(project, name);
+				let scoped_name = Scoped {
+					scope: scope.to_owned(),
+					value: name.as_str(),
+				};
+				let get_target = |project| Project::target(project, &scoped_name);
 
 				let needs_rebuild = |project, target: &Option<FoundTarget>, cached: &Persist| {
 					if let Some(target) = target {
@@ -480,6 +523,7 @@ impl<M: BuildModule> Project<M> {
 						
 						let (project_ret, mut wasm_module) = Self::load_module_inner(
 							project,
+							scope,
 							&build_module_path,
 							&child_reason)?;
 						project = project_ret;
@@ -488,7 +532,7 @@ impl<M: BuildModule> Project<M> {
 
 						let built = project.unlocked_block(|project_handle| {
 							let ctx = TargetCtx::new(
-								scoped_name.to_owned(),
+								scoped_name.value.to_owned(),
 								tmp_path.to_owned(),
 								target.build.config.0.to_owned(),
 								build_token.raw());
@@ -543,14 +587,16 @@ impl<M: BuildModule> Project<M> {
 				};
 				
 				Self::build_with_cache_awareness(
-					project, reason, key,
+					project, scope, reason, key,
 					get_target, needs_rebuild, do_build)
 			},
 
 			DependencyRequest::WasmCall(spec) => {
+				todo!("WASM call needs to resolve module according to scope");
+
 				// This should be made impossible via types but I don't want to duplicate DependencyRequest yet
 				let module_path = spec.module.to_owned().ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?;
-				let key: DependencyKey = request.to_owned().into();
+				let key: DependencyKey = DependencyKey::from(request.to_owned(), scope);
 
 				let needs_rebuild = |project, _ctx: &(), cached: &Persist| {
 					if let Persist::Wasm(cached_call) = cached {
@@ -563,6 +609,7 @@ impl<M: BuildModule> Project<M> {
 				let do_build = |mut project, _ctx: &(), build_token| {
 					let (project_ret, mut wasm_module) = Self::load_module_inner(
 						project,
+						scope,
 						&module_path,
 						&BuildReason::Dependency(build_token))?;
 					project = project_ret;
@@ -585,7 +632,7 @@ impl<M: BuildModule> Project<M> {
 
 				let get_ctx = |project| Ok((project, ()));
 				Self::build_with_cache_awareness(
-					project, reason, key,
+					project, scope, reason, key,
 					get_ctx, needs_rebuild, do_build)
 			},
 			DependencyRequest::FileSet(_) => todo!("handle FileSet"),
@@ -593,7 +640,7 @@ impl<M: BuildModule> Project<M> {
 				// TODO do we need to add any dependencies first?
 				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
 				// need to add that.
-				let project = Sandbox::run(project, cmd, reason)?;
+				let project = Sandbox::run(project, scope, cmd, reason)?;
 				Ok((project, PersistDependency::AlwaysClean))
 			},
 			DependencyRequest::EnvVar(key) => {
@@ -605,23 +652,29 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	fn collect_deps(&mut self, token: ActiveBuildToken) -> DepSet {
-		let collected = self.active_tasks.remove(&token).unwrap_or_else(Default::default);
+		let collected = self.active_tasks.remove(&token).map(|x| x.value).unwrap_or_else(Default::default);
 		debug!("Collected {:?} deps for token {:?}: {:?}", collected.len(), token, &collected);
 		collected
 	}
 
 	pub fn get_deps(&self, token: ActiveBuildToken) -> Option<&DepSet> {
-		self.active_tasks.get(&token)
+		self.active_tasks.get(&token).map(|x| &x.value)
+	}
+
+	pub fn scope_for(&self, token: ActiveBuildToken) -> Scope {
+		self.active_tasks.get(&token).map(|x| x.scope.to_owned()).unwrap_or_else(Scope::root)
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
-	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: DependencyKey, result: PersistDependency) {
+	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: DependencyKey, result: PersistDependency) -> Result<()> {
 		if let Some(parent) = parent {
 			debug!("registering dependency {:?} against build {:?} (result: {:?}", &key, parent, &result);
 
-			let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(Default::default);
-			parent_dep_set.add(key, result);
+			// NOTE: This requires we always insert at the start of the build, since we can't know the scope later
+			let parent_dep_set = self.active_tasks.get_mut(&parent).ok_or_else(||anyhow!("No active task: {:?}", parent))?;
+			parent_dep_set.value.add(key, result);
 		}
+		Ok(())
 	}
 	
 	pub fn requires_build<'a, T: HasDependencies>(
@@ -632,12 +685,13 @@ impl<M: BuildModule> Project<M> {
 
 		let reason = BuildReason::Speculative;
 
+		let root_scope = Scope::root();
 		for (dep_key, dep_cached) in cached.dep_set().iter() {
 			debug!("requires_build() recursing over dependency {:?}", dep_key);
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
 			let req: DependencyRequest = dep_key.to_owned().into();
-			let (project_ret, dep_latest) = Self::build(project, &req, &reason)?;
+			let (project_ret, dep_latest) = Self::build(project, &root_scope, &req, &reason)?;
 			project = project_ret;
 			
 			// if the result differs from what this target was based on, rebuild this target
@@ -670,7 +724,7 @@ impl<M: BuildModule> Project<M> {
 	fn _path(&self, base: &str, name: &str) -> Result<PathBuf> {
 		// TODO name should be a Normalized in the first place
 		// TODO pass in the scope
-		let norm = AnyPath::relative(name.to_owned())?.normalize_in(None).expect("TODO");
+		let norm = AnyPath::relative(name.to_owned())?.normalize_in(&Scope::root()).expect("TODO");
 		let mut ret: PathBuf = self.root.to_owned().into();
 		ret.push(".trou");
 		ret.push(base);
@@ -728,5 +782,5 @@ enum CacheAware<Ctx> {
 #[derive(Debug)]
 pub struct FoundTarget {
 	target: Target,
-	name: String, // original name, but with any scoping removed so that the name is relative to the target's module
+	name: Scoped<String>, // original name broken into scope + target
 }

@@ -202,7 +202,10 @@ impl BuildModule for WasmModule {
 				let mut project_handle = project.handle();
 				let project = project_handle.lock("trou_invoke")?;
 				let TaggedDependencyRequest { token, request } = request;
-				let (_, persist) = Project::build(project, &request, &BuildReason::Dependency(ActiveBuildToken::from_raw(token)))?;
+				// TODO can we store the scope in WASM context, instead of project?
+				let token = ActiveBuildToken::from_raw(token);
+				let scope = project.scope_for(token);
+				let (_, persist) = Project::build(project, &scope, &request, &BuildReason::Dependency(token))?;
 				persist.into_response(&request)
 			})();
 			debug!("trou_invoke: returning {:?}", response);

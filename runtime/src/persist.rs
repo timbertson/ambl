@@ -1,11 +1,11 @@
 use log::*;
-use std::{collections::HashMap, fs, time::UNIX_EPOCH, io};
+use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::FunctionSpec};
 
-use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Normalized, AnyPath}};
+use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Normalized, AnyPath, Scope}};
 
 impl Into<DependencyRequest> for DependencyKey {
 	fn into(self) -> DependencyRequest {
@@ -34,11 +34,11 @@ pub enum DependencyKey {
 	Universe,
 }
 
-impl From<DependencyRequest> for DependencyKey {
-	fn from(req: DependencyRequest) -> Self {
+impl DependencyKey {
+	pub fn from(req: DependencyRequest, scope: &Scope) -> Self {
 		match req {
 			DependencyRequest::FileDependency(v) => DependencyKey::FileDependency(
-				FileDependencyKey::from(v.path, todo!())),
+				FileDependencyKey::from(v.path, scope)),
 			DependencyRequest::WasmCall(v) => DependencyKey::WasmCall(v),
 			DependencyRequest::EnvVar(v) => DependencyKey::EnvVar(v),
 			DependencyRequest::FileSet(v) => DependencyKey::FileSet(v),
@@ -55,9 +55,9 @@ pub enum FileDependencyKey {
 }
 
 impl FileDependencyKey {
-	fn from(s: String, scope: Option<&Normalized>) -> Self {
+	fn from(s: String, scope: &Scope) -> Self {
 		let path = AnyPath::new(s);
-		let normalized = path.normalize_in(scope);
+		let normalized = path.normalize_in_opt(scope);
 		normalized.map(FileDependencyKey::Simple)
 			.unwrap_or_else(|| FileDependencyKey::Complex(path.into()))
 	}
