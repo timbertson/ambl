@@ -1,6 +1,7 @@
 use anyhow::*;
 use log::*;
-use std::{ops::Deref, sync::Arc};
+use core::fmt;
+use std::{ops::Deref, sync::Arc, fmt::{Display, Debug}};
 use serde::{Deserialize, Serialize};
 use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::prelude::PermissionsExt, borrow::{Cow, Borrow}};
 use walkdir::{WalkDir, DirEntry};
@@ -10,6 +11,12 @@ use walkdir::{WalkDir, DirEntry};
 pub struct Relative(String);
 
 impl Relative {
+	pub fn into_normalized(self) -> Result<Normalized, Self> {
+		// TODO this could be a simple check, instead of a clone
+		let norm = self.normalize_in(&Scope::root());
+		norm.ok_or(self)
+	}
+
 	// TODO this could be a simple Arc::clone if the path is already normalized
 	pub fn normalize_in(&self, scope: &Scope) -> Option<Normalized> {
 		let scope_s: Option<String> = scope.into_normalized().map(|x| x.to_owned().into());
@@ -74,6 +81,12 @@ pub struct Normalized(String);
 impl AsRef<str> for Normalized {
 	fn as_ref(&self) -> &str {
 		self.0.as_ref()
+	}
+}
+
+impl Display for Normalized {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		fmt::Display::fmt(&self.0, f)
 	}
 }
 
@@ -162,6 +175,13 @@ impl AnyPath {
 
 	pub fn absolute(s: String) -> Result<Absolute> {
 		Self::new(s).into_absolute()
+	}
+
+	pub fn normalized(s: String) -> Result<Normalized> {
+		Self::new(s)
+			.into_relative()?
+			.into_normalized()
+			.map_err(|p| anyhow!("Not a normalized path: {:?}", p))
 	}
 
 	pub fn path(p: PathBuf) -> Self {
@@ -254,38 +274,54 @@ impl Scope {
 	pub fn new(n: Normalized) -> Self {
 		Scope(Some(Arc::new(n)))
 	}
+
+	pub fn from_normalized(n: Option<Normalized>) -> Self {
+		Scope(n.map(Arc::new))
+	}
 	
 	pub fn into_normalized(&self) -> Option<&Normalized> {
 		self.0.as_ref().map(|x| x.deref())
 	}
 
-	fn join(&self, sub: &Scope) -> Scope {
-		match (&self.0, &sub.0) {
+	// pub fn join(&self, sub: &Scope) -> Scope {
+	// 	match (&self.0, &sub.0) {
+	// 		(Some(base), Some(sub)) => {
+	// 			let base_str: &str = base.as_ref().as_ref();
+	// 			let sub_str: &str = sub.as_ref().as_ref();
+	// 			Self(Some(Arc::new(Normalized(format!("{}/{}", base_str, sub_str)))))
+	// 		},
+	// 		(None, _) => sub.clone(),
+	// 		(_, None) => self.clone(),
+	// 	}
+	// }
+
+	pub fn join(&self, sub: &Option<Normalized>) -> Scope {
+		match (&self.0, sub) {
 			(Some(base), Some(sub)) => {
 				let base_str: &str = base.as_ref().as_ref();
-				let sub_str: &str = sub.as_ref().as_ref();
+				let sub_str: &str = sub.as_ref();
 				Self(Some(Arc::new(Normalized(format!("{}/{}", base_str, sub_str)))))
 			},
-			(None, _) => sub.clone(),
+			(None, _) => Self::from_normalized(sub.to_owned()),
 			(_, None) => self.clone(),
 		}
 	}
 
-	pub fn within_scope<'a, 'b>(&'a self, name: &'b str, sub: &Scope) -> Option<Scoped<&'b str>> {
-		match sub.0 {
-			Some(ref sub_normalized) => {
-				let sub_str : &str = sub_normalized.as_ref().as_ref();
-				name.strip_prefix(sub_str).and_then(|s| s.strip_prefix("/")).map(|new_name| {
-					let full_scope: Scope = self.join(sub);
-					Scoped { scope: full_scope, value: new_name }
-				})
-			},
-			None => Some(Scoped {
-				scope: self.clone(),
-				value: name
-			}),
-		}
-	}
+	// pub fn within_scope<'a, 'b>(&'a self, name: &'b str, sub: &Scope) -> Option<Scoped<&'b str>> {
+	// 	match sub.0 {
+	// 		Some(ref sub_normalized) => {
+	// 			let sub_str : &str = sub_normalized.as_ref().as_ref();
+	// 			name.strip_prefix(sub_str).and_then(|s| s.strip_prefix("/")).map(|new_name| {
+	// 				let full_scope: Scope = self.join(sub);
+	// 				Scoped { scope: full_scope, value: new_name }
+	// 			})
+	// 		},
+	// 		None => Some(Scoped {
+	// 			scope: self.clone(),
+	// 			value: name
+	// 		}),
+	// 	}
+	// }
 }
 
 impl Clone for Scope {
@@ -304,10 +340,96 @@ impl<T> Scoped<T> {
 	pub fn new(scope: Scope, value: T) -> Self {
 		Self { scope, value }
 	}
+	
+	pub fn replace_value<R>(self, value: R) -> Scoped<R> {
+		Scoped { scope: self.scope, value }
+	}
+	
+	pub fn with_value<R>(&self, value: R) -> Scoped<R> {
+		let Scoped { scope, value: _ } = self;
+		Scoped::new(scope.clone(), value)
+	}
+	
+	pub fn map<R, F: FnOnce(T) -> R>(self, f: F) -> Scoped<R> {
+		let Scoped { scope, value } = self;
+		Scoped { scope, value: f(value) }
+	}
+
+	pub fn map_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> Scoped<R> {
+		let Scoped { scope, value } = self;
+		Scoped { scope: scope.clone(), value: f(&value) }
+	}
+
+	pub fn as_ref(&self) -> Scoped<&T> {
+		Scoped { scope: self.scope.clone(), value: &self.value }
+	}
+
+    // pub const fn as_deref(&self) -> Option<&T::Target>
+    // where
+    //     T: ~const Deref,
+    // {
+    //     match self.as_ref() {
+    //         Some(t) => Some(t.deref()),
+    //         None => None,
+    //     }
+    // }
 }
 
-impl<'a> Scoped<&'a str> {
-	pub fn within_scope(&'a self, sub: &Scope) -> Option<Scoped<&'a str>> {
-		self.scope.within_scope(self.value, sub)
+// impl<'a> Scoped<&'a str> {
+// 	pub fn full_path(&self) -> PathBuf {
+// 		match self.scope.0 {
+// 			Some(scope) => {
+// 				let mut ret: PathBuf = PathBuf::from(scope.as_ref().as_ref());
+// 				ret.push(self.value);
+// 				ret
+// 			},
+// 			None => PathBuf::from(self.value),
+// 		}
+// 	}
+// }
+
+impl<T: Display> Display for Scoped<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		self.scope.fmt(f)?;
+		write!(f, "/")?;
+		self.value.fmt(f)
 	}
 }
+
+impl Scoped<String> {
+	pub fn ensure_normalized(self) -> Result<Scoped<Normalized>> {
+		let Scoped { scope, value } = self;
+		Ok(Scoped::new(scope, AnyPath::normalized(value)?))
+	}
+}
+
+impl<P: AsRef<Path>> Scoped<P> {
+	pub fn canonical_path(&self) -> PathBuf {
+		let mut result = match self.scope.0 {
+			Some(ref scope) => PathBuf::from(scope.as_ref().as_ref()),
+			None => PathBuf::new(),
+		};
+
+		let suffix = self.value.as_ref();
+		for part in suffix.components() {
+			match part {
+				Component::RootDir => result.push(Component::RootDir),
+				Component::CurDir => (),
+				Component::ParentDir => {
+					if !result.pop() {
+						result.push("..");
+					}
+				},
+				Component::Normal(s) => result.push(s),
+				Component::Prefix(_) => todo!(),
+			}
+		}
+		result
+	}
+}
+
+// impl<T: ToOwned> Scoped<T> {
+// 	pub fn to_owned(&self) -> Scoped<T::Owned> {
+// 		Scoped { scope: self.scope.clone(), value: self.value.to_owned() }
+// 	}
+// }

@@ -1,11 +1,11 @@
 use log::*;
-use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow};
+use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::Path};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::FunctionSpec};
 
-use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Normalized, AnyPath, Scope}};
+use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Normalized, AnyPath, Scope, Scoped}};
 
 impl Into<DependencyRequest> for DependencyKey {
 	fn into(self) -> DependencyRequest {
@@ -35,10 +35,15 @@ pub enum DependencyKey {
 }
 
 impl DependencyKey {
-	pub fn from(req: DependencyRequest, scope: &Scope) -> Self {
+	pub fn from_ref(req: &Scoped<&DependencyRequest>) -> Self {
+		Self::from(req.map_ref(|r| (*r).to_owned()))
+	}
+
+	pub fn from(scoped_req: Scoped<DependencyRequest>) -> Self {
+		let Scoped { scope, value: req } = scoped_req;
 		match req {
 			DependencyRequest::FileDependency(v) => DependencyKey::FileDependency(
-				FileDependencyKey::from(v.path, scope)),
+				FileDependencyKey::from(v.path, &scope)),
 			DependencyRequest::WasmCall(v) => DependencyKey::WasmCall(v),
 			DependencyRequest::EnvVar(v) => DependencyKey::EnvVar(v),
 			DependencyRequest::FileSet(v) => DependencyKey::FileSet(v),
@@ -46,6 +51,18 @@ impl DependencyKey {
 			DependencyRequest::Universe => DependencyKey::Universe,
 		}
 	}
+
+	// pub fn from(req: DependencyRequest, scope: &Scope) -> Self {
+	// 	match req {
+	// 		DependencyRequest::FileDependency(v) => DependencyKey::FileDependency(
+	// 			FileDependencyKey::from(v.path, scope)),
+	// 		DependencyRequest::WasmCall(v) => DependencyKey::WasmCall(v),
+	// 		DependencyRequest::EnvVar(v) => DependencyKey::EnvVar(v),
+	// 		DependencyRequest::FileSet(v) => DependencyKey::FileSet(v),
+	// 		DependencyRequest::Execute(v) => DependencyKey::Execute(v),
+	// 		DependencyRequest::Universe => DependencyKey::Universe,
+	// 	}
+	// }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -89,11 +106,12 @@ impl PersistFile {
 		Ok(Self { mtime })
 	}
 
-	pub fn from_path(p: &str) -> Result<Option<Self>> {
+	pub fn from_path<P: AsRef<Path>>(p: P) -> Result<Option<Self>> {
+		let p = p.as_ref();
 		match fs::symlink_metadata(p) {
 			Result::Ok(stat) => Ok(Some(Self::from_stat(stat)?)),
 			Result::Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-			Result::Err(err) => Err(err).with_context(|| format!("Reading {:?}", p)),
+			Result::Err(err) => Err(err).with_context(|| format!("Reading {}", p.display())),
 		}
 	}
 }

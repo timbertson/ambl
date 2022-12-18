@@ -4,7 +4,7 @@ use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symli
 use anyhow::*;
 use trou_common::build::{self, FileDependency};
 
-use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey, FileDependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{AnyPath, Relative, Absolute, Normalized, Scope}, err::result_block, module::BuildModule};
+use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey, FileDependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{AnyPath, Relative, Absolute, Normalized, Scope, Scoped}, err::result_block, module::BuildModule};
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -67,8 +67,7 @@ impl Sandbox {
 	}
 
 	pub fn run<'a, M: BuildModule>(mut project: Mutexed<'a, Project<M>>,
-		scope: &Scope,
-		command: &build::Command,
+		command: &Scoped<&build::Command>,
 		reason: &BuildReason,
 	) -> Result<Mutexed<'a, Project<M>>> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
@@ -81,12 +80,14 @@ impl Sandbox {
 		// relieve borrow on project
 		let rel_paths: Vec<Normalized> = rel_paths.into_iter().map(|ptr| ptr.to_owned()).collect();
 
-		let build::Command { exe, args, cwd, env, env_inherit, output, input } = command;
+		let build::Command { exe, args, cwd, env, env_inherit, output, input } = command.value;
 		let mut cmd = Command::new(exe);
 
 		cmd.env_clear();
 		for k in env_inherit {
-			let (project_ret, value) = Project::<M>::build(project, scope, &DependencyRequest::EnvVar(k.to_owned()), reason)?;
+			let dependency_request = DependencyRequest::EnvVar(k.to_owned());
+			let request = command.with_value(&dependency_request);
+			let (project_ret, value) = Project::<M>::build(project, request, reason)?;
 			match value {
 				PersistDependency::Env(value) => {
 					cmd.env(k, value.0);
@@ -134,7 +135,7 @@ impl Sandbox {
 
 			// build up actual CWD from temp + scope + explicit CWD
 			let mut full_cwd: PathBuf = roots.tmp.to_owned().into();
-			if let Some(scope) = scope.into_normalized() {
+			if let Some(scope) = command.scope.into_normalized() {
 				full_cwd.push::<&str>(scope.as_ref());
 			}
 			if let Some(cwd) = cwd {

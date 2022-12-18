@@ -10,7 +10,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::BuildModule};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::BuildModule, path_util::Scoped};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -205,7 +205,8 @@ impl BuildModule for WasmModule {
 				// TODO can we store the scope in WASM context, instead of project?
 				let token = ActiveBuildToken::from_raw(token);
 				let scope = project.scope_for(token);
-				let (_, persist) = Project::build(project, &scope, &request, &BuildReason::Dependency(token))?;
+				let scoped_request = Scoped::new(scope, &request);
+				let (_, persist) = Project::build(project, scoped_request, &BuildReason::Dependency(token))?;
 				persist.into_response(&request)
 			})();
 			debug!("trou_invoke: returning {:?}", response);
