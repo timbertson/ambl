@@ -9,7 +9,7 @@ use tempdir::TempDir;
 use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse, FileDependencyType}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::AnyPath};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist, PersistDependency, FileDependencyKey}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{AnyPath, Scoped, Scope}};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
@@ -202,7 +202,8 @@ impl Invoker for TestInvoker {
 		drop(map);
 
 		debug!("TestInvoker building {:?}", &request);
-		let dep = Project::build(project, &request, &BuildReason::Dependency(self.token))?.1;
+		let scoped_request = Scoped::new(Scope::root(), &request);
+		let dep = Project::build(project, scoped_request, &BuildReason::Dependency(self.token))?.1;
 		dep.into_response(&request)
 	}
 }
@@ -316,8 +317,9 @@ impl<'a> TestProject<'a> {
 		let s = v.name.to_owned();
 		p.inject_module(&s, v);
 		// mark the module file as fresh to skip having to write an actual file
+		let dep_key = FileDependencyKey::Simple(AnyPath::normalized(s).unwrap());
 		p.inject_cache(
-			DependencyKey::FileDependency(s),
+			DependencyKey::FileDependency(dep_key),
 			Persist::File(Some(FAKE_FILE.clone()))
 		).expect("inject_module");
 		drop(p);
@@ -328,7 +330,7 @@ impl<'a> TestProject<'a> {
 		let mut p = self.lock();
 		let stat = PersistFile { mtime: self.monotonic_clock.fetch_add(1, Ordering::Relaxed) as u128 };
 		p.inject_cache(
-			DependencyKey::FileDependency(v.into()),
+			DependencyKey::FileDependency(FileDependencyKey::Simple(AnyPath::normalized(v.into()).unwrap())),
 			Persist::File(Some(stat))
 		).expect("touch_fake");
 		drop(p);
@@ -351,7 +353,8 @@ impl<'a> TestProject<'a> {
 			path: f.to_owned(),
 			ret,
 		});
-		let (project, result) = Project::build(project, &req, &BuildReason::Explicit)?;
+		let scoped_req = Scoped::new(Scope::root(), &req);
+		let (project, result) = Project::build(project, scoped_req, &BuildReason::Explicit)?;
 
 		drop(project);
 		println!("=== end build_file({})\n", f);

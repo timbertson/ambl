@@ -3,37 +3,25 @@ use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::D
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
-use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::FunctionSpec};
+use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::{FunctionSpec, Config}};
 
 use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Normalized, AnyPath, Scope, Scoped}};
-
-impl Into<DependencyRequest> for DependencyKey {
-	fn into(self) -> DependencyRequest {
-		match self {
-			DependencyKey::FileDependency(v) => DependencyRequest::FileDependency(FileDependency {
-				path: v.into(),
-				ret: FileDependencyType::Unit
-			}),
-			DependencyKey::WasmCall(v) => DependencyRequest::WasmCall(v),
-			DependencyKey::EnvVar(v) => DependencyRequest::EnvVar(v),
-			DependencyKey::FileSet(v) => DependencyRequest::FileSet(v),
-			DependencyKey::Execute(v) => DependencyRequest::Execute(v),
-			DependencyKey::Universe => DependencyRequest::Universe,
-		}
-	}
-}
 
 // A dependency request stripped of information which only affects the return value (not the built item)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum DependencyKey {
 	FileDependency(FileDependencyKey),
-	WasmCall(FunctionSpec),
+	WasmCall(FunctionSpecKey),
 	EnvVar(String),
 	FileSet(String),
 	Execute(Command),
 	Universe,
 }
 
+// Unlike DependencyRquest, DependencyKey does not have an attached
+// scope - all keys are rlative to project root, not the current scope.
+// Note that WasmCall _also_ has a scope in it, because calling
+// a call from a different scope can have a different result
 impl DependencyKey {
 	pub fn from_ref(req: &Scoped<&DependencyRequest>) -> Self {
 		Self::from(req.map_ref(|r| (*r).to_owned()))
@@ -42,9 +30,12 @@ impl DependencyKey {
 	pub fn from(scoped_req: Scoped<DependencyRequest>) -> Self {
 		let Scoped { scope, value: req } = scoped_req;
 		match req {
-			DependencyRequest::FileDependency(v) => DependencyKey::FileDependency(
-				FileDependencyKey::from(v.path, &scope)),
-			DependencyRequest::WasmCall(v) => DependencyKey::WasmCall(v),
+			DependencyRequest::FileDependency(v) =>
+				DependencyKey::FileDependency(FileDependencyKey::from(v.path, &scope)),
+
+			DependencyRequest::WasmCall(v) =>
+				DependencyKey::WasmCall(FunctionSpecKey::from(v, &scope)),
+
 			DependencyRequest::EnvVar(v) => DependencyKey::EnvVar(v),
 			DependencyRequest::FileSet(v) => DependencyKey::FileSet(v),
 			DependencyRequest::Execute(v) => DependencyKey::Execute(v),
@@ -52,17 +43,33 @@ impl DependencyKey {
 		}
 	}
 
-	// pub fn from(req: DependencyRequest, scope: &Scope) -> Self {
-	// 	match req {
-	// 		DependencyRequest::FileDependency(v) => DependencyKey::FileDependency(
-	// 			FileDependencyKey::from(v.path, scope)),
-	// 		DependencyRequest::WasmCall(v) => DependencyKey::WasmCall(v),
-	// 		DependencyRequest::EnvVar(v) => DependencyKey::EnvVar(v),
-	// 		DependencyRequest::FileSet(v) => DependencyKey::FileSet(v),
-	// 		DependencyRequest::Execute(v) => DependencyKey::Execute(v),
-	// 		DependencyRequest::Universe => DependencyKey::Universe,
-	// 	}
-	// }
+	// When we need to reevaluate a dependency, we turn its DB key into a buildable
+	// request. Most of the time that's a simple request with a root scope, except for a
+	// WASM call which embeds its own scope (since it matters where you call a function from).
+	pub fn into_request(self) -> Scoped<DependencyRequest> {
+		let root = |req| Scoped::new(Scope::root(), req);
+		match self {
+			DependencyKey::FileDependency(v) => root(DependencyRequest::FileDependency(FileDependency {
+				path: v.into(),
+				ret: FileDependencyType::Unit
+			})),
+
+			DependencyKey::WasmCall(v) => {
+				let FunctionSpecKey { fn_name, scope, rel_path, config } = v;
+				let req = DependencyRequest::WasmCall(FunctionSpec {
+					fn_name,
+					config,
+					module: Some(rel_path),
+				});
+				Scoped::new(Scope::from_normalized(scope), req)
+			},
+
+			DependencyKey::EnvVar(v) => root(DependencyRequest::EnvVar(v)),
+			DependencyKey::FileSet(v) => root(DependencyRequest::FileSet(v)),
+			DependencyKey::Execute(v) => root(DependencyRequest::Execute(v)),
+			DependencyKey::Universe => root(DependencyRequest::Universe),
+		}
+	}
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -72,9 +79,10 @@ pub enum FileDependencyKey {
 }
 
 impl FileDependencyKey {
-	fn from(s: String, scope: &Scope) -> Self {
+	pub fn from(s: String, scope: &Scope) -> Self {
 		let path = AnyPath::new(s);
 		let normalized = path.normalize_in_opt(scope);
+		todo!("make sure Complex is canonical?");
 		normalized.map(FileDependencyKey::Simple)
 			.unwrap_or_else(|| FileDependencyKey::Complex(path.into()))
 	}
@@ -86,6 +94,22 @@ impl Into<String> for FileDependencyKey {
 			FileDependencyKey::Simple(v) => v.into(),
 			FileDependencyKey::Complex(v) => v,
 		}
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct FunctionSpecKey {
+	pub fn_name: String,
+	pub scope: Option<Normalized>,
+	pub rel_path: String,
+	pub config: Config,
+}
+
+impl FunctionSpecKey {
+	pub fn from(s: FunctionSpec, scope: &Scope) -> Self {
+		let FunctionSpec { fn_name, module, config } = s;
+		let module = module.unwrap_or_else(|| panic!("Module missing; this is a bug"));
+		Self { fn_name, scope: scope.into_normalized().map(|n| n.clone()), rel_path: module, config }
 	}
 }
 

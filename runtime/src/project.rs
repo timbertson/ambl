@@ -60,9 +60,20 @@ pub struct Nested {
 	absolute_scope: Scope,
 }
 impl Nested {
-	fn projection(&self, name: &str) -> Option<Scoped<&str>> {
-		// matches name against relative scope, but always retrns an absolute scope
-		todo!()
+	fn projection<'a>(&'a self, name: &'a str) -> Option<Scoped<&'a str>> {
+		match self.relative_scope.as_ref() {
+			Some(sub) => {
+				sub.project(name).map(|new_name| {
+					Scoped::new(self.absolute_scope.clone(), new_name)
+				})
+			},
+			
+			// If there's no scope, any name could be found within
+			None => Some(Scoped {
+				scope: self.absolute_scope.clone(),
+				value: name
+			}),
+		}
 	}
 }
 
@@ -76,8 +87,8 @@ pub struct ScopedInclude {
 }
 
 impl ScopedInclude {
-	fn contains_path(&self, s: &str) -> bool {
-		todo!()
+	fn contains_path(&self, name: &str) -> bool {
+		self.relative_scope.as_ref().map(|scope| scope.project(name).is_some()).unwrap_or(true)
 	}
 }
 
@@ -194,22 +205,24 @@ impl<M: BuildModule> Project<M> {
 
 	fn load_module_inner<'a>(
 		project: ProjectMutex<'a, M>,
-		path: &Scoped<&str>,
+		// path: &Scoped<&str>,
+		path: FileDependencyKey,
 		reason: &BuildReason
 	) -> Result<ProjectMutexPair<'a, M, M>> {
 		debug!("Loading module {:?} for {:?}", path, reason);
 
+		// TODO can we get away with not cloning yet? It's pointless if the module is loaded
+		let raw_path: String = path.to_owned().into();
+
 		// First, build the module itself and register it as a dependency.
 		// TODO need to enforce a project-rooted path, consistent with rules
-		let request = DependencyRequest::FileDependency(FileDependency::new(path.value.to_owned()));
-		let (mut project, module_built) = Self::build(project, path.with_value(&request), reason)?;
+		let request = DependencyKey::FileDependency(path).into_request();
+		let (mut project, module_built) = Self::build(project, request.as_ref(), reason)?;
 
 		result_block(|| {
 			let self_ref = project.self_ref.clone().unwrap();
 			let module_cache = &mut project.module_cache;
 
-			// TODO can we get away with not cloning yet? It's pointless if the module is loaded
-			let raw_path = path.canonical_path().to_str().expect("Invalid path").to_string();
 			let cached = module_cache.modules.entry(raw_path.clone());
 			let module = match cached {
 				Entry::Occupied(entry) => {
@@ -228,7 +241,7 @@ impl<M: BuildModule> Project<M> {
 			// Preferrably we should reuse the same store, though we should call state.drop(store) to free up overheads too
 			let module = M::load(&module_cache.engine, &module, self_ref)?;
 			Ok((project, module))
-		}).with_context(|| format!("Loading WASM module: {}", path))
+		}).with_context(|| format!("Loading WASM module: {}", raw_path))
 	}
 
 	pub fn load_yaml_rules<'a>(
@@ -506,7 +519,8 @@ impl<M: BuildModule> Project<M> {
 
 		match request.value {
 			DependencyRequest::FileDependency(file_dependency) => {
-				let key: DependencyKey = DependencyKey::from_ref(&request);
+				let file_key = FileDependencyKey::from(file_dependency.path.to_owned(), &request.scope);
+				let key: DependencyKey = DependencyKey::FileDependency(file_key.clone());
 				let name = request.with_value(file_dependency.path.as_str());
 				let get_target = |project| Project::target(project, &name);
 
@@ -525,14 +539,16 @@ impl<M: BuildModule> Project<M> {
 						let child_reason = BuildReason::Dependency(build_token);
 
 						// TODO track which module the target was defined in
-						let build_module_path: Scoped<&str> = found_target.name.with_value(
-							found_target.target.build.module.as_ref()
-								.ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?
-						);
+						// let build_module_path: Scoped<&str> = found_target.name.with_value(
+						// 	found_target.target.build.module.as_ref()
+						// 		.ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?
+						// );
 						
+						let module_key = FileDependencyKey::from(file_dependency.path.to_owned(), &request.scope);
+
 						let (project_ret, mut wasm_module) = Self::load_module_inner(
 							project,
-							&build_module_path,
+							file_key,
 							&child_reason)?;
 						project = project_ret;
 						
@@ -607,10 +623,14 @@ impl<M: BuildModule> Project<M> {
 			},
 
 			DependencyRequest::WasmCall(spec) => {
-				todo!("WASM call needs to resolve module according to scope");
-
-				// This should be made impossible via types but I don't want to duplicate DependencyRequest yet
-				let key: DependencyKey = DependencyKey::from_ref(&request);
+				// TODO this path needs to be concatenated with the scope!
+				let rel_path = spec.module.to_owned().expect("TODO: default to calling module");
+				let dependency_key = DependencyKey::WasmCall(FunctionSpecKey {
+					fn_name: spec.fn_name.clone(),
+					scope: request.scope.into_normalized().map(|n| n.to_owned()),
+					rel_path: rel_path.to_owned(),
+					config: spec.config.to_owned(),
+				});
 
 				let needs_rebuild = |project, _ctx: &(), cached: &Persist| {
 					if let Persist::Wasm(cached_call) = cached {
@@ -621,14 +641,10 @@ impl<M: BuildModule> Project<M> {
 				};
 
 				let do_build = |mut project, _ctx: &(), build_token| {
-					let build_module_path: Scoped<&str> = request.with_value(
-						spec.module.as_ref()
-							.ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?
-					);
-
+					let file_key = FileDependencyKey::from(rel_path.to_owned(), &request.scope);
 					let (project_ret, mut wasm_module) = Self::load_module_inner(
 						project,
-						&build_module_path,
+						file_key,
 						&BuildReason::Dependency(build_token))?;
 					project = project_ret;
 
@@ -650,7 +666,7 @@ impl<M: BuildModule> Project<M> {
 
 				let get_ctx = |project| Ok((project, ()));
 				Self::build_with_cache_awareness(
-					project, &request.scope, reason, key,
+					project, &request.scope, reason, dependency_key,
 					get_ctx, needs_rebuild, do_build)
 			},
 			DependencyRequest::FileSet(_) => todo!("handle FileSet"),
@@ -703,13 +719,12 @@ impl<M: BuildModule> Project<M> {
 
 		let reason = BuildReason::Speculative;
 
-		let root_scope = Scope::root();
 		for (dep_key, dep_cached) in cached.dep_set().iter() {
 			debug!("requires_build() recursing over dependency {:?}", dep_key);
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
-			let req: DependencyRequest = dep_key.to_owned().into();
-			let (project_ret, dep_latest) = Self::build(project, Scoped::new(root_scope.clone(), &req), &reason)?;
+			let request: Scoped<DependencyRequest> = dep_key.to_owned().into_request();
+			let (project_ret, dep_latest) = Self::build(project, request.as_ref(), &reason)?;
 			project = project_ret;
 			
 			// if the result differs from what this target was based on, rebuild this target
@@ -762,9 +777,11 @@ impl<M: BuildModule> Project<M> {
 
 	#[cfg(test)]
 	pub fn replace_rules(&mut self, v: Vec<Rule>) {
+		let scope = Scope::root();
 		self.root_rule = Arc::new(ProjectRule::Mutable(RwRef::new(MutableRule::Nested(Nested {
-			rules: v.into_iter().map(|r| r.into()).collect(),
-			scope: None,
+			rules: v.into_iter().map(|r| ProjectRule::from_rule(r, &scope).unwrap()).collect(),
+			relative_scope: None,
+			absolute_scope: scope,
 		}))));
 	}
 

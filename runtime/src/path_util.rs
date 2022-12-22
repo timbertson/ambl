@@ -41,28 +41,6 @@ impl Relative {
 	}
 }
 
-#[cfg(test)]
-mod test {
-	use super::*;
-	
-	fn rel(s: &str) -> Relative {
-		Relative(s.to_owned())
-	}
-
-	fn norm(s: &str) -> Normalized {
-		Normalized(rel(s).into())
-	}
-
-	#[test]
-	fn test_normalize() {
-		assert_eq!(rel("foo/bar/../baz").normalize_in(None), Some(norm("foo/baz")));
-		assert_eq!(rel("foo/.//bar/../baz").normalize_in(Some(&norm("x/y"))), Some(norm("x/y/foo/baz")));
-		assert_eq!(rel("../z").normalize_in(Some(&norm("x/y"))), Some(norm("x/z")));
-		assert_eq!(rel("../../z").normalize_in(Some(&norm("x"))), None);
-		assert_eq!(rel("x/").normalize_in(None), Some(norm("x")));
-	}
-}
-
 impl Into<String> for Relative {
 	fn into(self) -> String {
 		self.0
@@ -78,6 +56,14 @@ impl Into<PathBuf> for Relative {
 // relative _and_ normalized (no ../ or ./ coponents, no trailing slash)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Normalized(String);
+
+impl Normalized {
+	pub fn project<'a>(&self, s: &'a str) -> Option<&'a str> {
+		let prefix: &str = self.as_ref();
+		s.strip_prefix(prefix).and_then(|s| s.strip_prefix("/"))
+	}
+}
+
 impl AsRef<str> for Normalized {
 	fn as_ref(&self) -> &str {
 		self.0.as_ref()
@@ -283,18 +269,6 @@ impl Scope {
 		self.0.as_ref().map(|x| x.deref())
 	}
 
-	// pub fn join(&self, sub: &Scope) -> Scope {
-	// 	match (&self.0, &sub.0) {
-	// 		(Some(base), Some(sub)) => {
-	// 			let base_str: &str = base.as_ref().as_ref();
-	// 			let sub_str: &str = sub.as_ref().as_ref();
-	// 			Self(Some(Arc::new(Normalized(format!("{}/{}", base_str, sub_str)))))
-	// 		},
-	// 		(None, _) => sub.clone(),
-	// 		(_, None) => self.clone(),
-	// 	}
-	// }
-
 	pub fn join(&self, sub: &Option<Normalized>) -> Scope {
 		match (&self.0, sub) {
 			(Some(base), Some(sub)) => {
@@ -306,22 +280,6 @@ impl Scope {
 			(_, None) => self.clone(),
 		}
 	}
-
-	// pub fn within_scope<'a, 'b>(&'a self, name: &'b str, sub: &Scope) -> Option<Scoped<&'b str>> {
-	// 	match sub.0 {
-	// 		Some(ref sub_normalized) => {
-	// 			let sub_str : &str = sub_normalized.as_ref().as_ref();
-	// 			name.strip_prefix(sub_str).and_then(|s| s.strip_prefix("/")).map(|new_name| {
-	// 				let full_scope: Scope = self.join(sub);
-	// 				Scoped { scope: full_scope, value: new_name }
-	// 			})
-	// 		},
-	// 		None => Some(Scoped {
-	// 			scope: self.clone(),
-	// 			value: name
-	// 		}),
-	// 	}
-	// }
 }
 
 impl Clone for Scope {
@@ -363,30 +321,7 @@ impl<T> Scoped<T> {
 	pub fn as_ref(&self) -> Scoped<&T> {
 		Scoped { scope: self.scope.clone(), value: &self.value }
 	}
-
-    // pub const fn as_deref(&self) -> Option<&T::Target>
-    // where
-    //     T: ~const Deref,
-    // {
-    //     match self.as_ref() {
-    //         Some(t) => Some(t.deref()),
-    //         None => None,
-    //     }
-    // }
 }
-
-// impl<'a> Scoped<&'a str> {
-// 	pub fn full_path(&self) -> PathBuf {
-// 		match self.scope.0 {
-// 			Some(scope) => {
-// 				let mut ret: PathBuf = PathBuf::from(scope.as_ref().as_ref());
-// 				ret.push(self.value);
-// 				ret
-// 			},
-// 			None => PathBuf::from(self.value),
-// 		}
-// 	}
-// }
 
 impl<T: Display> Display for Scoped<T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -428,8 +363,38 @@ impl<P: AsRef<Path>> Scoped<P> {
 	}
 }
 
-// impl<T: ToOwned> Scoped<T> {
-// 	pub fn to_owned(&self) -> Scoped<T::Owned> {
-// 		Scoped { scope: self.scope.clone(), value: self.value.to_owned() }
-// 	}
-// }
+#[cfg(test)]
+mod test {
+	use super::*;
+	
+	fn rel(s: &str) -> Relative {
+		Relative(s.to_owned())
+	}
+
+	fn norm(s: &str) -> Normalized {
+		Normalized(rel(s).into())
+	}
+
+	fn scope(s: &str) -> Scope {
+		Scope::new(norm(s))
+	}
+
+	#[test]
+	fn test_normalize() {
+		let root = Scope::root();
+		assert_eq!(rel("foo/bar/../baz").normalize_in(&root), Some(norm("foo/baz")));
+		assert_eq!(rel("foo/.//bar/../baz").normalize_in(&scope("x/y")), Some(norm("x/y/foo/baz")));
+		assert_eq!(rel("../z").normalize_in(&scope("x/y")), Some(norm("x/z")));
+		assert_eq!(rel("../../z").normalize_in(&scope("x")), None);
+		assert_eq!(rel("x/").normalize_in(&root), Some(norm("x")));
+	}
+
+	fn test_canonical_path() {
+		let root = Scope::root();
+		let scope = scope("a/b");
+		assert_eq!(Scoped::new(scope.clone(), "../baz").canonical_path(), PathBuf::from("a/baz"));
+		assert_eq!(Scoped::new(scope.clone(), "baz/../").canonical_path(), PathBuf::from("a/b"));
+		assert_eq!(Scoped::new(scope.clone(), "../../../x").canonical_path(), PathBuf::from("../x"));
+		assert_eq!(Scoped::new(scope.clone(), "/tmp/x").canonical_path(), PathBuf::from("/tmp/x"));
+	}
+}
