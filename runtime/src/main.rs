@@ -16,7 +16,7 @@ use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{A
 use log::*;
 
 use anyhow::*;
-use path_util::{AnyPath, Scope, Scoped};
+use path_util::{Scope, Scoped, CPath};
 use project::{Project, ModuleCache, BuildReason};
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
@@ -29,7 +29,7 @@ use wasmtime::*;
 fn main() -> Result<()> {
 	crate::init::init();
 	
-	let cwd = AnyPath::path(env::current_dir()?).into_absolute()?;
+	let cwd = CPath::try_from(env::current_dir()?)?.into_absolute()?;
 	let project = Project::<WasmModule>::new(cwd)?;
 	let result = (|| {
 		let args: Vec<String> = env::args().skip(1).collect();

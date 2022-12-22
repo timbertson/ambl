@@ -4,7 +4,7 @@ use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symli
 use anyhow::*;
 use trou_common::build::{self, FileDependency};
 
-use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey, FileDependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{AnyPath, Relative, Absolute, Normalized, Scope, Scoped}, err::result_block, module::BuildModule};
+use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{External, Absolute, Scope, Scoped, CPath, Simple}, err::result_block, module::BuildModule};
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -16,7 +16,7 @@ struct Roots {
 }
 
 impl Sandbox {
-	fn install_symlink(roots: &Roots, rel: &Relative) -> Result<()> {
+	fn install_symlink(roots: &Roots, rel: &Simple) -> Result<()> {
 		result_block(|| {
 			let link = roots.tmp.join(rel);
 			let target = roots.project.join(rel);
@@ -33,32 +33,34 @@ impl Sandbox {
 	
 	fn collect_paths<'a, 'b, M: BuildModule>(
 		project: &'a Project<M>,
-		dest: &mut HashSet<&'b Normalized>,
+		dest: &mut HashSet<Simple>,
 		key: &'b DependencyKey,
 	) -> Result<()> where 'a : 'b {
 		match key {
-			DependencyKey::FileDependency(FileDependencyKey::Complex(_)) => {
-				// TODO proper sandboxing would allow us to shadow all paths, but currently we can
-				// only shadow paths within the workspace
-			},
-			DependencyKey::FileDependency(FileDependencyKey::Simple(ref rel)) => {
-				if dest.contains(rel) {
-					return Ok(());
-				}
-				let persist = project.lookup(&key)?
-					.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
-					.raw();
-				match persist {
-					Persist::File(Some(_)) => {
-						dest.insert(rel);
-					},
-					Persist::Target(target) => {
-						// TODO don't include transitive deps if there is a checksum
-						for (key, _) in target.deps.deps.iter() {
-							Self::collect_paths(project, dest, key)?;
-						}
-					},
-					_ => (),
+			DependencyKey::FileDependency(cpath) => {
+				if let Result::Ok(rel) = cpath.to_owned().into_simple() {
+					if dest.contains(&rel) {
+						return Ok(());
+					}
+					let persist = project.lookup(&key)?
+						.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
+						.raw();
+					match persist {
+						Persist::File(Some(_)) => {
+							dest.insert(rel);
+						},
+						Persist::Target(target) => {
+							// TODO don't include transitive deps if there is a checksum
+							for (key, _) in target.deps.deps.iter() {
+								Self::collect_paths(project, dest, key)?;
+							}
+						},
+						_ => (),
+					}
+				} else {
+					// TODO proper sandboxing would allow us to shadow all paths, but currently we can
+					// only shadow paths within the workspace
+					()
 				}
 			},
 			_ => (), // not a file or target dependency
@@ -77,9 +79,6 @@ impl Sandbox {
 				.context("initializing command sandbox")?;
 		}
 		
-		// relieve borrow on project
-		let rel_paths: Vec<Normalized> = rel_paths.into_iter().map(|ptr| ptr.to_owned()).collect();
-
 		let build::Command { exe, args, cwd, env, env_inherit, output, input } = command.value;
 		let mut cmd = Command::new(exe);
 
@@ -104,8 +103,8 @@ impl Sandbox {
 			let tmp = tempdir::TempDir::new("trou")?;
 			debug!("created command sandbox {:?}", &tmp);
 			let roots = Roots {
-				tmp: AnyPath::path(tmp.path().to_owned()).into_absolute()?,
-				project: AnyPath::path(current_dir()?).into_absolute()?,
+				tmp: CPath::try_from(tmp.path().to_owned())?.into_absolute()?,
+				project: CPath::try_from(current_dir()?)?.into_absolute()?,
 			};
 			
 			cmd.args(args);
@@ -135,8 +134,8 @@ impl Sandbox {
 
 			// build up actual CWD from temp + scope + explicit CWD
 			let mut full_cwd: PathBuf = roots.tmp.to_owned().into();
-			if let Some(scope) = command.scope.into_normalized() {
-				full_cwd.push::<&str>(scope.as_ref());
+			if let Some(scope) = command.scope.into_simple() {
+				full_cwd.push::<&CPath>(scope.as_ref());
 			}
 			if let Some(cwd) = cwd {
 				// TODO warn if CWD is absolute?

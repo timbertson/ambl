@@ -9,7 +9,7 @@ use tempdir::TempDir;
 use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse, FileDependencyType}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist, PersistDependency, FileDependencyKey}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{AnyPath, Scoped, Scope}};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath}};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
@@ -119,7 +119,7 @@ impl<'a> TestModule<'a> {
 impl<'a> BuildModule for TestModule<'a> {
 	type Compiled = Self;
 
-	fn compile(engine: &Engine, path: &str) -> Result<Self::Compiled> {
+	fn compile(engine: &Engine, path: &CPath) -> Result<Self::Compiled> {
 		panic!("compilation requested for module {}", path)
 	}
 
@@ -238,9 +238,9 @@ impl<'a> TestProject<'a> {
 
 	fn new() -> Result<Self> {
 		let root = TempDir::new("troutest")?;
-		// solly mac has a /tmp symlink
+		// silly mac has a /tmp symlink
 		let root_abs = fs::canonicalize(root.path())?;
-		let project = Project::new(AnyPath::absolute(root_abs.to_str().unwrap().to_owned())?)?;
+		let project = Project::new(CPath::new(root_abs.to_str().unwrap().to_owned()).into_absolute()?)?;
 
 		let handle = project.handle();
 		let module_count = AtomicUsize::new(0);
@@ -317,9 +317,8 @@ impl<'a> TestProject<'a> {
 		let s = v.name.to_owned();
 		p.inject_module(&s, v);
 		// mark the module file as fresh to skip having to write an actual file
-		let dep_key = FileDependencyKey::Simple(AnyPath::normalized(s).unwrap());
 		p.inject_cache(
-			DependencyKey::FileDependency(dep_key),
+			DependencyKey::FileDependency(CPath::new(s)),
 			Persist::File(Some(FAKE_FILE.clone()))
 		).expect("inject_module");
 		drop(p);
@@ -330,7 +329,7 @@ impl<'a> TestProject<'a> {
 		let mut p = self.lock();
 		let stat = PersistFile { mtime: self.monotonic_clock.fetch_add(1, Ordering::Relaxed) as u128 };
 		p.inject_cache(
-			DependencyKey::FileDependency(FileDependencyKey::Simple(AnyPath::normalized(v.into()).unwrap())),
+			DependencyKey::FileDependency(CPath::new(v.into())),
 			Persist::File(Some(stat))
 		).expect("touch_fake");
 		drop(p);

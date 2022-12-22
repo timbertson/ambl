@@ -1,201 +1,26 @@
 use anyhow::*;
 use log::*;
 use core::fmt;
-use std::{ops::Deref, sync::Arc, fmt::{Display, Debug}};
+use std::{ops::Deref, sync::Arc, fmt::{Display, Debug}, path::Components};
 use serde::{Deserialize, Serialize};
 use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::prelude::PermissionsExt, borrow::{Cow, Borrow}};
 use walkdir::{WalkDir, DirEntry};
 
-// relative, but may contain ../ etc
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Relative(String);
+/*
+Paths in trou:
 
-impl Relative {
-	pub fn into_normalized(self) -> Result<Normalized, Self> {
-		// TODO this could be a simple check, instead of a clone
-		let norm = self.normalize_in(&Scope::root());
-		norm.ok_or(self)
-	}
+For simplicity, all paths are normalized _without_ regard to symlinks. foo/../bar is always terated the same as `bar`.
+No normalized path contains a `.` component, or ends with a slash.
 
-	// TODO this could be a simple Arc::clone if the path is already normalized
-	pub fn normalize_in(&self, scope: &Scope) -> Option<Normalized> {
-		let scope_s: Option<String> = scope.into_normalized().map(|x| x.to_owned().into());
-		let base: PathBuf = scope_s.map(PathBuf::from).unwrap_or_else(|| PathBuf::new());
+Absolute paths start with /
+External paths start with ../
+Simple paths are just a series of path component, with no `..`
 
-		let suffix: PathBuf = self.clone().into();
-		let mut result = base.clone();
+# Usage:
 
-		for part in suffix.components() {
-			match part {
-				Component::CurDir => (),
-				Component::ParentDir => {
-					if !result.pop() {
-						return None
-					}
-				},
-				Component::Normal(s) => result.push(s),
-				Component::Prefix(_) | Component::RootDir => { panic!("Invalid relative path: {:?}", self) },
-			}
-		}
-		Some(Normalized(result.into_os_string().into_string().expect("invalid path")))
-	}
-}
-
-impl Into<String> for Relative {
-	fn into(self) -> String {
-		self.0
-	}
-}
-
-impl Into<PathBuf> for Relative {
-	fn into(self) -> PathBuf {
-		PathBuf::from(self.0)
-	}
-}
-
-// relative _and_ normalized (no ../ or ./ coponents, no trailing slash)
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct Normalized(String);
-
-impl Normalized {
-	pub fn project<'a>(&self, s: &'a str) -> Option<&'a str> {
-		let prefix: &str = self.as_ref();
-		s.strip_prefix(prefix).and_then(|s| s.strip_prefix("/"))
-	}
-}
-
-impl AsRef<str> for Normalized {
-	fn as_ref(&self) -> &str {
-		self.0.as_ref()
-	}
-}
-
-impl Display for Normalized {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		fmt::Display::fmt(&self.0, f)
-	}
-}
-
-impl Into<PathBuf> for Normalized {
-	fn into(self) -> PathBuf {
-		PathBuf::from(self.0)
-	}
-}
-
-impl Into<Relative> for Normalized {
-	fn into(self) -> Relative {
-		Relative(self.0)
-	}
-}
-
-impl Into<String> for Normalized {
-	fn into(self) -> String {
-		self.0
-	}
-}
-
-#[derive(Debug, Clone)]
-pub struct Absolute(String);
-impl Absolute {
-	pub fn join(&self, rel: &Relative) -> Absolute {
-		Self(format!("{}/{}", self.0, rel.0))
-	}
-}
-
-impl AsRef<str> for Relative {
-	fn as_ref(&self) -> &str {
-		&self.0
-	}
-}
-
-impl Into<PathBuf> for Absolute {
-	fn into(self) -> PathBuf {
-		PathBuf::from(self.0)
-	}
-}
-
-impl Into<String> for Absolute {
-	fn into(self) -> String {
-		self.0
-	}
-}
-
-impl AsRef<str> for Absolute {
-	fn as_ref(&self) -> &str {
-		&self.0
-	}
-}
-
-#[derive(Debug)]
-pub enum AnyPath {
-	Relative(Relative),
-	Absolute(Absolute),
-}
-
-impl AnyPath {
-	pub fn new(s: String) -> AnyPath {
-		if s.starts_with('/') {
-			Self::Absolute(Absolute(s))
-		} else {
-			Self::Relative(Relative(s))
-		}
-	}
-
-	pub fn into_relative(self) -> Result<Relative> {
-		match self {
-			AnyPath::Relative(rel) => Ok(rel),
-			AnyPath::Absolute(abs) => Err(anyhow!("Not a relative path: {}", abs.0)),
-		}
-	}
-
-	pub fn into_absolute(self) -> Result<Absolute> {
-		match self {
-			AnyPath::Relative(rel) => Err(anyhow!("Not an absolute path: {}", rel.0)),
-			AnyPath::Absolute(abs) => Ok(abs),
-		}
-	}
-
-	pub fn relative(s: String) -> Result<Relative> {
-		Self::new(s).into_relative()
-	}
-
-	pub fn absolute(s: String) -> Result<Absolute> {
-		Self::new(s).into_absolute()
-	}
-
-	pub fn normalized(s: String) -> Result<Normalized> {
-		Self::new(s)
-			.into_relative()?
-			.into_normalized()
-			.map_err(|p| anyhow!("Not a normalized path: {:?}", p))
-	}
-
-	pub fn path(p: PathBuf) -> Self {
-		let s = p.into_os_string().into_string().expect("non UTF path");
-		Self::new(s)
-	}
-
-	// TODO this could return a possibly-borrowed scope?
-	pub fn normalize_in(&self, scope: &Scope) -> Result<Normalized> {
-		self.normalize_in_opt(scope).ok_or_else(|| anyhow!("Normalized scope reqired, got {:?}", self))
-	}
-
-	pub fn normalize_in_opt(&self, scope: &Scope) -> Option<Normalized> {
-		match self {
-			AnyPath::Relative(rel) => rel.normalize_in(scope),
-			AnyPath::Absolute(_) => None,
-		}
-	}
-}
-
-impl Into<String> for AnyPath {
-	fn into(self) -> String {
-		match self {
-			AnyPath::Relative(v) => v.into(),
-			AnyPath::Absolute(v) => v.into(),
-		}
-	}
-}
+Scopes are represented as a Simple path from the project root.
+File dependencies can be any kind.
+*/
 
 pub fn rm_rf_and_ensure_parent<P: AsRef<Path>>(p: P) -> Result<()> {
 	let p = p.as_ref();
@@ -250,34 +75,36 @@ pub fn lstat_opt<P: AsRef<Path>>(p: P) -> Result<Option<fs::Metadata>> {
 
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Scope(Option<Arc<Normalized>>);
+pub struct Scope(Option<Arc<Simple>>);
 
 impl Scope {
 	pub fn root() -> Self {
 		Scope(None)
 	}
 
-	pub fn new(n: Normalized) -> Self {
+	pub fn new(n: Simple) -> Self {
 		Scope(Some(Arc::new(n)))
 	}
 
-	pub fn from_normalized(n: Option<Normalized>) -> Self {
+	pub fn from_normalized(n: Option<Simple>) -> Self {
 		Scope(n.map(Arc::new))
 	}
 	
-	pub fn into_normalized(&self) -> Option<&Normalized> {
+	pub fn into_simple(&self) -> Option<&Simple> {
 		self.0.as_ref().map(|x| x.deref())
 	}
+	
+	pub fn join(&self, sub: CPath) -> CPath {
+		match &self.0 {
+			Some(base) => base.0.join(&sub),
+			None => sub
+		}
+	}
 
-	pub fn join(&self, sub: &Option<Normalized>) -> Scope {
-		match (&self.0, sub) {
-			(Some(base), Some(sub)) => {
-				let base_str: &str = base.as_ref().as_ref();
-				let sub_str: &str = sub.as_ref();
-				Self(Some(Arc::new(Normalized(format!("{}/{}", base_str, sub_str)))))
-			},
-			(None, _) => Self::from_normalized(sub.to_owned()),
-			(_, None) => self.clone(),
+	pub fn join_simple(&self, sub: Simple) -> Simple {
+		match &self.0 {
+			Some(base) => Simple(base.0.join(&sub)),
+			None => sub
 		}
 	}
 }
@@ -325,76 +152,306 @@ impl<T> Scoped<T> {
 
 impl<T: Display> Display for Scoped<T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		self.scope.fmt(f)?;
-		write!(f, "/")?;
-		self.value.fmt(f)
-	}
-}
-
-impl Scoped<String> {
-	pub fn ensure_normalized(self) -> Result<Scoped<Normalized>> {
-		let Scoped { scope, value } = self;
-		Ok(Scoped::new(scope, AnyPath::normalized(value)?))
-	}
-}
-
-impl<P: AsRef<Path>> Scoped<P> {
-	pub fn canonical_path(&self) -> PathBuf {
-		let mut result = match self.scope.0 {
-			Some(ref scope) => PathBuf::from(scope.as_ref().as_ref()),
-			None => PathBuf::new(),
-		};
-
-		let suffix = self.value.as_ref();
-		for part in suffix.components() {
-			match part {
-				Component::RootDir => result.push(Component::RootDir),
-				Component::CurDir => (),
-				Component::ParentDir => {
-					if !result.pop() {
-						result.push("..");
-					}
-				},
-				Component::Normal(s) => result.push(s),
-				Component::Prefix(_) => todo!(),
-			}
+		if let Some(scope) = self.scope.into_simple() {
+			Display::fmt(&scope, f)?;
+			write!(f, "/")?;
 		}
-		result
+		Display::fmt(&self.value, f)
 	}
+}
+
+impl<P: AsRef<CPath>> Scoped<P> {
+	// embeds the scope into the path
+	pub fn as_cpath(&self) -> CPath {
+		match self.scope.0 {
+			None => self.value.as_ref().to_owned(),
+			Some(ref scope) => scope.0.join(self.value.as_ref()),
+		}
+	}
+}
+
+// a "canonical" PathBuf which is:
+// - always a valid string
+// - normalized, i.e. contains no trailing `/`, and no internal `../` (but may start with one or more ../ segments)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct CPath(PathBuf);
+impl CPath {
+	pub fn new(s: String) -> Self {
+		Self(Self::canonicalize(PathBuf::from(s)))
+	}
+
+	pub fn new_in(s: String) -> Self {
+		Self(Self::canonicalize(PathBuf::from(s)))
+	}
+	
+	pub fn as_path(&self) -> &Path {
+		self.0.as_ref()
+	}
+
+	pub fn as_str(&self) -> &str {
+		self.as_ref()
+	}
+
+	pub fn into_simple(self) -> Result<Simple> {
+		if self.kind() == Kind::Simple {
+			Ok(Simple(self))
+		} else {
+			Err(anyhow!("Not a simple path: {}", self))
+		}
+	}
+
+	pub fn into_absolute(self) -> Result<Absolute> {
+		if self.kind() == Kind::Absolute {
+			Ok(Absolute(self))
+		} else {
+			Err(anyhow!("Not an absolute path: {}", self))
+		}
+	}
+
+	fn is_canon(p: &PathBuf) -> bool {
+		let s: &str = p.as_os_str().to_str().unwrap();
+		// treat traling slash as non-canon (unless it's "/")
+		if s.ends_with(|c| c == '/' || c == '\\') && s != "/" {
+			false
+		} else {
+			Self::is_canon_components(p.components(), true)
+		}
+	}
+
+	fn is_canon_components(mut components: Components, is_start: bool) -> bool {
+		match components.next() {
+			None => true,
+			Some(Component::CurDir) => false,
+			Some(Component::ParentDir) => is_start && Self::is_canon_components(components, is_start),
+			
+			// Once we hit a root / normal, set is_start to false
+			Some(Component::RootDir | Component::Normal(_) | Component::Prefix(_)) =>
+				Self::is_canon_components(components, false),
+		}
+	}
+
+	fn canonicalize(orig: PathBuf) -> PathBuf {
+		if Self::is_canon(&orig) {
+			orig
+		} else {
+			let mut ret = PathBuf::new();
+			for part in orig.components() {
+				match part {
+					Component::RootDir => ret.push(Component::RootDir),
+					Component::CurDir => (),
+					Component::ParentDir => {
+						if !ret.pop() {
+							ret.push("..");
+						}
+					},
+					Component::Normal(s) => ret.push(s),
+					Component::Prefix(_) => todo!(),
+				}
+			}
+			ret
+		}
+	}
+	
+	fn kind(&self) -> Kind {
+		match self.0.components().next().expect("empty path") {
+			Component::RootDir => Kind::Absolute,
+			Component::ParentDir => Kind::External,
+			Component::Normal(s) => Kind::Simple,
+			Component::CurDir | Component::Prefix(_) => panic!("Invalid CPath"),
+		}
+	}
+	
+	pub fn join(&self, other: &CPath) -> Self {
+		Self(match other.kind() {
+			Kind::Simple => {
+				// Simples can just be concatenated
+				let path: &Path = self.as_ref();
+				let mut buf = path.to_owned();
+				buf.push::<&Path>(other.as_ref());
+				buf
+			},
+
+			Kind::Absolute => {
+				// ignore self
+				other.0.to_owned()
+			},
+
+			Kind::External => {
+				// Appending an external might create any output type, depending on
+				// the kind of self and how many parent components there are
+				let path: &Path = self.as_ref();
+				let mut ret: PathBuf = path.to_owned();
+				let other_path: &Path = other.as_ref();
+				for component in other_path.components() {
+					match component {
+						Component::ParentDir => {
+							if !ret.pop() {
+								ret.push("..");
+							}
+						},
+						Component::Normal(n) => ret.push(n),
+						Component::RootDir | Component::Prefix(_) | Component::CurDir => panic!("invalid path"),
+					}
+				}
+				ret
+			},
+		})
+	}
+}
+
+impl Display for CPath {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		Display::fmt(&self.0.display(), f)
+	}
+}
+
+impl AsRef<CPath> for CPath {
+	fn as_ref(&self) -> &CPath {
+		self
+	}
+}
+
+impl TryFrom<PathBuf> for CPath {
+	type Error = Error;
+	fn try_from(p: PathBuf) -> Result<Self> {
+		let s = p.into_os_string().into_string().map_err(|_| {
+			anyhow!("Path is not valid utf8")
+		})?;
+		Ok(CPath::new(s))
+	}
+}
+
+impl Into<String> for CPath {
+	fn into(self) -> String {
+		self.0.into_os_string().into_string().unwrap()
+	}
+}
+
+impl Into<PathBuf> for CPath {
+	fn into(self) -> PathBuf {
+		self.0
+	}
+}
+
+impl AsRef<Path> for CPath {
+	fn as_ref(&self) -> &Path {
+		self.as_path()
+	}
+}
+
+impl AsRef<str> for CPath {
+	fn as_ref(&self) -> &str {
+		&self.0.as_os_str().to_str().unwrap()
+	}
+}
+
+// a CPath with only normal components (not absolute, and no leading ../)
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Simple(CPath);
+
+impl Simple {
+	pub fn project<'a>(&self, s: &'a str) -> Option<&'a str> {
+		let prefix: &str = self.0.as_ref();
+		s.strip_prefix(prefix).and_then(|s| s.strip_prefix("/"))
+	}
+}
+
+impl AsRef<CPath> for Simple {
+	fn as_ref(&self) -> &CPath {
+		&self.0
+	}
+}
+
+impl Deref for Simple {
+	type Target = CPath;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+impl Display for Simple {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		Display::fmt(&self.0, f)
+	}
+}
+
+impl TryFrom<String> for Simple {
+	type Error = Error;
+
+	fn try_from(s: String) -> Result<Self> {
+		let c = CPath::new(s);
+		if c.kind() == Kind::Simple {
+			Ok(Self(c))
+		} else {
+			Err(anyhow!("Not a simple path: {:?}", c))
+		}
+	}
+}
+
+// a CPath with leading `../` components
+pub struct External(CPath);
+
+#[derive(Debug)]
+pub struct Absolute(CPath);
+impl Absolute {
+	pub fn join(&self, other: &CPath) -> Self {
+		Absolute(self.0.join(other))
+	}
+}
+
+impl Into<PathBuf> for Absolute {
+	fn into(self) -> PathBuf {
+		self.0.into()
+	}
+}
+
+impl Deref for Absolute {
+	type Target = CPath;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Kind {
+	Simple,
+	External,
+	Absolute,
 }
 
 #[cfg(test)]
 mod test {
 	use super::*;
 	
-	fn rel(s: &str) -> Relative {
-		Relative(s.to_owned())
+	fn p(s: &str) -> CPath {
+		CPath::new(s.to_owned())
 	}
 
-	fn norm(s: &str) -> Normalized {
-		Normalized(rel(s).into())
-	}
-
-	fn scope(s: &str) -> Scope {
-		Scope::new(norm(s))
+	fn s(s: &str) -> Scope {
+		Scope::new(p(s).into_simple().unwrap())
 	}
 
 	#[test]
-	fn test_normalize() {
-		let root = Scope::root();
-		assert_eq!(rel("foo/bar/../baz").normalize_in(&root), Some(norm("foo/baz")));
-		assert_eq!(rel("foo/.//bar/../baz").normalize_in(&scope("x/y")), Some(norm("x/y/foo/baz")));
-		assert_eq!(rel("../z").normalize_in(&scope("x/y")), Some(norm("x/z")));
-		assert_eq!(rel("../../z").normalize_in(&scope("x")), None);
-		assert_eq!(rel("x/").normalize_in(&root), Some(norm("x")));
+	fn test_normalization() {
+		assert_eq!(p("foo/bar/.././/baz/"), p("foo/baz"));
+		assert_eq!(p("foo/bar/../baz").kind(), Kind::Simple);
+
+		assert_eq!(p("/foo/../foo"), p("/foo"));
+		assert_eq!(p("/foo").kind(), Kind::Absolute);
+
+		assert_eq!(p("../z").as_path(), PathBuf::from("../z"));
+		assert_eq!(p("../../z").as_path(), PathBuf::from("../../z"));
+		assert_eq!(p("../z").kind(), Kind::External);
 	}
 
-	fn test_canonical_path() {
-		let root = Scope::root();
-		let scope = scope("a/b");
-		assert_eq!(Scoped::new(scope.clone(), "../baz").canonical_path(), PathBuf::from("a/baz"));
-		assert_eq!(Scoped::new(scope.clone(), "baz/../").canonical_path(), PathBuf::from("a/b"));
-		assert_eq!(Scoped::new(scope.clone(), "../../../x").canonical_path(), PathBuf::from("../x"));
-		assert_eq!(Scoped::new(scope.clone(), "/tmp/x").canonical_path(), PathBuf::from("/tmp/x"));
+	#[test]
+	fn test_join() {
+		let scope = Scope::new(p("x/y").into_simple().unwrap());
+		let join = |s| Scoped::new(scope.clone(), p(s)).as_cpath();
+		assert_eq!(join("foo/bar"), p("x/y/foo/bar"));
+		assert_eq!(join("../z"), p("x/z"));
+		assert_eq!(join("../../../z"), p("../z"));
 	}
 }

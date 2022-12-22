@@ -10,7 +10,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::BuildModule, path_util::Scoped};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::BuildModule, path_util::{Scoped, CPath}};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -179,9 +179,9 @@ pub struct WasmModule {
 impl BuildModule for WasmModule {
 	type Compiled = Module;
 
-	fn compile(engine: &Engine, path: &str) -> Result<Module> {
+	fn compile(engine: &Engine, path: &CPath) -> Result<Module> {
 		debug!("Loading {}", path);
-		Ok(Module::from_file(&engine, &path)?)
+		Ok(Module::from_file(&engine, path.as_path())?)
 	}
 	
 	fn load(engine: &Engine, module: &Module, project: ProjectRef<Self>) -> Result<WasmModule> {

@@ -5,12 +5,12 @@ use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::{FunctionSpec, Config}};
 
-use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Normalized, AnyPath, Scope, Scoped}};
+use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Simple, Scope, Scoped, CPath}};
 
 // A dependency request stripped of information which only affects the return value (not the built item)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum DependencyKey {
-	FileDependency(FileDependencyKey),
+	FileDependency(CPath),
 	WasmCall(FunctionSpecKey),
 	EnvVar(String),
 	FileSet(String),
@@ -31,7 +31,7 @@ impl DependencyKey {
 		let Scoped { scope, value: req } = scoped_req;
 		match req {
 			DependencyRequest::FileDependency(v) =>
-				DependencyKey::FileDependency(FileDependencyKey::from(v.path, &scope)),
+				DependencyKey::FileDependency(Scoped::new(scope, CPath::new(v.path)).as_cpath()),
 
 			DependencyRequest::WasmCall(v) =>
 				DependencyKey::WasmCall(FunctionSpecKey::from(v, &scope)),
@@ -42,7 +42,7 @@ impl DependencyKey {
 			DependencyRequest::Universe => DependencyKey::Universe,
 		}
 	}
-
+	
 	// When we need to reevaluate a dependency, we turn its DB key into a buildable
 	// request. Most of the time that's a simple request with a root scope, except for a
 	// WASM call which embeds its own scope (since it matters where you call a function from).
@@ -73,34 +73,9 @@ impl DependencyKey {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum FileDependencyKey {
-	Simple(Normalized),
-	Complex(String), // may be relative or absolute
-}
-
-impl FileDependencyKey {
-	pub fn from(s: String, scope: &Scope) -> Self {
-		let path = AnyPath::new(s);
-		let normalized = path.normalize_in_opt(scope);
-		todo!("make sure Complex is canonical?");
-		normalized.map(FileDependencyKey::Simple)
-			.unwrap_or_else(|| FileDependencyKey::Complex(path.into()))
-	}
-}
-
-impl Into<String> for FileDependencyKey {
-	fn into(self) -> String {
-		match self {
-			FileDependencyKey::Simple(v) => v.into(),
-			FileDependencyKey::Complex(v) => v,
-		}
-	}
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct FunctionSpecKey {
 	pub fn_name: String,
-	pub scope: Option<Normalized>,
+	pub scope: Option<Simple>,
 	pub rel_path: String,
 	pub config: Config,
 }
@@ -109,7 +84,7 @@ impl FunctionSpecKey {
 	pub fn from(s: FunctionSpec, scope: &Scope) -> Self {
 		let FunctionSpec { fn_name, module, config } = s;
 		let module = module.unwrap_or_else(|| panic!("Module missing; this is a bug"));
-		Self { fn_name, scope: scope.into_normalized().map(|n| n.clone()), rel_path: module, config }
+		Self { fn_name, scope: scope.into_simple().map(|n| n.clone()), rel_path: module, config }
 	}
 }
 
