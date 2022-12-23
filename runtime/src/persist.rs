@@ -1,11 +1,11 @@
 use log::*;
-use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::Path};
+use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::{FunctionSpec, Config}};
 
-use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Simple, Scope, Scoped, CPath}};
+use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Simple, Scope, Scoped, CPath}, module::BuildModule};
 
 // A dependency request stripped of information which only affects the return value (not the built item)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -97,18 +97,19 @@ pub struct PersistTarget {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistFile {
 	pub mtime: u128,
+	pub target: Option<Simple>,
 	// TODO add hash for checksumming
 }
 impl PersistFile {
-	pub fn from_stat(stat: fs::Metadata) -> Result<Self> {
+	pub fn from_stat(stat: fs::Metadata, target: Option<Simple>) -> Result<Self> {
 		let mtime = stat.modified()?.duration_since(UNIX_EPOCH)?.as_millis();
-		Ok(Self { mtime })
+		Ok(Self { mtime, target })
 	}
 
-	pub fn from_path<P: AsRef<Path>>(p: P) -> Result<Option<Self>> {
+	pub fn from_path<P: AsRef<Path>>(p: P, target: Option<Simple>) -> Result<Option<Self>> {
 		let p = p.as_ref();
 		match fs::symlink_metadata(p) {
-			Result::Ok(stat) => Ok(Some(Self::from_stat(stat)?)),
+			Result::Ok(stat) => Ok(Some(Self::from_stat(stat, target)?)),
 			Result::Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
 			Result::Err(err) => Err(err).with_context(|| format!("Reading {}", p.display())),
 		}
@@ -326,7 +327,8 @@ impl PersistDependency {
 		}
 	}
 
-	pub fn into_response(self, request: &DependencyRequest) -> Result<DependencyResponse> {
+	// TODO should this be a method on Project now that it needs access to one?
+	pub fn into_response<M: BuildModule>(self, project: &Project<M>, request: &DependencyRequest) -> Result<DependencyResponse> {
 		use PersistDependency::*;
 		Ok(match self {
 			File(state) => match request {
@@ -334,7 +336,20 @@ impl PersistDependency {
 					match file_dep.ret {
 						FileDependencyType::Unit => DependencyResponse::Unit,
 						FileDependencyType::Existence => DependencyResponse::Bool(state.is_some()),
-						FileDependencyType::Contents => DependencyResponse::Str(fs::read_to_string(&file_dep.path)?),
+						FileDependencyType::Contents => {
+							let state = state.ok_or_else(|| anyhow!("No file produced for target {}", &file_dep.path))?;
+							let contents = if let Some(ref target) = state.target {
+								let full_path = project.dest_path(&Scoped::new(Scope::root(), target.to_owned()))?;
+								fs::read_to_string(full_path.as_ref()).with_context(||
+									format!("Can't read target {} (from {})", &file_dep.path, &full_path)
+								)
+							} else {
+								fs::read_to_string(&file_dep.path).with_context(||
+									format!("Can't read {}", &file_dep.path)
+								)
+							};
+							DependencyResponse::Str(contents?)
+						},
 					}
 				},
 				other => panic!("file response with non-file request: {:?}", other),

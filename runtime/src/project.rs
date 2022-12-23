@@ -37,7 +37,7 @@ pub type ProjectHandle<M> = MutexHandle<Project<M>>;
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub struct ActiveBuildToken(u32);
 
-const NEXT_TOKEN: atomic::AtomicU32 = atomic::AtomicU32::new(0);
+static NEXT_TOKEN: atomic::AtomicU32 = atomic::AtomicU32::new(0);
 
 impl ActiveBuildToken {
 	pub fn generate() -> Self {
@@ -372,7 +372,7 @@ impl<M: BuildModule> Project<M> {
 								Ok((project, persist_dep))
 							}).with_context(ctx)?;
 
-							let rules: Vec<Rule> = match persist_dep.into_response(&request)? {
+							let rules: Vec<Rule> = match persist_dep.into_response(&project_ret, &request)? {
 								DependencyResponse::Str(json) => serde_json::from_str(&json)?,
 								other => {
 									return Err(anyhow!("Unexpected wasm call response: {:?}", other));
@@ -389,13 +389,15 @@ impl<M: BuildModule> Project<M> {
 						.unwrap_or_else(|| name.scope.to_owned());
 
 					handle.with_write(|writeable| {
-						*writeable = MutableRule::Nested(Nested {
+						let nested = MutableRule::Nested(Nested {
 							rules: rules.into_iter()
 								.map(|rule| ProjectRule::from_rule(rule, &name.scope))
 								.collect::<Result<Vec<ProjectRule>>>()?,
 							relative_scope: include.relative_scope,
 							absolute_scope,
 						});
+						debug!("Import produced these rules: {:?}", &nested);
+						*writeable = nested;
 						Ok(())
 					})?;
 
@@ -491,7 +493,7 @@ impl<M: BuildModule> Project<M> {
 			CacheAware::Fresh(dep) => dep,
 			CacheAware::Stale(ctx) => {
 				let build_token = ActiveBuildToken::generate();
-				debug!("created build token {:?} beneath {:?} for {:?}", build_token, reason.parent(), &key);
+				debug!("created build token {:?} (scoped {:?}) beneath {:?} for {:?}", build_token, &scope, reason.parent(), &key);
 
 				// Need to record the scope so WASM requests can pull it out. This seems a bit odd but it works for now
 				project.active_tasks.insert(build_token, Scoped::new(scope.to_owned(), Default::default()));
@@ -554,7 +556,7 @@ impl<M: BuildModule> Project<M> {
 						let normalized = name.map_ref(|s| CPath::new((*s).to_owned()));
 						
 						// TODO tmp_path needs to be scope aware!
-						let tmp_path = project.tmp_path(&found_target.name)?;
+						let tmp_path: PathBuf = project.tmp_path(&found_target.name)?.into();
 						path_util::rm_rf_and_ensure_parent(&tmp_path)?;
 
 						let target = &found_target.target;
@@ -577,7 +579,7 @@ impl<M: BuildModule> Project<M> {
 							Ok(())
 						})?;
 						
-						let dest_path = project.dest_path(&found_target.name)?;
+						let dest_path: PathBuf = project.dest_path(&found_target.name)?.into();
 						path_util::rm_rf_and_ensure_parent(&dest_path)?;
 						match path_util::lstat_opt::<&Path>(tmp_path.as_ref())? {
 							Some(_) => {
@@ -591,7 +593,7 @@ impl<M: BuildModule> Project<M> {
 						}
 
 						Persist::Target(PersistTarget {
-							file: PersistFile::from_path(&dest_path)?,
+							file: PersistFile::from_path(&dest_path, Some(found_target.name.flatten()))?,
 							deps: project.collect_deps(build_token),
 						})
 					} else {
@@ -603,7 +605,7 @@ impl<M: BuildModule> Project<M> {
 							_ => {
 								// treat it as a source file
 								let scoped_path = name.map_ref(|s| CPath::new((*s).to_owned()));
-								let persist_file = PersistFile::from_path(&scoped_path.as_cpath())?;
+								let persist_file = PersistFile::from_path(&scoped_path.as_cpath(), None)?;
 
 								// Only allow a missing file if we are explicitly testing for existence
 								if persist_file.is_none() && file_dependency.ret != FileDependencyType::Existence {
@@ -696,7 +698,11 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	pub fn scope_for(&self, token: ActiveBuildToken) -> Scope {
-		self.active_tasks.get(&token).map(|x| x.scope.to_owned()).unwrap_or_else(Scope::root)
+		let scope = self.active_tasks.get(&token).map(|x| x.scope.to_owned()).unwrap_or_else(||
+			panic!("Build task {:?} has no active scope", token)
+		);
+		debug!("Returning scope {:?} for build {:?}", &scope, token);
+		scope
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
@@ -754,19 +760,18 @@ impl<M: BuildModule> Project<M> {
 		self.build_cache.invalidate()
 	}
 	
-	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<PathBuf> {
-		let mut ret: PathBuf = self.root.to_owned().into();
-		ret.push(".trou");
+	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<Simple> {
+		let mut ret: PathBuf = PathBuf::from(".trou");
 		ret.push(base);
-		ret.push::<&CPath>(&name.value);
-		Ok(ret)
+		ret.push::<&CPath>(&name.as_cpath());
+		CPath::try_from(ret)?.into_simple()
 	}
 
-	fn tmp_path(&self, name: &Scoped<Simple>) -> Result<PathBuf> {
+	fn tmp_path(&self, name: &Scoped<Simple>) -> Result<Simple> {
 		self._path("tmp", name)
 	}
 
-	fn dest_path(&self, name: &Scoped<Simple>) -> Result<PathBuf> {
+	pub fn dest_path(&self, name: &Scoped<Simple>) -> Result<Simple> {
 		self._path("out", name)
 	}
 

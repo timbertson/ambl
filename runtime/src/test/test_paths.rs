@@ -12,6 +12,12 @@ use super::test_module::DEFAULT_BUILD_FN;
 #[serial]
 fn test_paths_of_nested_module() -> Result<()> {
 	TestProject::in_tempdir(|p| {
+		/*
+		- root (file, target)
+		
+		- subdir:
+		  - a (defined by nested_rule_m in ./)
+		*/
 		let nested_build_m = p.new_module().set_name("nested-build").builder(|p, ctx| {
 			ctx.build("../root")?;
 			p.record(format!(
@@ -33,9 +39,14 @@ fn test_paths_of_nested_module() -> Result<()> {
 		});
 
 		let nested_rule_m = p.new_module().rule_fn(|m, ctx| {
-			vec!(target("a", build_fn("build").module("nested-build")))
+			// TODO how do we discern packaged targets vs real targets?
+			// default namespace is the project / scope, but modules
+			// may typically come as a set.
+			// It's particularly awkward for a module to need to know its own path.
+			// Perhaps ctx should have a rel_to_self function which prefixes the scope,
+			// or physical module path?
+			vec!(target("a", build_fn("build").module("../nested-build")))
 		});
-
 		p.inject_rule(include(module(&nested_rule_m.name).scope("subdir")));
 		p.inject_module(nested_rule_m);
 		p.inject_module(nested_build_m);

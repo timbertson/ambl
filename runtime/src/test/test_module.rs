@@ -22,7 +22,9 @@ impl Log {
 	}
 	
 	pub fn record<S: ToString>(&self, s: S) {
-		self.0.lock().unwrap().push(s.to_string());
+		let s = s.to_string();
+		debug!("Recording event: {}", &s);
+		self.0.lock().unwrap().push(s);
 	}
 	
 	pub fn is_empty(&self) -> bool { self.0.lock().unwrap().is_empty() }
@@ -200,11 +202,11 @@ impl Invoker for TestInvoker {
 		let map = arc.lock().unwrap();
 		let project = map.get(&self.token).ok_or_else(|| format!("No invoke reference found for token {:?}", &self.token)).unwrap().lock();
 		drop(map);
-
-		debug!("TestInvoker building {:?}", &request);
-		let scoped_request = Scoped::new(Scope::root(), &request);
-		let dep = Project::build(project, scoped_request, &BuildReason::Dependency(self.token))?.1;
-		dep.into_response(&request)
+		let scope = project.scope_for(self.token);
+		let scoped_request = Scoped::new(scope, &request);
+		debug!("TestInvoker building {:?}", &scoped_request);
+		let (project, dep) = Project::build(project, scoped_request, &BuildReason::Dependency(self.token))?;
+		dep.into_response(&project, &request)
 	}
 }
 
@@ -220,7 +222,7 @@ pub struct TestProject<'a> {
 	monotonic_clock: AtomicUsize,
 }
 
-const FAKE_FILE: PersistFile = PersistFile { mtime: 0 };
+const FAKE_FILE: PersistFile = PersistFile { mtime: 0, target: None };
 
 impl<'a> TestProject<'a> {
 	fn reset(&self) {
@@ -327,7 +329,10 @@ impl<'a> TestProject<'a> {
 
 	pub fn touch_fake<S: Into<String>>(&self, v: S) -> &Self {
 		let mut p = self.lock();
-		let stat = PersistFile { mtime: self.monotonic_clock.fetch_add(1, Ordering::Relaxed) as u128 };
+		let stat = PersistFile {
+			mtime: self.monotonic_clock.fetch_add(1, Ordering::Relaxed) as u128,
+			target: None,
+		};
 		p.inject_cache(
 			DependencyKey::FileDependency(CPath::new(v.into())),
 			Persist::File(Some(stat))
@@ -353,15 +358,17 @@ impl<'a> TestProject<'a> {
 			ret,
 		});
 		let scoped_req = Scoped::new(Scope::root(), &req);
-		let (project, result) = Project::build(project, scoped_req, &BuildReason::Explicit)?;
+		let (project, result) = Project::build(project, scoped_req, &BuildReason::Explicit)
+			.with_context(|| format!("Building {:?}", &req))?;
 
+		let response = result.into_response(&project, &req);
 		drop(project);
 		println!("=== end build_file({})\n", f);
 
 		// testcases run multiple builds, make sure we don't short-circuit between them
 		self.reset();
 
-		result.into_response(&req)
+		response
 	}
 
 	pub fn write_file<F: AsRef<Path>, S: AsRef<[u8]>>(&self, path: F, contents: S) -> Result<&Self> {

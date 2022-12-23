@@ -206,8 +206,8 @@ impl BuildModule for WasmModule {
 				let token = ActiveBuildToken::from_raw(token);
 				let scope = project.scope_for(token);
 				let scoped_request = Scoped::new(scope, &request);
-				let (_, persist) = Project::build(project, scoped_request, &BuildReason::Dependency(token))?;
-				persist.into_response(&request)
+				let (project, persist) = Project::build(project, scoped_request, &BuildReason::Dependency(token))?;
+				persist.into_response(&project, &request)
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {

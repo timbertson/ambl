@@ -125,6 +125,10 @@ impl<T> Scoped<T> {
 	pub fn new(scope: Scope, value: T) -> Self {
 		Self { scope, value }
 	}
+
+	pub fn root(value: T) -> Self {
+		Self { scope: Scope::root(), value }
+	}
 	
 	pub fn replace_value<R>(self, value: R) -> Scoped<R> {
 		Scoped { scope: self.scope, value }
@@ -166,6 +170,16 @@ impl<P: AsRef<CPath>> Scoped<P> {
 		match self.scope.0 {
 			None => self.value.as_ref().to_owned(),
 			Some(ref scope) => scope.0.join(self.value.as_ref()),
+		}
+	}
+}
+
+impl Scoped<Simple> {
+	// flatten a scoped simple into a single simple
+	pub fn flatten(&self) -> Simple {
+		match self.scope.0 {
+			None => self.value.to_owned(),
+			Some(ref scope) => Simple(scope.0.join(&self.value)),
 		}
 	}
 }
@@ -367,6 +381,12 @@ impl Deref for Simple {
 
 	fn deref(&self) -> &Self::Target {
 		&self.0
+	}
+}
+
+impl Into<PathBuf> for Simple {
+	fn into(self) -> PathBuf {
+		self.0.into()
 	}
 }
 

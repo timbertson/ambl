@@ -50,6 +50,9 @@ impl Sandbox {
 							dest.insert(rel);
 						},
 						Persist::Target(target) => {
+							if let Some(output) = target.file.as_ref().and_then(|f| f.target.to_owned()) {
+								dest.insert(project.dest_path(&Scoped::root(output))?);
+							}
 							// TODO don't include transitive deps if there is a checksum
 							for (key, _) in target.deps.deps.iter() {
 								Self::collect_paths(project, dest, key)?;
