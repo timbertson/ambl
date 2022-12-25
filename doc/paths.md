@@ -51,3 +51,9 @@ Theoretically it ought to be `./`, but from a physical path perspective (if you 
 This is an annoying problem, so trou (for now) takes the simple approach: all paths are normalized _without_ regard to symlinks. `x/y/..` normalizes to `x`, regardless of whether `y` is a symlink (or even exists).
 
 This normalization is only done when trou knows that something is a path. So it applies to source + target dependencies, but not to arbitrary strings you pass to a command.
+
+# Scopes in more detail
+
+The simplest way to think about scopes is for embedding subprojects. If you have a project that is built with trou, then you import `foo/trou.yml` with scope `foo`, everything will build correctly. Targets within `foo` will inherit the `foo` scope.
+
+The other common way to use scopes is to namespace a module (or sequence of modules). e.g. say I have a python plugin. I might import it and scope under `python/` in order to cleanly separate my build targets. Note that any plain dependency paths referenced from this module (like `setup.py`) will resolve to `python/setup.py`. In general reusable modules should accept some kind of configuration so that they can build files at a location which don't happen to match their scope (namespace).

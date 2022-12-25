@@ -276,6 +276,8 @@ impl<M: BuildModule> Project<M> {
 	Instead, we rely on the fact that _finding_ the target for a given path will
 	depend on the result of its get_rules(). That is itself a first class cacheable
 	target, which depends on the module file itself.
+
+	Note: name is guaranteed to be a valid Simple, but we use a str for efficient slicing
 	*/
 	fn expand_and_filter_rule<'a, 'b, 'c>(
 		project: ProjectMutex<'a, M>,
@@ -411,16 +413,16 @@ impl<M: BuildModule> Project<M> {
 		}
 	}
 
-	pub fn target<'a, 'b>(
+	pub fn target<'a>(
 		project: ProjectMutex<'a, M>,
-		name: &Scoped<&'b str>,
+		name: &Simple,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
 		let root_rule = Arc::clone(&project.root_rule);
 		let (project, target) = Self::expand_and_filter_rule(
 			project,
 			&root_rule,
-			&name)?;
-		debug!("target for {}: {:?}", &name.value, target);
+			&Scoped::root(name.as_str()))?;
+		debug!("target for {}: {:?}", &name, target);
 		Ok((project, target))
 	}
 
@@ -450,7 +452,7 @@ impl<M: BuildModule> Project<M> {
 	// - cached, but does not need rebuilding (after potentially building dependencies)
 	fn build_with_cache_awareness<'a, Ctx, ComputeCtx, NeedsRebuild, Build>(
 		mut project: ProjectMutex<'a, M>,
-		scope: &Scope,
+		// scope: &Scope,
 		reason: &BuildReason,
 		key: DependencyKey,
 		get_ctx: ComputeCtx,
@@ -493,10 +495,7 @@ impl<M: BuildModule> Project<M> {
 			CacheAware::Fresh(dep) => dep,
 			CacheAware::Stale(ctx) => {
 				let build_token = ActiveBuildToken::generate();
-				debug!("created build token {:?} (scoped {:?}) beneath {:?} for {:?}", build_token, &scope, reason.parent(), &key);
-
-				// Need to record the scope so WASM requests can pull it out. This seems a bit odd but it works for now
-				project.active_tasks.insert(build_token, Scoped::new(scope.to_owned(), Default::default()));
+				debug!("created build token {:?} beneath {:?} for {:?}", build_token, reason.parent(), &key);
 
 				let (project_ret, built) = build_fn(project, &ctx, build_token)?;
 				project = project_ret;
@@ -520,8 +519,16 @@ impl<M: BuildModule> Project<M> {
 
 		match request.value {
 			DependencyRequest::FileDependency(file_dependency) => {
-				let name = request.with_value(file_dependency.path.as_str());
-				let get_target = |project| Project::target(project, &name);
+				let file_cpath = request.with_value(CPath::new(file_dependency.path.to_owned())).as_cpath();
+				let file_simple = file_cpath.into_simple_or_self();
+				let get_target = |project| match file_simple {
+					Result::Ok(ref simple) => Project::target(project, simple),
+					Result::Err(_) => Ok((project, None)),
+				};
+				let cpath_ref = match file_simple {
+					Result::Ok(ref simple) => simple.as_ref(),
+					Result::Err(ref cpath) => cpath,
+				};
 
 				let key: DependencyKey = DependencyKey::from(request.map_ref(|r| (*r).to_owned()));
 
@@ -534,10 +541,19 @@ impl<M: BuildModule> Project<M> {
 					Ok((project, true))
 				};
 
-				let do_build = |mut project, found_target: &Option<FoundTarget>, build_token| {
+				let do_build = |project, found_target: &Option<FoundTarget>, build_token| {
+					// I need a type annotation, but I don't want to specify the lifetimes x_x
+					let mut project: Mutexed<Project<M>> = project;
 					let persist = if let Some(found_target) = &found_target {
+
+						// Need to record the scope so WASM requests can pull it out.
+						// This seems suboptimal, and we repeat it for WASM calls too
+						project.active_tasks.insert(build_token,
+							Scoped::new(found_target.name.scope.to_owned(), Default::default()));
+
 						println!("# {}", &found_target.name.as_cpath());
 						let child_reason = BuildReason::Dependency(build_token);
+
 
 						// TODO track which module the target was defined in
 						let module_path: Scoped<CPath> = found_target.name.with_value(
@@ -553,9 +569,6 @@ impl<M: BuildModule> Project<M> {
 							&child_reason)?;
 						project = project_ret;
 						
-						let normalized = name.map_ref(|s| CPath::new((*s).to_owned()));
-						
-						// TODO tmp_path needs to be scope aware!
 						let tmp_path: PathBuf = project.tmp_path(&found_target.name)?.into();
 						path_util::rm_rf_and_ensure_parent(&tmp_path)?;
 
@@ -563,13 +576,15 @@ impl<M: BuildModule> Project<M> {
 
 						project.unlocked_block(|project_handle| {
 							let ctx = TargetCtx::new(
-								name.value.to_owned(),
+								found_target.name.value.as_str().to_owned(),
 								tmp_path.to_owned(),
 								target.build.config.0.to_owned(),
 								build_token.raw());
 
 							// TODO can we have a FunctionSpec with references?
 							debug!("calling {:?}", target.build);
+							
+							// TODO can this be a literal FnSpec build? That might reduce code duplication
 							let bytes = wasm_module.call(& FunctionSpec {
 								fn_name: target.build.fn_name.to_owned(),
 								module: None, // not needed at this point; TODO separate type without a module?
@@ -600,16 +615,15 @@ impl<M: BuildModule> Project<M> {
 						debug!("Treating dependency as a plain file: {:?}", &request);
 						match reason {
 							BuildReason::Explicit => {
-								return Err(anyhow!("Not a buildable target: {}", name))
+								return Err(anyhow!("Not a buildable target: {}", cpath_ref))
 							},
 							_ => {
 								// treat it as a source file
-								let scoped_path = name.map_ref(|s| CPath::new((*s).to_owned()));
-								let persist_file = PersistFile::from_path(&scoped_path.as_cpath(), None)?;
+								let persist_file = PersistFile::from_path(cpath_ref, None)?;
 
 								// Only allow a missing file if we are explicitly testing for existence
 								if persist_file.is_none() && file_dependency.ret != FileDependencyType::Existence {
-									return Err(anyhow!("No such file or directory: {}", name));
+									return Err(anyhow!("No such file or directory: {}", cpath_ref));
 								}
 
 								Persist::File(persist_file)
@@ -619,8 +633,10 @@ impl<M: BuildModule> Project<M> {
 					Ok((project, persist))
 				};
 				
+				// NOTE: scope needs to be for the TARGET, not the name.
+				// But only a buildable has that....
 				Self::build_with_cache_awareness(
-					project, &name.scope, reason, key,
+					project, reason, key,
 					get_target, needs_rebuild, do_build)
 			},
 
@@ -642,7 +658,14 @@ impl<M: BuildModule> Project<M> {
 					}
 				};
 
-				let do_build = |mut project, _ctx: &(), build_token| {
+				let do_build = |project, _ctx: &(), build_token| {
+					let mut project: Mutexed<Project<M>> = project;
+
+					// Need to record the scope so WASM requests can pull it out.
+					// This seems suboptimal, and we repeat it for build invocations too
+					project.active_tasks.insert(build_token,
+						Scoped::new(request.scope.to_owned(), Default::default()));
+
 					let file_dependency = FileDependency::new(rel_path.to_owned());
 					let (project_ret, mut wasm_module) = Self::load_module_inner(
 						project,
@@ -668,7 +691,7 @@ impl<M: BuildModule> Project<M> {
 
 				let get_ctx = |project| Ok((project, ()));
 				Self::build_with_cache_awareness(
-					project, &request.scope, reason, dependency_key,
+					project, reason, dependency_key,
 					get_ctx, needs_rebuild, do_build)
 			},
 			DependencyRequest::FileSet(_) => todo!("handle FileSet"),

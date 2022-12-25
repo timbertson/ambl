@@ -214,6 +214,14 @@ impl CPath {
 		}
 	}
 
+	pub fn into_simple_or_self(self) -> Result<Simple, Self> {
+		if self.kind() == Kind::Simple {
+			Result::Ok(Simple(self))
+		} else {
+			Result::Err(self)
+		}
+	}
+
 	pub fn into_absolute(self) -> Result<Absolute> {
 		if self.kind() == Kind::Absolute {
 			Ok(Absolute(self))

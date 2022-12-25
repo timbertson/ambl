@@ -12,12 +12,7 @@ use super::test_module::DEFAULT_BUILD_FN;
 #[serial]
 fn test_paths_of_nested_module() -> Result<()> {
 	TestProject::in_tempdir(|p| {
-		/*
-		- root (file, target)
-		
-		- subdir:
-		  - a (defined by nested_rule_m in ./)
-		*/
+		// Nested buil is a module at the root, but which will be invoked from `subdir/` scope.
 		let nested_build_m = p.new_module().set_name("nested-build").builder(|p, ctx| {
 			ctx.build("../root")?;
 			p.record(format!(
@@ -29,6 +24,7 @@ fn test_paths_of_nested_module() -> Result<()> {
 			Ok(())
 		});
 		
+		// add a simple root builder for nested-build to call
 		p.target_builder("root", |p, ctx| {
 			p.record(format!(
 				"root build of {} with dest {}",
@@ -38,15 +34,11 @@ fn test_paths_of_nested_module() -> Result<()> {
 			Ok(())
 		});
 
+		// define a target (which we'll scope under `subdir/`) which is built by nested-build
 		let nested_rule_m = p.new_module().rule_fn(|m, ctx| {
-			// TODO how do we discern packaged targets vs real targets?
-			// default namespace is the project / scope, but modules
-			// may typically come as a set.
-			// It's particularly awkward for a module to need to know its own path.
-			// Perhaps ctx should have a rel_to_self function which prefixes the scope,
-			// or physical module path?
 			vec!(target("a", build_fn("build").module("../nested-build")))
 		});
+
 		p.inject_rule(include(module(&nested_rule_m.name).scope("subdir")));
 		p.inject_module(nested_rule_m);
 		p.inject_module(nested_build_m);
@@ -54,12 +46,12 @@ fn test_paths_of_nested_module() -> Result<()> {
 		p.build_file("subdir/a")?;
 		let cwd = std::env::current_dir()?;
 		eq!(p.log(), vec!(
-			format!("root build of root with dest {}/.trou/tmp/root", cwd.display()),
-			format!("nested build of a with dest {}/.trou/tmp/subdir/a", cwd.display())
+			format!("root build of root with dest .trou/tmp/root"),
+			format!("nested build of a with dest .trou/tmp/subdir/a")
 		));
 
-		eq!(fs::read_to_string(format!("{}/.trou/out/subdir/a", cwd.display()))?, "nested!");
-		eq!(fs::read_to_string(format!("{}/.trou/out/root", cwd.display()))?, "");
+		eq!(fs::read_to_string(cwd.join(".trou/out/subdir/a"))?, "nested!");
+		eq!(fs::read_to_string(cwd.join(".trou/out/root"))?, "");
 
 		Ok(())
 	})
