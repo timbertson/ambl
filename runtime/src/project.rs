@@ -209,7 +209,7 @@ impl<M: BuildModule> Project<M> {
 	) -> Result<ProjectMutexPair<'a, M, M>> {
 		debug!("Loading module {:?} for {:?}", full_path, reason);
 		// First, build the module file itself and register it as a dependency.
-		let file_dependency = BuildRequest::FileDependency(FileDependency::new(full_path.0.as_str().to_owned()));
+		let file_dependency = BuildRequest::FileDependency(ResolvedFileDependency::new(full_path.to_owned()));
 		let (mut project, module_built) = Self::build(project, Scoped::root(&file_dependency), reason)?;
 
 		result_block(|| {
@@ -246,7 +246,7 @@ impl<M: BuildModule> Project<M> {
 		let full_path = path.as_cpath();
 		debug!("Loading YAML rules {:?} for {:?}", full_path, reason);
 		// First, build the module itself and register it as a dependency.
-		let request = BuildRequest::FileDependency(FileDependency::new(path.value.to_owned().into()));
+		let request = BuildRequest::FileDependency(ResolvedFileDependency::new(full_path.clone()));
 		let scoped_request = path.with_value(request);
 		let (mut project, module_built) = Self::build(project, scoped_request.as_ref(), reason)?;
 		
@@ -539,8 +539,7 @@ impl<M: BuildModule> Project<M> {
 		
 		match request.value {
 			BuildRequest::FileDependency(file_dependency) => {
-				let file_cpath = request.with_value(CPath::new(file_dependency.path.to_owned())).as_cpath();
-				let file_simple = file_cpath.0.into_simple_or_self();
+				let file_simple = file_dependency.path.0.clone().into_simple_or_self();
 				let get_target = |project| match file_simple {
 					Result::Ok(ref simple) => Project::target(project, simple),
 					Result::Err(_) => Ok((project, None)),
@@ -870,7 +869,7 @@ impl BuildFnCall {
 #[derive(Debug, Clone)]
 // Like DependencyRequest but with more detailed FnCall
 pub enum BuildRequest {
-	FileDependency(FileDependency),
+	FileDependency(ResolvedFileDependency),
 	WasmCall(BuildFnCall),
 	EnvVar(String),
 	FileSet(String),
@@ -881,7 +880,12 @@ pub enum BuildRequest {
 impl BuildRequest {
 	pub fn from(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &Scope) -> Result<Self> {
 		Ok(match req {
-			DependencyRequest::FileDependency(v) => Self::FileDependency(v),
+			DependencyRequest::FileDependency(v) => {
+				// TODO seems silly to go via a clone
+				let FileDependency { path, ret } = v;
+				let path = Scoped::new(scope.clone(), CPath::new(path)).as_cpath();
+				Self::FileDependency(ResolvedFileDependency { path, ret })
+			},
 			DependencyRequest::WasmCall(v) => Self::WasmCall(BuildFnCall::from(v, source_module, scope.to_owned())?),
 			DependencyRequest::EnvVar(v) => Self::EnvVar(v),
 			DependencyRequest::FileSet(v) => Self::FileSet(v),
@@ -890,11 +894,22 @@ impl BuildRequest {
 		})
 	}
 	
-	pub fn file_dependency(&self) -> Option<&FileDependency> {
+	pub fn file_dependency(&self) -> Option<&ResolvedFileDependency> {
 		match self {
 			BuildRequest::FileDependency(ref v) => Some(v),
 			_ => None,
 		}
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ResolvedFileDependency {
+	pub path: Unscoped,
+	pub ret: FileDependencyType,
+}
+impl ResolvedFileDependency {
+	pub fn new(path: Unscoped) -> Self {
+		Self { path, ret: FileDependencyType::Unit }
 	}
 }
 

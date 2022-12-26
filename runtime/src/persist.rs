@@ -5,7 +5,7 @@ use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::{FunctionSpec, Config}};
 
-use crate::{project::{ProjectRef, Project, ProjectHandle, BuildRequest, BuildFnCall}, path_util::{Simple, Scope, Scoped, CPath, Unscoped}, module::BuildModule};
+use crate::{project::{ProjectRef, Project, ProjectHandle, BuildRequest, BuildFnCall, ResolvedFileDependency}, path_util::{Simple, Scope, Scoped, CPath, Unscoped}, module::BuildModule};
 
 // A dependency request stripped of information which only affects the return value (not the built item)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -27,8 +27,7 @@ impl DependencyKey {
 	pub fn from(scoped_req: Scoped<BuildRequest>) -> Self {
 		let Scoped { scope, value: req } = scoped_req;
 		match req {
-			BuildRequest::FileDependency(v) =>
-				DependencyKey::FileDependency(Scoped::new(scope, CPath::new(v.path)).as_cpath()),
+			BuildRequest::FileDependency(v) => DependencyKey::FileDependency(v.path),
 
 			BuildRequest::WasmCall(v) => {
 				let BuildFnCall { scope, fn_name, full_module, config } = v;
@@ -50,10 +49,7 @@ impl DependencyKey {
 	pub fn into_request(self) -> Scoped<BuildRequest> {
 		let root = |req| Scoped::new(Scope::root(), req);
 		match self {
-			DependencyKey::FileDependency(v) => root(BuildRequest::FileDependency(FileDependency {
-				path: v.0.into(),
-				ret: FileDependencyType::Unit
-			})),
+			DependencyKey::FileDependency(v) => root(BuildRequest::FileDependency(ResolvedFileDependency::new(v))),
 
 			DependencyKey::WasmCall(v) => {
 				let FunctionSpecKey { fn_name, scope, full_module, config } = v;
@@ -326,7 +322,7 @@ impl PersistDependency {
 	}
 
 	// TODO should this be a method on Project now that it needs access to one?
-	pub fn into_response<M: BuildModule>(self, project: &Project<M>, file_dependency: Option<&FileDependency>) -> Result<DependencyResponse> {
+	pub fn into_response<M: BuildModule>(self, project: &Project<M>, file_dependency: Option<&ResolvedFileDependency>) -> Result<DependencyResponse> {
 		use PersistDependency::*;
 		Ok(match self {
 			File(state) => {
@@ -342,7 +338,7 @@ impl PersistDependency {
 								format!("Can't read target {} (from {})", &file_dependency.path, &full_path)
 							)
 						} else {
-							fs::read_to_string(&file_dependency.path).with_context(||
+							fs::read_to_string(&file_dependency.path.0).with_context(||
 								format!("Can't read {}", &file_dependency.path)
 							)
 						};
