@@ -24,7 +24,7 @@ use trou_common::rule::*;
 use wasmtime::*;
 
 use crate::{err::*, path_util};
-use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath};
+use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped};
 use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::Sandbox;
@@ -58,6 +58,7 @@ pub struct Nested {
 	rules: Vec<ProjectRule>,
 	relative_scope: Option<Simple>,
 	absolute_scope: Scope,
+	module_path: Option<Unscoped>,
 }
 impl Nested {
 	fn projection<'a>(&'a self, name: &'a str) -> Option<Scoped<&'a str>> {
@@ -97,7 +98,6 @@ impl ScopedInclude {
 #[derive(Clone, Debug)]
 pub enum ProjectRule {
 	// Immutable types
-	Alias(Alias),
 	Target(Target),
 	Mutable(RwRef<MutableRule>),
 }
@@ -117,7 +117,6 @@ pub enum MutableRule {
 impl ProjectRule {
 	fn from_rule(rule: Rule, base_scope: &Scope) -> Result<Self> {
 		match rule {
-			Rule::Alias(v) => Ok(ProjectRule::Alias(v)),
 			Rule::Target(v) => Ok(ProjectRule::Target(v)),
 			Rule::Include(spec) => {
 				let relative_scope = match spec.get_scope() {
@@ -158,7 +157,7 @@ impl BuildReason {
 
 pub struct ModuleCache<M> {
 	pub engine: Engine,
-	pub modules: HashMap<CPath, M>,
+	pub modules: HashMap<Unscoped, M>,
 }
 
 impl<M> ModuleCache<M> {
@@ -205,14 +204,13 @@ impl<M: BuildModule> Project<M> {
 
 	fn load_module_inner<'a>(
 		project: ProjectMutex<'a, M>,
-		path: Scoped<CPath>,
+		full_path: &Unscoped,
 		reason: &BuildReason
 	) -> Result<ProjectMutexPair<'a, M, M>> {
-		debug!("Loading module {:?} for {:?}", path, reason);
+		debug!("Loading module {:?} for {:?}", full_path, reason);
 		// First, build the module file itself and register it as a dependency.
-		let full_path = path.as_cpath();
-		let request = DependencyKey::FileDependency(full_path.clone()).into_request();
-		let (mut project, module_built) = Self::build(project, request.as_ref(), reason)?;
+		let file_dependency = BuildRequest::FileDependency(FileDependency::new(full_path.0.as_str().to_owned()));
+		let (mut project, module_built) = Self::build(project, Scoped::root(&file_dependency), reason)?;
 
 		result_block(|| {
 			let self_ref = project.self_ref.clone().unwrap();
@@ -248,15 +246,14 @@ impl<M: BuildModule> Project<M> {
 		let full_path = path.as_cpath();
 		debug!("Loading YAML rules {:?} for {:?}", full_path, reason);
 		// First, build the module itself and register it as a dependency.
-		// TODO need to enforce a project-rooted path, consistent with rules
-		let request = DependencyRequest::FileDependency(FileDependency::new(path.value.to_owned().into()));
+		let request = BuildRequest::FileDependency(FileDependency::new(path.value.to_owned().into()));
 		let scoped_request = path.with_value(request);
 		let (mut project, module_built) = Self::build(project, scoped_request.as_ref(), reason)?;
 		
 		let key = DependencyKey::from(scoped_request);
 		project.register_dependency(reason.parent(), key, module_built)?;
 
-		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(&full_path)?)?) )
+		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(&full_path.0)?)?) )
 			.with_context(|| format!("Loading rules YAML: {}", full_path))?;
 		
 		Ok((project, rules))
@@ -283,26 +280,37 @@ impl<M: BuildModule> Project<M> {
 		project: ProjectMutex<'a, M>,
 		rule: &'b ProjectRule,
 		name: &Scoped<&'c str>,
+		source_module: Option<&Unscoped>,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
 		match rule {
 			ProjectRule::Target(t) => {
 				if t.names.iter().any(|n| n == name.value) {
 					let scope = name.scope.clone();
-					let name = CPath::new(name.value.to_owned()).into_simple()?;
+					let rel_name = CPath::new(name.value.to_owned()).into_simple()?;
+					let module_cpath = t.build.module.as_ref().map(|m| {
+						CPath::new(m.to_owned())
+					});
+					let full_module = ResolveModule {
+						source_module,
+						explicit_path: module_cpath.as_ref().map(|p| name.with_value(p)),
+					}.resolve()?;
 					Ok((project, Some(FoundTarget {
-						target: t.to_owned(),
-						name: Scoped::new(scope, name),
+						// target: t.to_owned(),
+						// name: Scoped::new(scope, name),
+						rel_name,
+						build: BuildFnCall {
+							scope,
+							fn_name: t.build.fn_name.clone(),
+							full_module,
+							config: t.build.config.clone(),
+					},
 					})))
 				} else {
 					Ok((project, None))
 				}
 			},
-			ProjectRule::Alias(x) => {
-				debug!("TODO: skipping alias... {:?}", x);
-				Ok((project, None))
-			},
 			ProjectRule::Mutable(rule_ref) => {
-				return Self::handle_importable_rule(project, rule_ref, name);
+				return Self::handle_importable_rule(project, rule_ref, name, source_module);
 			},
 		}
 	}
@@ -311,6 +319,7 @@ impl<M: BuildModule> Project<M> {
 		mut project: ProjectMutex<'a, M>,
 		rule_ref: &RwRef< MutableRule>,
 		name: &Scoped<&'b str>,
+		source_module: Option<&Unscoped>,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
 		let mut handle = rule_ref.handle();
 		let readable = handle.read()?;
@@ -324,7 +333,7 @@ impl<M: BuildModule> Project<M> {
 			MutableRule::Nested(ref nested) => {
 				if let Some(name) = nested.projection(name.value) {
 					for rule in nested.rules.iter() {
-						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, &name)?;
+						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, &name, nested.module_path.as_ref())?;
 						project = project_ret;
 						if target.is_some() {
 							return Ok((project, target));
@@ -348,6 +357,11 @@ impl<M: BuildModule> Project<M> {
 						Ok(())
 					})?;
 
+					// Compute the the full scope which will be used inside the loaded module.
+					let absolute_scope = include.relative_scope.as_ref()
+						.map(|rel| Scope::new(name.scope.join_simple(rel.to_owned())))
+						.unwrap_or_else(|| name.scope.to_owned());
+					
 					let rules = match include.mode {
 						IncludeMode::YAML => {
 							let scoped_module = Scoped::new(name.scope.clone(), &include.module);
@@ -361,9 +375,15 @@ impl<M: BuildModule> Project<M> {
 						},
 
 						IncludeMode::WASM => {
-							let request = DependencyRequest::WasmCall(FunctionSpec {
+							let full_module = ResolveModule {
+								explicit_path: Some(Scoped::new(name.scope.clone(), &include.module)),
+								source_module,
+							}.resolve()?;
+
+							let request = BuildRequest::WasmCall(BuildFnCall {
+								scope: absolute_scope.clone(),
 								fn_name: "get_rules".to_string(),
-								module: Some(include.module.as_str().to_owned()),
+								full_module: full_module,
 								config: include.config.to_owned(),
 							});
 
@@ -374,7 +394,7 @@ impl<M: BuildModule> Project<M> {
 								Ok((project, persist_dep))
 							}).with_context(ctx)?;
 
-							let rules: Vec<Rule> = match persist_dep.into_response(&project_ret, &request)? {
+							let rules: Vec<Rule> = match persist_dep.into_response(&project_ret, None)? {
 								DependencyResponse::Str(json) => serde_json::from_str(&json)?,
 								other => {
 									return Err(anyhow!("Unexpected wasm call response: {:?}", other));
@@ -385,13 +405,10 @@ impl<M: BuildModule> Project<M> {
 						},
 					};
 
-					// Compute the the full scope which will be used inside the loaded module.
-					let absolute_scope = include.relative_scope.as_ref()
-						.map(|rel| Scope::new(name.scope.join_simple(rel.to_owned())))
-						.unwrap_or_else(|| name.scope.to_owned());
 
 					handle.with_write(|writeable| {
 						let nested = MutableRule::Nested(Nested {
+							module_path: todo!(),
 							rules: rules.into_iter()
 								.map(|rule| ProjectRule::from_rule(rule, &name.scope))
 								.collect::<Result<Vec<ProjectRule>>>()?,
@@ -404,7 +421,7 @@ impl<M: BuildModule> Project<M> {
 					})?;
 
 					// reevaluate after replacing, this will drop into the Rule::Nested branch
-					Self::handle_importable_rule(project, rule_ref, name)
+					Self::handle_importable_rule(project, rule_ref, name, source_module)
 				} else {
 					debug!("Skipping irrelevant include: {:?}", &include);
 					Ok((project, None))
@@ -421,7 +438,8 @@ impl<M: BuildModule> Project<M> {
 		let (project, target) = Self::expand_and_filter_rule(
 			project,
 			&root_rule,
-			&Scoped::root(name.as_str()))?;
+			&Scoped::root(name.as_str()),
+			None)?;
 		debug!("target for {}: {:?}", &name, target);
 		Ok((project, target))
 	}
@@ -511,16 +529,18 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, result))
 	}
 
-	pub fn build<'a>(project: ProjectMutex<'a, M>,
-		request: Scoped<&DependencyRequest>,
+	// TODO: only FileDependency needs to be scoped, and it doesn't need the scope - it could be pre-resolved!
+	pub fn build<'a>(
+		project: ProjectMutex<'a, M>,
+		request: Scoped<&BuildRequest>,
 		reason: &BuildReason,
 	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> {
 		debug!("build({:?})", request);
-
+		
 		match request.value {
-			DependencyRequest::FileDependency(file_dependency) => {
+			BuildRequest::FileDependency(file_dependency) => {
 				let file_cpath = request.with_value(CPath::new(file_dependency.path.to_owned())).as_cpath();
-				let file_simple = file_cpath.into_simple_or_self();
+				let file_simple = file_cpath.0.into_simple_or_self();
 				let get_target = |project| match file_simple {
 					Result::Ok(ref simple) => Project::target(project, simple),
 					Result::Err(_) => Ok((project, None)),
@@ -546,49 +566,35 @@ impl<M: BuildModule> Project<M> {
 					let mut project: Mutexed<Project<M>> = project;
 					let persist = if let Some(found_target) = &found_target {
 
-						println!("# {}", &found_target.name.as_cpath());
+						let name_scoped = Scoped::new(found_target.build.scope.clone(), found_target.rel_name.to_owned());
+						println!("# {}", &name_scoped);
 						let child_reason = BuildReason::Dependency(build_token);
 
-						// TODO track which module the target was defined in
-						let module_path: Scoped<CPath> = found_target.name.with_value(
-							CPath::new(
-								found_target.target.build.module.to_owned()
-								.ok_or_else(||anyhow!("Received a WasmCall without a populated module"))?
-							)
-						);
-						
 						let (project_ret, mut wasm_module) = Self::load_module_inner(
 							project,
-							module_path,
+							&found_target.build.full_module,
 							&child_reason)?;
 						project = project_ret;
 						
-						let tmp_path: PathBuf = project.tmp_path(&found_target.name)?.into();
+						let tmp_path: PathBuf = project.tmp_path(&name_scoped)?.into();
 						path_util::rm_rf_and_ensure_parent(&tmp_path)?;
-
-						let target = &found_target.target;
 
 						project.unlocked_block(|project_handle| {
 							let ctx = TargetCtx::new(
-								found_target.name.value.as_str().to_owned(),
+								found_target.rel_name.as_str().to_owned(),
 								tmp_path.to_owned(),
-								target.build.config.0.to_owned(),
+								found_target.build.config.0.to_owned(),
 								build_token.raw());
 
 							// TODO can we have a FunctionSpec with references?
-							debug!("calling {:?}", target.build);
+							debug!("calling {:?}", found_target.build);
 							
-							let bytes = wasm_module.call(InternalCall {
-								scope: &found_target.name.scope,
-								token: build_token,
-								fn_name: &target.build.fn_name,
-								config: &target.build.config,
-							}, &ctx, project_handle)?;
+							let bytes = wasm_module.call(&found_target.build, &ctx, project_handle)?;
 							let _: () = serde_json::from_slice(&bytes)?;
 							Ok(())
 						})?;
 						
-						let dest_path: PathBuf = project.dest_path(&found_target.name)?.into();
+						let dest_path: PathBuf = project.dest_path(&name_scoped)?.into();
 						path_util::rm_rf_and_ensure_parent(&dest_path)?;
 						match path_util::lstat_opt::<&Path>(tmp_path.as_ref())? {
 							Some(_) => {
@@ -602,7 +608,7 @@ impl<M: BuildModule> Project<M> {
 						}
 
 						Persist::Target(PersistTarget {
-							file: PersistFile::from_path(&dest_path, Some(found_target.name.flatten()))?,
+							file: PersistFile::from_path(&dest_path, Some(name_scoped.flatten()))?,
 							deps: project.collect_deps(build_token),
 						})
 					} else {
@@ -634,13 +640,13 @@ impl<M: BuildModule> Project<M> {
 					get_target, needs_rebuild, do_build)
 			},
 
-			DependencyRequest::WasmCall(spec) => {
-				// TODO this path needs to be concatenated with the scope!
-				let rel_path = spec.module.to_owned().expect("TODO: default to calling module");
+			BuildRequest::WasmCall(spec) => {
+				let module_path: Unscoped = todo!();
+
 				let dependency_key = DependencyKey::WasmCall(FunctionSpecKey {
 					fn_name: spec.fn_name.clone(),
 					scope: request.scope.into_simple().map(|n| n.to_owned()),
-					rel_path: rel_path.to_owned(),
+					full_module: module_path.clone(),
 					config: spec.config.to_owned(),
 				});
 
@@ -655,21 +661,21 @@ impl<M: BuildModule> Project<M> {
 				let do_build = |project, _ctx: &(), build_token| {
 					let mut project: Mutexed<Project<M>> = project;
 
-					let file_dependency = FileDependency::new(rel_path.to_owned());
 					let (project_ret, mut wasm_module) = Self::load_module_inner(
 						project,
-						request.with_value(CPath::new(rel_path.to_owned())),
+						&module_path,
 						&BuildReason::Dependency(build_token))?;
 					project = project_ret;
 
 					let result: String = project.unlocked_block(|project_handle| {
 						let ctx = BaseCtx::new(spec.config.value().to_owned(), build_token.raw());
-						let bytes = wasm_module.call(InternalCall {
-							token: build_token,
-							scope: &request.scope,
-							fn_name: &spec.fn_name,
-							config: &spec.config,
-						}, &ctx, &project_handle)?;
+						let build_call = BuildFnCall {
+							scope: request.scope.clone(),
+							fn_name: spec.fn_name.to_owned(),
+							full_module: module_path.clone(),
+							config: spec.config.clone(),
+						};
+						let bytes = wasm_module.call(&build_call, &ctx, &project_handle)?;
 						Ok(String::from_utf8(bytes)?)
 					})?;
 					
@@ -688,18 +694,18 @@ impl<M: BuildModule> Project<M> {
 					project, reason, dependency_key,
 					get_ctx, needs_rebuild, do_build)
 			},
-			DependencyRequest::FileSet(_) => todo!("handle FileSet"),
-			DependencyRequest::Execute(cmd) => {
+			BuildRequest::FileSet(_) => todo!("handle FileSet"),
+			BuildRequest::Execute(cmd) => {
 				// TODO do we need to add any dependencies first?
 				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
 				// need to add that.
 				let project = Sandbox::run(project, &request.with_value(cmd), reason)?;
 				Ok((project, PersistDependency::AlwaysClean))
 			},
-			DependencyRequest::EnvVar(key) => {
+			BuildRequest::EnvVar(key) => {
 				Ok((project, PersistDependency::Env(PersistEnv(std::env::var(key)?))))
 			},
-			DependencyRequest::Universe => Ok((project, PersistDependency::AlwaysDirty)),
+			BuildRequest::Universe => Ok((project, PersistDependency::AlwaysDirty)),
 
 		}
 	}
@@ -719,8 +725,7 @@ impl<M: BuildModule> Project<M> {
 		if let Some(parent) = parent {
 			debug!("registering dependency {:?} against build {:?} (result: {:?}", &key, parent, &result);
 
-			// NOTE: This requires we always insert at the start of the build, since we can't know the scope later
-			let parent_dep_set = self.active_tasks.get_mut(&parent).ok_or_else(||anyhow!("No active task: {:?}", parent))?;
+			let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(Default::default);
 			parent_dep_set.add(key, result);
 		}
 		Ok(())
@@ -738,7 +743,7 @@ impl<M: BuildModule> Project<M> {
 			debug!("requires_build() recursing over dependency {:?}", dep_key);
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
-			let request: Scoped<DependencyRequest> = dep_key.to_owned().into_request();
+			let request: Scoped<BuildRequest> = dep_key.to_owned().into_request();
 			let (project_ret, dep_latest) = Self::build(project, request.as_ref(), &reason)?;
 			project = project_ret;
 			
@@ -772,7 +777,7 @@ impl<M: BuildModule> Project<M> {
 	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<Simple> {
 		let mut ret: PathBuf = PathBuf::from(".trou");
 		ret.push(base);
-		ret.push::<&CPath>(&name.as_cpath());
+		ret.push::<&CPath>(&name.as_cpath().0);
 		CPath::try_from(ret)?.into_simple()
 	}
 
@@ -796,6 +801,7 @@ impl<M: BuildModule> Project<M> {
 			rules: v.into_iter().map(|r| ProjectRule::from_rule(r, &scope).unwrap()).collect(),
 			relative_scope: None,
 			absolute_scope: scope,
+			module_path: None,
 		}))));
 	}
 
@@ -808,7 +814,7 @@ impl<M: BuildModule> Project<M> {
 	pub fn inject_module<K: ToString>(&mut self, k: K, v: M::Compiled) {
 		let s = k.to_string();
 		warn!("injecting module: {}", &s);
-		self.module_cache.modules.insert(CPath::new(s.to_string()), v);
+		self.module_cache.modules.insert(Unscoped::new(s.to_string()), v);
 	}
 
 	#[cfg(test)]
@@ -827,6 +833,81 @@ enum CacheAware<Ctx> {
 // TODO more references instead of owned?
 #[derive(Debug)]
 pub struct FoundTarget {
-	target: Target,
-	name: Scoped<Simple>, // original name broken into scope + target
+	rel_name: Simple, // the name relative to the build's scope
+	build: BuildFnCall,
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+// TODO rename InternalFnCall or ResolvedFnCall?
+// TODO could these be refs?
+pub struct BuildFnCall {
+	pub scope: Scope,
+	pub fn_name: String, // TODO can we default this to `build` for modules?
+	pub full_module: Unscoped,
+	pub config: trou_common::rule::Config,
+}
+
+impl BuildFnCall {
+	pub fn from(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope) -> Result<Self> {
+		let FunctionSpec { fn_name, module, config } = f;
+
+		let explicit_cpath = module.map(CPath::new);
+		let full_module = ResolveModule {
+			source_module,
+			explicit_path: explicit_cpath.as_ref().map(|p| Scoped::new(scope.clone(), p)),
+		}.resolve()?;
+		Ok(Self {
+			scope,
+			fn_name,
+			full_module,
+			config,
+		})
+	}
+}
+
+
+#[derive(Debug, Clone)]
+// Like DependencyRequest but with more detailed FnCall
+pub enum BuildRequest {
+	FileDependency(FileDependency),
+	WasmCall(BuildFnCall),
+	EnvVar(String),
+	FileSet(String),
+	Execute(trou_common::build::Command),
+	Universe,
+}
+
+impl BuildRequest {
+	pub fn from(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &Scope) -> Result<Self> {
+		Ok(match req {
+			DependencyRequest::FileDependency(v) => Self::FileDependency(v),
+			DependencyRequest::WasmCall(v) => Self::WasmCall(BuildFnCall::from(v, source_module, scope.to_owned())?),
+			DependencyRequest::EnvVar(v) => Self::EnvVar(v),
+			DependencyRequest::FileSet(v) => Self::FileSet(v),
+			DependencyRequest::Execute(v) => Self::Execute(v),
+			DependencyRequest::Universe => Self::Universe,
+		})
+	}
+	
+	pub fn file_dependency(&self) -> Option<&FileDependency> {
+		match self {
+			BuildRequest::FileDependency(ref v) => Some(v),
+			_ => None,
+		}
+	}
+}
+
+struct ResolveModule<'a> {
+	source_module: Option<&'a Unscoped>,
+	explicit_path: Option<Scoped<&'a CPath>>,
+}
+impl<'a> ResolveModule<'a> {
+	fn resolve(self) -> Result<Unscoped> {
+		self.explicit_path
+			.map(|scoped| scoped.as_cpath())
+			.or_else(|| self.source_module.map(|p| p.to_owned()))
+			.ok_or_else(||anyhow!("Received a WasmCall without a populated module"))
+	}
+
 }

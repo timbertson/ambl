@@ -9,7 +9,7 @@ use tempdir::TempDir;
 use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse, FileDependencyType}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason}, persist::{PersistFile, DependencyKey, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath}};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, BuildFnCall, BuildRequest}, persist::{PersistFile, DependencyKey, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
@@ -59,6 +59,7 @@ pub struct TestModule<'a> {
 	pub name: String,
 	pub scope: Option<String>,
 	pub project: &'a TestProject<'a>,
+	module_path: Unscoped,
 	_rules: Vec<Rule>,
 	rule_fn: Option<fn(&TestModule<'a>, &BaseCtx) -> Vec<Rule>>,
 	builders: Arc<HashMap<String, BuilderFn>>,
@@ -70,13 +71,16 @@ impl<'a> TestModule<'a> {
 	pub fn new(project: &'a TestProject<'a>) -> Self {
 		let name = project.next_module_name();
 		Self {
-			name,
+			// NOTE: these get replaced by set_name below
+			name: "".to_owned(),
+			module_path: Unscoped::new("".to_owned()),
+
 			project,
 			scope: Default::default(),
 			_rules: Default::default(),
 			rule_fn: Default::default(),
 			builders: Default::default()
-		}
+		}.set_name(name)
 	}
 	
 	pub fn builder<F: Fn(&TestProject, &TargetCtx) -> Result<()> + 'static + Sync + Send>(mut self, f: F) -> Self
@@ -87,6 +91,7 @@ impl<'a> TestModule<'a> {
 
 	pub fn set_name<S: ToString>(mut self, v: S) -> Self {
 		self.name = v.to_string();
+		self.module_path = Unscoped::new(v.to_string());
 		self
 	}
 
@@ -121,7 +126,7 @@ impl<'a> TestModule<'a> {
 impl<'a> BuildModule for TestModule<'a> {
 	type Compiled = Self;
 
-	fn compile(engine: &Engine, path: &CPath) -> Result<Self::Compiled> {
+	fn compile(engine: &Engine, path: &Unscoped) -> Result<Self::Compiled> {
 		panic!("compilation requested for module {}", path)
 	}
 
@@ -129,10 +134,10 @@ impl<'a> BuildModule for TestModule<'a> {
 		Ok(module.to_owned())
 	}
 
-	fn call<Ctx: serde::Serialize>(&mut self, f: &FunctionSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+	fn call<Ctx: serde::Serialize>(&mut self, f: &BuildFnCall, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
 		if f.fn_name == "get_rules" {
 			let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
-			TestInvoker::wrap(self.project, &mut ctx, |ctx| {
+			TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
 				Ok(self.rules(ctx))
 			})
 		} else {
@@ -143,20 +148,27 @@ impl<'a> BuildModule for TestModule<'a> {
 			let token = ctx.token;
 			debug!("running builder for {} with token {:?}", path, token);
 			let fn_name = &f.fn_name;
-			let f = self.builders.get(fn_name)
+			let f_impl = self.builders.get(fn_name)
 				.ok_or_else(|| anyhow!("no such builder {:?} in {:?}", fn_name, &self.builders.keys()))?;
 
-			TestInvoker::wrap(self.project, &mut ctx, |ctx| {
-				f(self.project, &*ctx)
+			TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
+				f_impl(self.project, &*ctx)
 			})?;
 			Ok(serde_json::to_vec(&())?)
 		}
 	}
 }
 
+#[derive(Clone, Copy)]
+struct BuildState<'a, 'b, 'c> {
+	project: &'a TestProject<'a>,
+	module: &'b Unscoped,
+	scope: &'c Scope,
+}
+
 lazy_static::lazy_static! {
 	static ref INVOKE_REFERENCES
-		: Arc<Mutex<HashMap<ActiveBuildToken, &'static TestProject<'static>>>>
+		: Arc<Mutex<HashMap<ActiveBuildToken, BuildState<'static, 'static, 'static>>>>
 		= Arc::new(Mutex::new(HashMap::new()));
 }
 
@@ -165,24 +177,33 @@ struct TestInvoker {
 	token: ActiveBuildToken,
 }
 impl TestInvoker {
-	fn wrap<'a, R: Serialize, C: AsRef<BaseCtx> + AsMut<BaseCtx>, F: FnOnce(&C) -> Result<R>>(
+	fn wrap<'a, 'b, 'c, R: Serialize, C: AsRef<BaseCtx> + AsMut<BaseCtx>, F: FnOnce(&C) -> Result<R>>(
 		project: &'a TestProject<'a>,
+		module: &'b Unscoped,
+		scope: &'c Scope,
 		ctx: &mut C,
 		f: F
 	) -> Result<Vec<u8>> {
 		let ctx_mut = ctx.as_mut();
 		let token = ActiveBuildToken::from_raw(ctx_mut.token);
 		ctx_mut._override_invoker(Box::new(TestInvoker { token }));
+		
+		let state = BuildState {
+			module,
+			project,
+			scope,
+		};
 
-		// we can pretend it's 'static, because we remove it from the map before 'a ends
-		let static_project = unsafe { std::mem::transmute::<
-			&'a TestProject<'a>,
-			&'static TestProject<'static>
-		>(project) };
+		// we can pretend it's 'static, because it never lasts in the map longer than 'a
+		// in practice it's only needed while we call `f`
+		let static_state = unsafe { std::mem::transmute::<
+			BuildState<'_, '_, '_>,
+			BuildState<'static, 'static, 'static>
+		>(state) };
 
 		let arc = Arc::clone(&INVOKE_REFERENCES);
 		let mut map = arc.lock().unwrap();
-		let old = map.insert(token, static_project);
+		let old = map.insert(token, static_state);
 		drop(map);
 
 		debug!("invoker::wrap({:?})", token);
@@ -200,13 +221,17 @@ impl Invoker for TestInvoker {
 	fn invoke(&self, request: DependencyRequest) -> Result<DependencyResponse> {
 		let arc = Arc::clone(&INVOKE_REFERENCES);
 		let map = arc.lock().unwrap();
-		let project = map.get(&self.token).ok_or_else(|| format!("No invoke reference found for token {:?}", &self.token)).unwrap().lock();
-		drop(map);
-		let scope = project.scope_for(self.token);
-		let scoped_request = Scoped::new(scope, &request);
+		let build_state = map.get(&self.token)
+			.ok_or_else(|| format!("No invoke reference found for token {:?}", &self.token))
+			.unwrap()
+			.to_owned();
+		let BuildState { project, module, scope } = build_state;
+		let project = project.lock();
+		let build_request = BuildRequest::from(request, Some(module), &scope)?;
+		let scoped_request = Scoped::new(scope.to_owned(), &build_request);
 		debug!("TestInvoker building {:?}", &scoped_request);
 		let (project, dep) = Project::build(project, scoped_request, &BuildReason::Dependency(self.token))?;
-		dep.into_response(&project, &request)
+		dep.into_response(&project, build_request.file_dependency())
 	}
 }
 
@@ -320,7 +345,7 @@ impl<'a> TestProject<'a> {
 		p.inject_module(&s, v);
 		// mark the module file as fresh to skip having to write an actual file
 		p.inject_cache(
-			DependencyKey::FileDependency(CPath::new(s)),
+			DependencyKey::FileDependency(Unscoped::new(s)),
 			Persist::File(Some(FAKE_FILE.clone()))
 		).expect("inject_module");
 		drop(p);
@@ -334,7 +359,7 @@ impl<'a> TestProject<'a> {
 			target: None,
 		};
 		p.inject_cache(
-			DependencyKey::FileDependency(CPath::new(v.into())),
+			DependencyKey::FileDependency(Unscoped::new(v.into())),
 			Persist::File(Some(stat))
 		).expect("touch_fake");
 		drop(p);
@@ -353,7 +378,7 @@ impl<'a> TestProject<'a> {
 	pub fn build_file_as(&self, f: &str, ret: FileDependencyType) -> Result<DependencyResponse> {
 		let project = self.lock();
 		println!("\n=== start build_file({})", f);
-		let req = DependencyRequest::FileDependency(FileDependency {
+		let req = BuildRequest::FileDependency(FileDependency {
 			path: f.to_owned(),
 			ret,
 		});
@@ -361,7 +386,7 @@ impl<'a> TestProject<'a> {
 		let (project, result) = Project::build(project, scoped_req, &BuildReason::Explicit)
 			.with_context(|| format!("Building {:?}", &req))?;
 
-		let response = result.into_response(&project, &req);
+		let response = result.into_response(&project, req.file_dependency());
 		drop(project);
 		println!("=== end build_file({})\n", f);
 

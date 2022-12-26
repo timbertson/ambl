@@ -4,7 +4,7 @@ use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symli
 use anyhow::*;
 use trou_common::build::{self, FileDependency};
 
-use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason}, sync::{Mutexed, MutexHandle}, path_util::{External, Absolute, Scope, Scoped, CPath, Simple}, err::result_block, module::BuildModule};
+use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason, BuildRequest}, sync::{Mutexed, MutexHandle}, path_util::{External, Absolute, Scope, Scoped, CPath, Simple}, err::result_block, module::BuildModule};
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -38,7 +38,7 @@ impl Sandbox {
 	) -> Result<()> where 'a : 'b {
 		match key {
 			DependencyKey::FileDependency(cpath) => {
-				if let Result::Ok(rel) = cpath.to_owned().into_simple() {
+				if let Result::Ok(rel) = cpath.to_owned().0.into_simple() {
 					if dest.contains(&rel) {
 						return Ok(());
 					}
@@ -87,7 +87,7 @@ impl Sandbox {
 
 		cmd.env_clear();
 		for k in env_inherit {
-			let dependency_request = DependencyRequest::EnvVar(k.to_owned());
+			let dependency_request = BuildRequest::EnvVar(k.to_owned());
 			let request = command.with_value(&dependency_request);
 			let (project_ret, value) = Project::<M>::build(project, request, reason)?;
 			match value {

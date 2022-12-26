@@ -74,7 +74,8 @@ pub fn lstat_opt<P: AsRef<Path>>(p: P) -> Result<Option<fs::Metadata>> {
 }
 
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "Option<Simple>", from = "Option<Simple>")]
 pub struct Scope(Option<Arc<Simple>>);
 
 impl Scope {
@@ -90,6 +91,7 @@ impl Scope {
 		Scope(n.map(Arc::new))
 	}
 	
+	// TODO rename as_simple
 	pub fn into_simple(&self) -> Option<&Simple> {
 		self.0.as_ref().map(|x| x.deref())
 	}
@@ -112,6 +114,18 @@ impl Scope {
 impl Clone for Scope {
 	fn clone(&self) -> Self {
 		Self(self.0.as_ref().map(Arc::clone))
+	}
+}
+
+impl Into<Option<Simple>> for Scope {
+	fn into(self) -> Option<Simple> {
+		self.0.as_deref().cloned()
+	}
+}
+
+impl From<Option<Simple>> for Scope {
+	fn from(n: Option<Simple>) -> Self {
+		Self(n.map(Arc::new))
 	}
 }
 
@@ -166,11 +180,11 @@ impl<T: Display> Display for Scoped<T> {
 
 impl<P: AsRef<CPath>> Scoped<P> {
 	// embeds the scope into the path
-	pub fn as_cpath(&self) -> CPath {
-		match self.scope.0 {
+	pub fn as_cpath(&self) -> Unscoped {
+		Unscoped(match self.scope.0 {
 			None => self.value.as_ref().to_owned(),
 			Some(ref scope) => scope.0.join(self.value.as_ref()),
-		}
+		})
 	}
 }
 
@@ -367,6 +381,21 @@ impl AsRef<str> for CPath {
 	}
 }
 
+// Small wrapper for declaring that a path is relative to the project root, and does not need a scope
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Unscoped(pub CPath);
+impl Unscoped {
+	pub fn new(s: String) -> Unscoped {
+		Unscoped(CPath::new(s))
+	}
+}
+
+impl Display for Unscoped {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		Display::fmt(&self.0, f)
+	}
+}
+
 // a CPath with only normal components (not absolute, and no leading ../)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Simple(CPath);
@@ -478,8 +507,8 @@ mod test {
 	fn test_join() {
 		let scope = Scope::new(p("x/y").into_simple().unwrap());
 		let join = |s| Scoped::new(scope.clone(), p(s)).as_cpath();
-		assert_eq!(join("foo/bar"), p("x/y/foo/bar"));
-		assert_eq!(join("../z"), p("x/z"));
-		assert_eq!(join("../../../z"), p("../z"));
+		assert_eq!(join("foo/bar").0, p("x/y/foo/bar"));
+		assert_eq!(join("../z").0, p("x/z"));
+		assert_eq!(join("../../../z").0, p("../z"));
 	}
 }

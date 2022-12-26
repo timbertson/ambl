@@ -106,7 +106,6 @@ pub struct Alias {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Rule {
-	Alias(Alias),
 	Target(Target),
 	Include(Include),
 }
@@ -169,13 +168,6 @@ pub mod dsl {
 			config: Default::default(),
 			mode: IncludeMode::YAML
 		}
-	}
-
-	pub fn alias<S1: Into<String>, S2: Into<String>>(name: S1, path: S2) -> Rule {
-		Rule::Alias(Alias {
-			name: name.into(),
-			path: path.into()
-		})
 	}
 
 	pub fn build_fn<S: Into<String>>(fn_name: S) -> FunctionSpec {

@@ -5,12 +5,12 @@ use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::{FunctionSpec, Config}};
 
-use crate::{project::{ProjectRef, Project, ProjectHandle}, path_util::{Simple, Scope, Scoped, CPath}, module::BuildModule};
+use crate::{project::{ProjectRef, Project, ProjectHandle, BuildRequest, BuildFnCall}, path_util::{Simple, Scope, Scoped, CPath, Unscoped}, module::BuildModule};
 
 // A dependency request stripped of information which only affects the return value (not the built item)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum DependencyKey {
-	FileDependency(CPath),
+	FileDependency(Unscoped),
 	WasmCall(FunctionSpecKey),
 	EnvVar(String),
 	FileSet(String),
@@ -22,52 +22,55 @@ pub enum DependencyKey {
 // scope - all keys are rlative to project root, not the current scope.
 // Note that WasmCall _also_ has a scope in it, because calling
 // a call from a different scope can have a different result
+// TODO can we unify DependencyKey and BuildRequest?
 impl DependencyKey {
-	pub fn from_ref(req: &Scoped<&DependencyRequest>) -> Self {
-		Self::from(req.map_ref(|r| (*r).to_owned()))
-	}
-
-	pub fn from(scoped_req: Scoped<DependencyRequest>) -> Self {
+	pub fn from(scoped_req: Scoped<BuildRequest>) -> Self {
 		let Scoped { scope, value: req } = scoped_req;
 		match req {
-			DependencyRequest::FileDependency(v) =>
+			BuildRequest::FileDependency(v) =>
 				DependencyKey::FileDependency(Scoped::new(scope, CPath::new(v.path)).as_cpath()),
 
-			DependencyRequest::WasmCall(v) =>
-				DependencyKey::WasmCall(FunctionSpecKey::from(v, &scope)),
+			BuildRequest::WasmCall(v) => {
+				let BuildFnCall { scope, fn_name, full_module, config } = v;
+				DependencyKey::WasmCall(
+					FunctionSpecKey { fn_name, scope: scope.into_simple().map(|n| n.clone()), full_module, config }
+				)
+			},
 
-			DependencyRequest::EnvVar(v) => DependencyKey::EnvVar(v),
-			DependencyRequest::FileSet(v) => DependencyKey::FileSet(v),
-			DependencyRequest::Execute(v) => DependencyKey::Execute(v),
-			DependencyRequest::Universe => DependencyKey::Universe,
+			BuildRequest::EnvVar(v) => DependencyKey::EnvVar(v),
+			BuildRequest::FileSet(v) => DependencyKey::FileSet(v),
+			BuildRequest::Execute(v) => DependencyKey::Execute(v),
+			BuildRequest::Universe => DependencyKey::Universe,
 		}
 	}
 	
 	// When we need to reevaluate a dependency, we turn its DB key into a buildable
 	// request. Most of the time that's a simple request with a root scope, except for a
 	// WASM call which embeds its own scope (since it matters where you call a function from).
-	pub fn into_request(self) -> Scoped<DependencyRequest> {
+	pub fn into_request(self) -> Scoped<BuildRequest> {
 		let root = |req| Scoped::new(Scope::root(), req);
 		match self {
-			DependencyKey::FileDependency(v) => root(DependencyRequest::FileDependency(FileDependency {
-				path: v.into(),
+			DependencyKey::FileDependency(v) => root(BuildRequest::FileDependency(FileDependency {
+				path: v.0.into(),
 				ret: FileDependencyType::Unit
 			})),
 
 			DependencyKey::WasmCall(v) => {
-				let FunctionSpecKey { fn_name, scope, rel_path, config } = v;
-				let req = DependencyRequest::WasmCall(FunctionSpec {
+				let FunctionSpecKey { fn_name, scope, full_module, config } = v;
+				let scope = Scope::from_normalized(scope);
+				let req = BuildRequest::WasmCall(BuildFnCall {
+					scope: scope.clone(),
 					fn_name,
 					config,
-					module: Some(rel_path),
+					full_module
 				});
-				Scoped::new(Scope::from_normalized(scope), req)
+				Scoped::new(scope, req)
 			},
 
-			DependencyKey::EnvVar(v) => root(DependencyRequest::EnvVar(v)),
-			DependencyKey::FileSet(v) => root(DependencyRequest::FileSet(v)),
-			DependencyKey::Execute(v) => root(DependencyRequest::Execute(v)),
-			DependencyKey::Universe => root(DependencyRequest::Universe),
+			DependencyKey::EnvVar(v) => root(BuildRequest::EnvVar(v)),
+			DependencyKey::FileSet(v) => root(BuildRequest::FileSet(v)),
+			DependencyKey::Execute(v) => root(BuildRequest::Execute(v)),
+			DependencyKey::Universe => root(BuildRequest::Universe),
 		}
 	}
 }
@@ -75,17 +78,12 @@ impl DependencyKey {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct FunctionSpecKey {
 	pub fn_name: String,
+	// we track the full path from the project, since that's how modules are keyed
+	pub full_module: Unscoped,
+	// but we also track the scope of this call, since that affects
+	// the results
 	pub scope: Option<Simple>,
-	pub rel_path: String,
 	pub config: Config,
-}
-
-impl FunctionSpecKey {
-	pub fn from(s: FunctionSpec, scope: &Scope) -> Self {
-		let FunctionSpec { fn_name, module, config } = s;
-		let module = module.unwrap_or_else(|| panic!("Module missing; this is a bug"));
-		Self { fn_name, scope: scope.into_simple().map(|n| n.clone()), rel_path: module, config }
-	}
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,7 +125,7 @@ pub struct PersistWasmCall {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistWasmDependency {
-	pub spec: FunctionSpec,
+	pub spec: BuildFnCall,
 	pub result: String,
 }
 
@@ -328,31 +326,29 @@ impl PersistDependency {
 	}
 
 	// TODO should this be a method on Project now that it needs access to one?
-	pub fn into_response<M: BuildModule>(self, project: &Project<M>, request: &DependencyRequest) -> Result<DependencyResponse> {
+	pub fn into_response<M: BuildModule>(self, project: &Project<M>, file_dependency: Option<&FileDependency>) -> Result<DependencyResponse> {
 		use PersistDependency::*;
 		Ok(match self {
-			File(state) => match request {
-				DependencyRequest::FileDependency(file_dep) => {
-					match file_dep.ret {
-						FileDependencyType::Unit => DependencyResponse::Unit,
-						FileDependencyType::Existence => DependencyResponse::Bool(state.is_some()),
-						FileDependencyType::Contents => {
-							let state = state.ok_or_else(|| anyhow!("No file produced for target {}", &file_dep.path))?;
-							let contents = if let Some(ref target) = state.target {
-								let full_path = project.dest_path(&Scoped::new(Scope::root(), target.to_owned()))?;
-								fs::read_to_string(full_path.as_ref()).with_context(||
-									format!("Can't read target {} (from {})", &file_dep.path, &full_path)
-								)
-							} else {
-								fs::read_to_string(&file_dep.path).with_context(||
-									format!("Can't read {}", &file_dep.path)
-								)
-							};
-							DependencyResponse::Str(contents?)
-						},
-					}
-				},
-				other => panic!("file response with non-file request: {:?}", other),
+			File(state) => {
+				let file_dependency = file_dependency.unwrap_or_else(|| panic!("file response with non-file request"));
+				match file_dependency.ret {
+					FileDependencyType::Unit => DependencyResponse::Unit,
+					FileDependencyType::Existence => DependencyResponse::Bool(state.is_some()),
+					FileDependencyType::Contents => {
+						let state = state.ok_or_else(|| anyhow!("No file produced for target {}", &file_dependency.path))?;
+						let contents = if let Some(ref target) = state.target {
+							let full_path = project.dest_path(&Scoped::new(Scope::root(), target.to_owned()))?;
+							fs::read_to_string(full_path.as_ref()).with_context(||
+								format!("Can't read target {} (from {})", &file_dependency.path, &full_path)
+							)
+						} else {
+							fs::read_to_string(&file_dependency.path).with_context(||
+								format!("Can't read {}", &file_dependency.path)
+							)
+						};
+						DependencyResponse::Str(contents?)
+					},
+				}
 			},
 			Env(env) => DependencyResponse::Str(env.0),
 			Wasm(wasm) => DependencyResponse::Str(wasm.result),

@@ -10,7 +10,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::{BuildModule, InternalCall}, path_util::{Scoped, CPath, Scope}, err::result_block};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken, BuildFnCall, BuildRequest}, persist::PersistFile, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -163,7 +163,7 @@ impl StateRef {
 		Ok(())
 	}
 
-	pub fn call<C: AsContextMut<Data = StoreInner>, Ctx: Serialize>(&self, mut store: C, f: InternalCall, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>) -> Result<Vec<u8>> {
+	pub fn call<C: AsContextMut<Data = StoreInner>, Ctx: Serialize + AsRef<BaseCtx>>(&self, mut store: C, f: &BuildFnCall, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>) -> Result<Vec<u8>> {
 		debug!("call({:?})", f);
 		let mut write = self.write();
 		let state = write.as_ref()?;
@@ -172,7 +172,8 @@ impl StateRef {
 		// lets us reattach the (implicit) scope within `invoke`
 		let mut store_ctx = store.as_context_mut();
 		let scope_map = store_ctx.data_mut();
-		let inserted = match scope_map.entry(f.token) {
+		let token = ActiveBuildToken::from_raw(arg.as_ref().token);
+		let inserted = match scope_map.entry(token) {
 			Entry::Occupied(_) => false,
 			Entry::Vacant(entry) => {
 				entry.insert(f.scope.to_owned());
@@ -188,12 +189,18 @@ impl StateRef {
 		if inserted {
 			let mut store_ctx = store.as_context_mut();
 			let scope_map = store_ctx.data_mut();
-			scope_map.remove(&f.token);
+			scope_map.remove(&token);
 		}
 
 		result
 	}
 }
+
+// #[derive(Debug, Clone, PartialEq)]
+// struct ActiveBuildContext {
+// 	scope: Scope,
+// 	module: Unscoped, // TODO arc?
+// }
 
 type StoreInner = HashMap<ActiveBuildToken, Scope>;
 
@@ -202,20 +209,31 @@ pub struct WasmModule {
 	store: Store<StoreInner>,
 }
 
-impl BuildModule for WasmModule {
-	type Compiled = Module;
+#[derive(Clone)]
+pub struct Compiled {
+	wasm: Module,
+	path: Unscoped,
+}
 
-	fn compile(engine: &Engine, path: &CPath) -> Result<Module> {
+impl BuildModule for WasmModule {
+	type Compiled = Compiled;
+
+	fn compile(engine: &Engine, path: &Unscoped) -> Result<Compiled> {
 		debug!("Loading {}", path);
-		Ok(Module::from_file(&engine, path.as_path())?)
+		Ok(Compiled {
+			wasm: Module::from_file(&engine, path.0.as_path())?,
+			path: path.clone(),
+		})
 	}
 	
-	fn load(engine: &Engine, module: &Module, project: ProjectRef<Self>) -> Result<WasmModule> {
+	fn load(engine: &Engine, module: &Compiled, project: ProjectRef<Self>) -> Result<WasmModule> {
 		let mut linker = Linker::<StoreInner>::new(&engine);
 
 		let mut state = StateRef::empty();
 		
+		let path_arc = Arc::new(module.path.clone());
 		let state_invoke = state.clone(); // to move into closure
+		let state_module = Arc::new(module.path.to_owned());
 		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, StoreInner>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
 			debug!("trou_invoke");
 			let mut state = state_invoke.clone();
@@ -226,16 +244,25 @@ impl BuildModule for WasmModule {
 				let request: TaggedDependencyRequest = serde_json::from_str(&s)?;
 				debug!("Got dep request: {:?} from WebAssembly", &request);
 				let mut project_handle = project.handle();
-				let project = project_handle.lock("trou_invoke")?;
 				let TaggedDependencyRequest { token, request } = request;
-				// TODO can we store the scope in WASM context, instead of project?
 				let token = ActiveBuildToken::from_raw(token);
 				let scope_map = caller.data_mut();
 				let scope = scope_map.get(&token)
 					.ok_or_else(|| anyhow!("invoke called without an extive scope; this should be impossible"))?;
-				let scoped_request = Scoped::new(scope.to_owned(), &request);
+
+				let build_request: BuildRequest = BuildRequest::from(request, Some(&path_arc), scope)?;
+
+				let module = state_module.clone();
+				let scoped_request = Scoped::new(scope.to_owned(), &build_request);
+
+				let project = project_handle.lock("trou_invoke")?;
 				let (project, persist) = Project::build(project, scoped_request, &BuildReason::Dependency(token))?;
-				persist.into_response(&project, &request)
+
+				let file_request = match build_request {
+					BuildRequest::FileDependency(ref f) => Some(f),
+					_ => None,
+				};
+				persist.into_response(&project, file_request)
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {
@@ -257,7 +284,7 @@ impl BuildModule for WasmModule {
 
 		let mut store = Store::new(&engine, Default::default());
 		debug!("instantiating...");
-		let instance = linker.instantiate(&mut store, &module)?;
+		let instance = linker.instantiate(&mut store, &module.wasm)?;
 
 		let trou_alloc = instance.get_typed_func::<u32, u32, _>(&mut store, "trou_alloc")?;
 
@@ -284,7 +311,7 @@ impl BuildModule for WasmModule {
 		Ok(WasmModule { state, store })
 	}
 
-	fn call<Ctx: Serialize>(&mut self, f: InternalCall, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+	fn call<Ctx: AsRef<BaseCtx> + Serialize>(&mut self, f: &BuildFnCall, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
 		self.state.call(&mut self.store, f, arg, _unlocked_evidence)
 	}
 }

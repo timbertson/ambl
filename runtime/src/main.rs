@@ -17,7 +17,7 @@ use log::*;
 
 use anyhow::*;
 use path_util::{Scope, Scoped, CPath};
-use project::{Project, ModuleCache, BuildReason};
+use project::{Project, ModuleCache, BuildReason, BuildRequest};
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
 use trou_common::build::*;
@@ -36,7 +36,7 @@ fn main() -> Result<()> {
 		let mut handle = project.handle();
 		let mut project_mutexed = handle.lock("main")?;
 		for arg in args {
-			let request = DependencyRequest::FileDependency(FileDependency::new(arg));
+			let request = BuildRequest::FileDependency(FileDependency::new(arg));
 			let reason = BuildReason::Explicit;
 			let scope = Scope::root();
 			let (project_ret, _) = Project::build(project_mutexed, Scoped::new(scope, &request), &reason)?;
