@@ -174,7 +174,7 @@ pub struct Project<M: BuildModule> {
 	root: Absolute,
 	module_cache: ModuleCache<M::Compiled>,
 	build_cache: DepStore,
-	active_tasks: HashMap<ActiveBuildToken, Scoped<DepSet>>,
+	active_tasks: HashMap<ActiveBuildToken, DepSet>,
 	root_rule: Arc<ProjectRule>,
 	self_ref: Option<ProjectRef<M>>,
 }
@@ -546,14 +546,8 @@ impl<M: BuildModule> Project<M> {
 					let mut project: Mutexed<Project<M>> = project;
 					let persist = if let Some(found_target) = &found_target {
 
-						// Need to record the scope so WASM requests can pull it out.
-						// This seems suboptimal, and we repeat it for WASM calls too
-						project.active_tasks.insert(build_token,
-							Scoped::new(found_target.name.scope.to_owned(), Default::default()));
-
 						println!("# {}", &found_target.name.as_cpath());
 						let child_reason = BuildReason::Dependency(build_token);
-
 
 						// TODO track which module the target was defined in
 						let module_path: Scoped<CPath> = found_target.name.with_value(
@@ -584,11 +578,11 @@ impl<M: BuildModule> Project<M> {
 							// TODO can we have a FunctionSpec with references?
 							debug!("calling {:?}", target.build);
 							
-							// TODO can this be a literal FnSpec build? That might reduce code duplication
-							let bytes = wasm_module.call(& FunctionSpec {
-								fn_name: target.build.fn_name.to_owned(),
-								module: None, // not needed at this point; TODO separate type without a module?
-								config: target.build.config.to_owned(),
+							let bytes = wasm_module.call(InternalCall {
+								scope: &found_target.name.scope,
+								token: build_token,
+								fn_name: &target.build.fn_name,
+								config: &target.build.config,
 							}, &ctx, project_handle)?;
 							let _: () = serde_json::from_slice(&bytes)?;
 							Ok(())
@@ -661,11 +655,6 @@ impl<M: BuildModule> Project<M> {
 				let do_build = |project, _ctx: &(), build_token| {
 					let mut project: Mutexed<Project<M>> = project;
 
-					// Need to record the scope so WASM requests can pull it out.
-					// This seems suboptimal, and we repeat it for build invocations too
-					project.active_tasks.insert(build_token,
-						Scoped::new(request.scope.to_owned(), Default::default()));
-
 					let file_dependency = FileDependency::new(rel_path.to_owned());
 					let (project_ret, mut wasm_module) = Self::load_module_inner(
 						project,
@@ -675,7 +664,12 @@ impl<M: BuildModule> Project<M> {
 
 					let result: String = project.unlocked_block(|project_handle| {
 						let ctx = BaseCtx::new(spec.config.value().to_owned(), build_token.raw());
-						let bytes = wasm_module.call(spec, &ctx, &project_handle)?;
+						let bytes = wasm_module.call(InternalCall {
+							token: build_token,
+							scope: &request.scope,
+							fn_name: &spec.fn_name,
+							config: &spec.config,
+						}, &ctx, &project_handle)?;
 						Ok(String::from_utf8(bytes)?)
 					})?;
 					
@@ -711,21 +705,13 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	fn collect_deps(&mut self, token: ActiveBuildToken) -> DepSet {
-		let collected = self.active_tasks.remove(&token).map(|x| x.value).unwrap_or_else(Default::default);
+		let collected = self.active_tasks.remove(&token).unwrap_or_else(Default::default);
 		debug!("Collected {:?} deps for token {:?}: {:?}", collected.len(), token, &collected);
 		collected
 	}
 
 	pub fn get_deps(&self, token: ActiveBuildToken) -> Option<&DepSet> {
-		self.active_tasks.get(&token).map(|x| &x.value)
-	}
-
-	pub fn scope_for(&self, token: ActiveBuildToken) -> Scope {
-		let scope = self.active_tasks.get(&token).map(|x| x.scope.to_owned()).unwrap_or_else(||
-			panic!("Build task {:?} has no active scope", token)
-		);
-		debug!("Returning scope {:?} for build {:?}", &scope, token);
-		scope
+		self.active_tasks.get(&token)
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
@@ -735,7 +721,7 @@ impl<M: BuildModule> Project<M> {
 
 			// NOTE: This requires we always insert at the start of the build, since we can't know the scope later
 			let parent_dep_set = self.active_tasks.get_mut(&parent).ok_or_else(||anyhow!("No active task: {:?}", parent))?;
-			parent_dep_set.value.add(key, result);
+			parent_dep_set.add(key, result);
 		}
 		Ok(())
 	}

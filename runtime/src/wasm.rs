@@ -10,7 +10,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::BuildModule, path_util::{Scoped, CPath}};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::{BuildModule, InternalCall}, path_util::{Scoped, CPath, Scope}, err::result_block};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -128,26 +128,29 @@ impl StateRef {
 		Ok((buf_offset, strlen))
 	}
 	
-	fn call_str<O, FO: FnOnce(Vec<u8>) -> Result<O>, C: AsContextMut>(&self, mut store: C, f: TypedFunc<(u32, u32, u32, u32), ()>, arg: &str, fo: FO) -> Result<O> {
-		let (buf, len) = self.send_string(store.as_context_mut(), arg)?;
+	fn call_str<O, FO: FnOnce(Vec<u8>) -> Result<O>, C: AsContextMut>(&self, mut store: C, f: TypedFunc<(u32, u32, u32, u32), ()>, arg: &str, fo: FO) -> (C, Result<O>) {
+		let result = result_block(|| {
+			let (buf, len) = self.send_string(store.as_context_mut(), arg)?;
 
-		let read = self.read();
-		// Grab a few things from state and then drop read before calling.
-		// Calling the function could reentrantly invoke anything, we need to leave state unlocked
-		let state = read.as_ref()?;
-		let outbox_ptr = state.outbox_ptr;
-		let outbox_len = state.outbox_len;
-		drop(read);
+			let read = self.read();
+			// Grab a few things from state and then drop read before calling.
+			// Calling the function could reentrantly invoke anything, we need to leave state unlocked
+			let state = read.as_ref()?;
+			let outbox_ptr = state.outbox_ptr;
+			let outbox_len = state.outbox_len;
+			drop(read);
 
-		f.call(store.as_context_mut(), (buf.raw, len, outbox_ptr.raw, outbox_len.raw))?;
-		
-		let ret_offset = WasmOffset::new(self.read_u32(store.as_context(), outbox_ptr)?);
+			f.call(store.as_context_mut(), (buf.raw, len, outbox_ptr.raw, outbox_len.raw))?;
+			
+			let ret_offset = WasmOffset::new(self.read_u32(store.as_context(), outbox_ptr)?);
 
-		// we need to read the u32 pointers via the memory API, interpreting as little-endian (wasm) u32
-		let ret_len = self.read_u32(store.as_context(), outbox_len)?;
-		let ret_bytes = self.copy_bytes(store.as_context(), ret_offset, ret_len)?;
-		fo(ret_bytes)
-		// TODO free ret_bytes from guest memory
+			// we need to read the u32 pointers via the memory API, interpreting as little-endian (wasm) u32
+			let ret_len = self.read_u32(store.as_context(), outbox_len)?;
+			let ret_bytes = self.copy_bytes(store.as_context(), ret_offset, ret_len)?;
+			fo(ret_bytes)
+			// TODO free ret_bytes from guest memory
+		});
+		(store, result)
 	}
 
 	// can't be a real Drop because it needs access to mut store
@@ -160,20 +163,43 @@ impl StateRef {
 		Ok(())
 	}
 
-	pub fn call<C: AsContextMut, Ctx: Serialize>(&self, mut store: C, f: &FunctionSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>) -> Result<Vec<u8>> {
+	pub fn call<C: AsContextMut<Data = StoreInner>, Ctx: Serialize>(&self, mut store: C, f: InternalCall, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>) -> Result<Vec<u8>> {
 		debug!("call({:?})", f);
 		let mut write = self.write();
 		let state = write.as_ref()?;
+
+		// We wrap every call by inserting the scope into the store. This
+		// lets us reattach the (implicit) scope within `invoke`
+		let mut store_ctx = store.as_context_mut();
+		let scope_map = store_ctx.data_mut();
+		let inserted = match scope_map.entry(f.token) {
+			Entry::Occupied(_) => false,
+			Entry::Vacant(entry) => {
+				entry.insert(f.scope.to_owned());
+				true
+			}
+		};
+		
 		let call_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(
-			store.as_context_mut(), &f.fn_name)?;
+			store_ctx, &f.fn_name)?;
 		drop(write);
-		self.call_str(store, call_ffi, &serde_json::to_string(arg)?, |b| Ok(b))
+		let (mut store, result) = self.call_str(store, call_ffi, &serde_json::to_string(arg)?, |b| Ok(b));
+
+		if inserted {
+			let mut store_ctx = store.as_context_mut();
+			let scope_map = store_ctx.data_mut();
+			scope_map.remove(&f.token);
+		}
+
+		result
 	}
 }
 
+type StoreInner = HashMap<ActiveBuildToken, Scope>;
+
 pub struct WasmModule {
 	state: StateRef,
-	store: Store<()>,
+	store: Store<StoreInner>,
 }
 
 impl BuildModule for WasmModule {
@@ -185,12 +211,12 @@ impl BuildModule for WasmModule {
 	}
 	
 	fn load(engine: &Engine, module: &Module, project: ProjectRef<Self>) -> Result<WasmModule> {
-		let mut linker = Linker::new(&engine);
+		let mut linker = Linker::<StoreInner>::new(&engine);
 
 		let mut state = StateRef::empty();
 		
 		let state_invoke = state.clone(); // to move into closure
-		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, ()>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
+		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, StoreInner>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
 			debug!("trou_invoke");
 			let mut state = state_invoke.clone();
 			let response: Result<DependencyResponse> = (|| { // TODO: return DependencyResponse
@@ -204,8 +230,10 @@ impl BuildModule for WasmModule {
 				let TaggedDependencyRequest { token, request } = request;
 				// TODO can we store the scope in WASM context, instead of project?
 				let token = ActiveBuildToken::from_raw(token);
-				let scope = project.scope_for(token);
-				let scoped_request = Scoped::new(scope, &request);
+				let scope_map = caller.data_mut();
+				let scope = scope_map.get(&token)
+					.ok_or_else(|| anyhow!("invoke called without an extive scope; this should be impossible"))?;
+				let scoped_request = Scoped::new(scope.to_owned(), &request);
 				let (project, persist) = Project::build(project, scoped_request, &BuildReason::Dependency(token))?;
 				persist.into_response(&project, &request)
 			})();
@@ -218,7 +246,7 @@ impl BuildModule for WasmModule {
 		})?;
 
 		let state_debug = state.clone(); // to move into closure
-		linker.func_wrap("env", "trou_debug", move |mut caller: Caller<'_, ()>, data: u32, data_len: u32| {
+		linker.func_wrap("env", "trou_debug", move |mut caller: Caller<'_, _>, data: u32, data_len: u32| {
 			let state = state_debug.clone();
 			let s: Result<String> = (||{
 				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
@@ -227,7 +255,7 @@ impl BuildModule for WasmModule {
 			println!("debug: {}", &s.expect("failed to decode debug string"));
 		})?;
 
-		let mut store = Store::new(&engine, ());
+		let mut store = Store::new(&engine, Default::default());
 		debug!("instantiating...");
 		let instance = linker.instantiate(&mut store, &module)?;
 
@@ -256,7 +284,7 @@ impl BuildModule for WasmModule {
 		Ok(WasmModule { state, store })
 	}
 
-	fn call<Ctx: Serialize>(&mut self, f: &FunctionSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+	fn call<Ctx: Serialize>(&mut self, f: InternalCall, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
 		self.state.call(&mut self.store, f, arg, _unlocked_evidence)
 	}
 }
