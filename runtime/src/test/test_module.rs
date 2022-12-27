@@ -225,6 +225,7 @@ impl Invoker for TestInvoker {
 			.ok_or_else(|| format!("No invoke reference found for token {:?}", &self.token))
 			.unwrap()
 			.to_owned();
+		drop(map);
 		let BuildState { project, module, scope } = build_state;
 		let project = project.lock();
 		let (build_request, post_build) = BuildRequest::from(request, Some(module), &scope)?;

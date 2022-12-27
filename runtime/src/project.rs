@@ -240,19 +240,18 @@ impl<M: BuildModule> Project<M> {
 
 	pub fn load_yaml_rules<'a>(
 		project: ProjectMutex<'a, M>,
-		path: Scoped<&CPath>,
+		path: &Unscoped,
 		reason: &BuildReason
 	) -> Result<ProjectMutexPair<'a, M, Vec<Rule>>> {
-		let full_path = path.as_cpath();
-		debug!("Loading YAML rules {:?} for {:?}", full_path, reason);
+		debug!("Loading YAML rules {:?} for {:?}", path, reason);
 		// First, build the module itself and register it as a dependency.
-		let request = BuildRequest::FileDependency(full_path.clone());
+		let request = BuildRequest::FileDependency(path.clone());
 		let (mut project, module_built) = Self::build(project, &request, reason)?;
 		
 		project.register_dependency(reason.parent(), request, module_built)?;
 
-		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(&full_path.0)?)?) )
-			.with_context(|| format!("Loading rules YAML: {}", full_path))?;
+		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(&path.0)?)?) )
+			.with_context(|| format!("Loading rules YAML: {}", path))?;
 		
 		Ok((project, rules))
 	}
@@ -358,12 +357,17 @@ impl<M: BuildModule> Project<M> {
 						.map(|rel| Scope::new(name.scope.join_simple(rel.to_owned())))
 						.unwrap_or_else(|| name.scope.to_owned());
 					
+					let module_path = ResolveModule {
+						explicit_path: Some(Scoped::new(name.scope.clone(), &include.module)),
+						source_module,
+					}.resolve()?;
+					let mut wasm_module_path = None;
+
 					let rules = match include.mode {
 						IncludeMode::YAML => {
-							let scoped_module = Scoped::new(name.scope.clone(), &include.module);
 							let (project_ret, rules) = Self::load_yaml_rules(
 								project,
-								scoped_module,
+								&module_path,
 								&BuildReason::Import
 							).with_context(ctx)?;
 							project = project_ret;
@@ -371,17 +375,13 @@ impl<M: BuildModule> Project<M> {
 						},
 
 						IncludeMode::WASM => {
-							let full_module = ResolveModule {
-								explicit_path: Some(Scoped::new(name.scope.clone(), &include.module)),
-								source_module,
-							}.resolve()?;
-
 							let request = BuildRequest::WasmCall(ResolvedFnSpec {
 								scope: absolute_scope.clone(),
 								fn_name: "get_rules".to_string(),
-								full_module: full_module,
+								full_module: module_path.clone(),
 								config: include.config.to_owned(),
 							});
+							wasm_module_path = Some(module_path);
 
 							let (project_ret, persist_dep) = result_block(|| {
 								let (project, persist_dep) = Project::build(project,
@@ -401,10 +401,9 @@ impl<M: BuildModule> Project<M> {
 						},
 					};
 
-
 					handle.with_write(|writeable| {
 						let nested = MutableRule::Nested(Nested {
-							module_path: todo!(),
+							module_path: wasm_module_path,
 							rules: rules.into_iter()
 								.map(|rule| ProjectRule::from_rule(rule, &name.scope))
 								.collect::<Result<Vec<ProjectRule>>>()?,
