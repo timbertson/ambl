@@ -10,7 +10,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken, BuildRequest}, persist::{PersistFile, FunctionSpecKey}, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::{PersistFile, FunctionSpecKey, BuildRequest}, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -196,12 +196,6 @@ impl StateRef {
 	}
 }
 
-// #[derive(Debug, Clone, PartialEq)]
-// struct ActiveBuildContext {
-// 	scope: Scope,
-// 	module: Unscoped, // TODO arc?
-// }
-
 type StoreInner = HashMap<ActiveBuildToken, Scope>;
 
 pub struct WasmModule {
@@ -249,7 +243,7 @@ impl BuildModule for WasmModule {
 				let scope = scope_map.get(&token)
 					.ok_or_else(|| anyhow!("invoke called without an extive scope; this should be impossible"))?;
 
-				let build_request: BuildRequest = BuildRequest::from(request, Some(&module_arc), scope)?;
+				let (build_request, post_build) = BuildRequest::from(request, Some(&module_arc), scope)?;
 
 				let project = project_handle.lock("trou_invoke")?;
 				let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
@@ -258,7 +252,7 @@ impl BuildModule for WasmModule {
 					BuildRequest::FileDependency(ref f) => Some(f),
 					_ => None,
 				};
-				persist.into_response(&project, file_request)
+				persist.into_response(&project, &post_build)
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {

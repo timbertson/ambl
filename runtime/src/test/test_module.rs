@@ -9,7 +9,7 @@ use tempdir::TempDir;
 use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse, FileDependencyType}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, BuildFnCall, BuildRequest}, persist::{PersistFile, DependencyKey, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile}, persist::{PersistFile, Persist, PersistDependency, BuildRequest, FunctionSpecKey}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
@@ -134,7 +134,7 @@ impl<'a> BuildModule for TestModule<'a> {
 		Ok(module.to_owned())
 	}
 
-	fn call<Ctx: serde::Serialize>(&mut self, f: &BuildFnCall, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+	fn call<Ctx: serde::Serialize>(&mut self, f: &FunctionSpecKey, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
 		if f.fn_name == "get_rules" {
 			let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
 			TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
@@ -227,11 +227,10 @@ impl Invoker for TestInvoker {
 			.to_owned();
 		let BuildState { project, module, scope } = build_state;
 		let project = project.lock();
-		let build_request = BuildRequest::from(request, Some(module), &scope)?;
-		let scoped_request = Scoped::new(scope.to_owned(), &build_request);
-		debug!("TestInvoker building {:?}", &scoped_request);
-		let (project, dep) = Project::build(project, scoped_request, &BuildReason::Dependency(self.token))?;
-		dep.into_response(&project, build_request.file_dependency())
+		let (build_request, post_build) = BuildRequest::from(request, Some(module), &scope)?;
+		debug!("TestInvoker building {:?}", &build_request);
+		let (project, dep) = Project::build(project, &build_request, &BuildReason::Dependency(self.token))?;
+		dep.into_response(&project, &post_build)
 	}
 }
 
@@ -345,7 +344,7 @@ impl<'a> TestProject<'a> {
 		p.inject_module(&s, v);
 		// mark the module file as fresh to skip having to write an actual file
 		p.inject_cache(
-			DependencyKey::FileDependency(Unscoped::new(s)),
+			BuildRequest::FileDependency(Unscoped::new(s)),
 			Persist::File(Some(FAKE_FILE.clone()))
 		).expect("inject_module");
 		drop(p);
@@ -359,7 +358,7 @@ impl<'a> TestProject<'a> {
 			target: None,
 		};
 		p.inject_cache(
-			DependencyKey::FileDependency(Unscoped::new(v.into())),
+			BuildRequest::FileDependency(Unscoped::new(v.into())),
 			Persist::File(Some(stat))
 		).expect("touch_fake");
 		drop(p);
@@ -378,15 +377,13 @@ impl<'a> TestProject<'a> {
 	pub fn build_file_as(&self, f: &str, ret: FileDependencyType) -> Result<DependencyResponse> {
 		let project = self.lock();
 		println!("\n=== start build_file({})", f);
-		let req = BuildRequest::FileDependency(FileDependency {
-			path: f.to_owned(),
-			ret,
-		});
-		let scoped_req = Scoped::new(Scope::root(), &req);
-		let (project, result) = Project::build(project, scoped_req, &BuildReason::Explicit)
+		let path = Unscoped::new(f.to_owned());
+		let req = BuildRequest::FileDependency(path.clone());
+		let post_build = PostBuild::FileDependency(PostBuildFile { path, ret });
+		let (project, result) = Project::build(project, &req, &BuildReason::Explicit)
 			.with_context(|| format!("Building {:?}", &req))?;
 
-		let response = result.into_response(&project, req.file_dependency());
+		let response = result.into_response(&project, &post_build);
 		drop(project);
 		println!("=== end build_file({})\n", f);
 

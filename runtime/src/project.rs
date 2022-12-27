@@ -209,7 +209,7 @@ impl<M: BuildModule> Project<M> {
 	) -> Result<ProjectMutexPair<'a, M, M>> {
 		debug!("Loading module {:?} for {:?}", full_path, reason);
 		// First, build the module file itself and register it as a dependency.
-		let file_dependency = BuildRequest::FileDependency(ResolvedFileDependency::new(full_path.to_owned()));
+		let file_dependency = BuildRequest::FileDependency(full_path.to_owned());
 		let (mut project, module_built) = Self::build(project, &file_dependency, reason)?;
 
 		result_block(|| {
@@ -246,11 +246,10 @@ impl<M: BuildModule> Project<M> {
 		let full_path = path.as_cpath();
 		debug!("Loading YAML rules {:?} for {:?}", full_path, reason);
 		// First, build the module itself and register it as a dependency.
-		let request = BuildRequest::FileDependency(ResolvedFileDependency::new(full_path.clone()));
+		let request = BuildRequest::FileDependency(full_path.clone());
 		let (mut project, module_built) = Self::build(project, &request, reason)?;
 		
-		let key = DependencyKey::from(request);
-		project.register_dependency(reason.parent(), key, module_built)?;
+		project.register_dependency(reason.parent(), request, module_built)?;
 
 		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(&full_path.0)?)?) )
 			.with_context(|| format!("Loading rules YAML: {}", full_path))?;
@@ -391,7 +390,7 @@ impl<M: BuildModule> Project<M> {
 								Ok((project, persist_dep))
 							}).with_context(ctx)?;
 
-							let rules: Vec<Rule> = match persist_dep.into_response(&project_ret, None)? {
+							let rules: Vec<Rule> = match persist_dep.into_response(&project_ret, &PostBuild::Unit)? {
 								DependencyResponse::Str(json) => serde_json::from_str(&json)?,
 								other => {
 									return Err(anyhow!("Unexpected wasm call response: {:?}", other));
@@ -469,7 +468,7 @@ impl<M: BuildModule> Project<M> {
 		mut project: ProjectMutex<'a, M>,
 		// scope: &Scope,
 		reason: &BuildReason,
-		key: DependencyKey,
+		key: BuildRequest,
 		get_ctx: ComputeCtx,
 		needs_rebuild: NeedsRebuild,
 		build_fn: Build
@@ -526,7 +525,6 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, result))
 	}
 
-	// TODO: only FileDependency needs to be scoped, and it doesn't need the scope - it could be pre-resolved!
 	pub fn build<'a>(
 		project: ProjectMutex<'a, M>,
 		request: &BuildRequest,
@@ -535,8 +533,8 @@ impl<M: BuildModule> Project<M> {
 		debug!("build({:?})", request);
 		
 		match request {
-			BuildRequest::FileDependency(file_dependency) => {
-				let file_simple = file_dependency.path.0.clone().into_simple_or_self();
+			BuildRequest::FileDependency(path) => {
+				let file_simple = path.0.clone().into_simple_or_self();
 				let get_target = |project| match file_simple {
 					Result::Ok(ref simple) => Project::target(project, simple),
 					Result::Err(_) => Ok((project, None)),
@@ -545,8 +543,6 @@ impl<M: BuildModule> Project<M> {
 					Result::Ok(ref simple) => simple.as_ref(),
 					Result::Err(ref cpath) => cpath,
 				};
-
-				let key: DependencyKey = DependencyKey::from(request.to_owned());
 
 				let needs_rebuild = |project, target: &Option<FoundTarget>, cached: &Persist| {
 					if let Some(target) = target {
@@ -615,14 +611,7 @@ impl<M: BuildModule> Project<M> {
 							},
 							_ => {
 								// treat it as a source file
-								let persist_file = PersistFile::from_path(cpath_ref, None)?;
-
-								// Only allow a missing file if we are explicitly testing for existence
-								if persist_file.is_none() && file_dependency.ret != FileDependencyType::Existence {
-									return Err(anyhow!("No such file or directory: {}", cpath_ref));
-								}
-
-								Persist::File(persist_file)
+								Persist::File(PersistFile::from_path(cpath_ref, None)?)
 							},
 						}
 					};
@@ -632,13 +621,11 @@ impl<M: BuildModule> Project<M> {
 				// NOTE: scope needs to be for the TARGET, not the name.
 				// But only a buildable has that....
 				Self::build_with_cache_awareness(
-					project, reason, key,
+					project, reason, request.to_owned(),
 					get_target, needs_rebuild, do_build)
 			},
 
 			BuildRequest::WasmCall(spec) => {
-				let dependency_key = DependencyKey::WasmCall(spec.to_owned());
-
 				let needs_rebuild = |project, _ctx: &(), cached: &Persist| {
 					if let Persist::Wasm(cached_call) = cached {
 						Self::requires_build(project, cached_call)
@@ -674,7 +661,7 @@ impl<M: BuildModule> Project<M> {
 
 				let get_ctx = |project| Ok((project, ()));
 				Self::build_with_cache_awareness(
-					project, reason, dependency_key,
+					project, reason, request.to_owned(),
 					get_ctx, needs_rebuild, do_build)
 			},
 			BuildRequest::FileSet(_) => todo!("handle FileSet"),
@@ -704,7 +691,7 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
-	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: DependencyKey, result: PersistDependency) -> Result<()> {
+	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: PersistDependency) -> Result<()> {
 		if let Some(parent) = parent {
 			debug!("registering dependency {:?} against build {:?} (result: {:?}", &key, parent, &result);
 
@@ -726,8 +713,7 @@ impl<M: BuildModule> Project<M> {
 			debug!("requires_build() recursing over dependency {:?}", dep_key);
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
-			let request = dep_key.to_owned().into_request();
-			let (project_ret, dep_latest) = Self::build(project, &request, &reason)?;
+			let (project_ret, dep_latest) = Self::build(project, dep_key, &reason)?;
 			project = project_ret;
 			
 			// if the result differs from what this target was based on, rebuild this target
@@ -745,7 +731,7 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, needs_build))
 	}
 	
-	pub fn lookup(&self, key: &DependencyKey) -> Result<Option<&Cached>> {
+	pub fn lookup(&self, key: &BuildRequest) -> Result<Option<&Cached>> {
 		self.build_cache.lookup(key)
 	}
 
@@ -801,7 +787,7 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	#[cfg(test)]
-	pub fn inject_cache(&mut self, k: DependencyKey, v: Persist) -> Result<()> {
+	pub fn inject_cache(&mut self, k: BuildRequest, v: Persist) -> Result<()> {
 		warn!("injecting cache state: {:?}={:?}", &k, &v);
 		self.build_cache.update(k, v)
 	}
@@ -820,29 +806,24 @@ pub struct FoundTarget {
 	build: FunctionSpecKey,
 }
 
-#[derive(Debug, Clone)]
-// Like DependencyRequest but with more detailed FnCall
-pub enum BuildRequest {
-	FileDependency(ResolvedFileDependency),
-	WasmCall(FunctionSpecKey),
-	EnvVar(String),
-	FileSet(String),
-	Execute(GenCommand<Unscoped>),
-	Universe,
-}
 
 impl BuildRequest {
-	pub fn from(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &Scope) -> Result<Self> {
+	pub fn from(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &Scope) -> Result<(Self, PostBuild)> {
 		Ok(match req {
 			DependencyRequest::FileDependency(v) => {
-				// TODO seems silly to go via a clone, would be good to have a simple (scope, str) -> Unscoped function
 				let FileDependency { path, ret } = v;
+				// TODO seems silly to go via a clone, would be good to have a simple (scope, str) -> Unscoped function
 				let path = Scoped::new(scope.clone(), CPath::new(path)).as_cpath();
-				Self::FileDependency(ResolvedFileDependency { path, ret })
+
+				let ret = PostBuildFile { path: path.clone(), ret };
+				(Self::FileDependency(path), PostBuild::FileDependency(ret))
 			},
-			DependencyRequest::WasmCall(v) => Self::WasmCall(FunctionSpecKey::from(v, source_module, scope.to_owned())?),
-			DependencyRequest::EnvVar(v) => Self::EnvVar(v),
-			DependencyRequest::FileSet(v) => Self::FileSet(v),
+			DependencyRequest::WasmCall(v) => (
+				Self::WasmCall(FunctionSpecKey::from(v, source_module, scope.to_owned())?),
+				PostBuild::Unit
+			),
+			DependencyRequest::EnvVar(v) => (Self::EnvVar(v), PostBuild::Unit),
+			DependencyRequest::FileSet(v) => (Self::FileSet(v), PostBuild::Unit),
 			DependencyRequest::Execute(v) => {
 				let gen_str : GenCommand<String> = v.into();
 				let mut gen = gen_str.convert(|s| {
@@ -855,27 +836,20 @@ impl BuildRequest {
 					},
 					_ => ()
 				};
-				Self::Execute(gen)
+				(Self::Execute(gen), PostBuild::Unit)
 			},
-			DependencyRequest::Universe => Self::Universe,
+			DependencyRequest::Universe => (Self::Universe, PostBuild::Unit),
 		})
-	}
-	
-	pub fn file_dependency(&self) -> Option<&ResolvedFileDependency> {
-		match self {
-			BuildRequest::FileDependency(ref v) => Some(v),
-			_ => None,
-		}
 	}
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct ResolvedFileDependency {
+// Information not needed in the build itself, but used to formuate a response
+pub enum PostBuild {
+	FileDependency(PostBuildFile),
+	Unit,
+}
+
+pub struct PostBuildFile {
 	pub path: Unscoped,
 	pub ret: FileDependencyType,
-}
-impl ResolvedFileDependency {
-	pub fn new(path: Unscoped) -> Self {
-		Self { path, ret: FileDependencyType::Unit }
-	}
 }

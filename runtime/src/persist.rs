@@ -5,49 +5,19 @@ use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
-use crate::{project::{ProjectRef, Project, ProjectHandle, BuildRequest, ResolvedFileDependency}, path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule}, module::BuildModule};
+use crate::project::{ProjectRef, Project, ProjectHandle, PostBuild};
+use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
+use crate::module::BuildModule;
 
-// A dependency request stripped of information which only affects the return value (not the built item)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum DependencyKey {
+// Like DependencyRequest but with more detailed FnCall
+pub enum BuildRequest {
 	FileDependency(Unscoped),
 	WasmCall(FunctionSpecKey),
 	EnvVar(String),
 	FileSet(String),
 	Execute(GenCommand<Unscoped>),
 	Universe,
-}
-
-// Unlike DependencyRquest, DependencyKey does not have an attached
-// scope - all keys are rlative to project root, not the current scope.
-// Note that WasmCall _also_ has a scope in it, because calling
-// a call from a different scope can have a different result
-// TODO can we unify DependencyKey and BuildRequest?
-impl DependencyKey {
-	pub fn from(req: BuildRequest) -> Self {
-		match req {
-			BuildRequest::FileDependency(v) => DependencyKey::FileDependency(v.path),
-
-			BuildRequest::WasmCall(v) => DependencyKey::WasmCall(v),
-			BuildRequest::EnvVar(v) => DependencyKey::EnvVar(v),
-			BuildRequest::FileSet(v) => DependencyKey::FileSet(v),
-			BuildRequest::Execute(v) => DependencyKey::Execute(v),
-			BuildRequest::Universe => DependencyKey::Universe,
-		}
-	}
-	
-	// When we need to reevaluate a dependency, we turn its DB key into a buildable request.
-	pub fn into_request(self) -> BuildRequest {
-		match self {
-			DependencyKey::FileDependency(v) => BuildRequest::FileDependency(ResolvedFileDependency::new(v)),
-
-			DependencyKey::WasmCall(v) => BuildRequest::WasmCall(v),
-			DependencyKey::EnvVar(v) => BuildRequest::EnvVar(v),
-			DependencyKey::FileSet(v) => BuildRequest::FileSet(v),
-			DependencyKey::Execute(v) => BuildRequest::Execute(v),
-			DependencyKey::Universe => BuildRequest::Universe,
-		}
-	}
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -126,11 +96,11 @@ pub struct PersistWasmDependency {
 // dumb workaround for JSON only allowing string keys
 #[derive(Serialize, Deserialize)]
 struct DepStorePersist {
-	items: Vec<(DependencyKey, Persist)>,
+	items: Vec<(BuildRequest, Persist)>,
 }
 
-impl From<HashMap<DependencyKey, Cached>> for DepStorePersist {
-	fn from(map: HashMap<DependencyKey, Cached>) -> Self {
+impl From<HashMap<BuildRequest, Cached>> for DepStorePersist {
+	fn from(map: HashMap<BuildRequest, Cached>) -> Self {
 		Self {
 			items: map
 				.into_iter()
@@ -182,7 +152,7 @@ pub struct DepStore {
 	// wasm_cache: HashMap<FunctionSpec, Cached<PersistWasmCall>>,
 	// env_cache: HashMap<String, Cached<String>>,
 	
-	cache: HashMap<DependencyKey, Cached>
+	cache: HashMap<BuildRequest, Cached>
 }
 
 impl DepStore {
@@ -231,12 +201,12 @@ impl DepStore {
 	}
 
 	// TODO remove these result types if we don't do IO directly...
-	pub fn update(&mut self, key: DependencyKey, persist: Persist) -> Result<()> {
+	pub fn update(&mut self, key: BuildRequest, persist: Persist) -> Result<()> {
 		self.cache.insert(key, Cached::Fresh(persist));
 		Ok(())
 	}
 
-	pub fn lookup(&self, key: &DependencyKey) -> Result<Option<&Cached>> {
+	pub fn lookup(&self, key: &BuildRequest) -> Result<Option<&Cached>> {
 		Ok(self.cache.get(key))
 	}
 }
@@ -320,24 +290,34 @@ impl PersistDependency {
 	}
 
 	// TODO should this be a method on Project now that it needs access to one?
-	pub fn into_response<M: BuildModule>(self, project: &Project<M>, file_dependency: Option<&ResolvedFileDependency>) -> Result<DependencyResponse> {
+	pub fn into_response<M: BuildModule>(self, project: &Project<M>, post_build: &PostBuild) -> Result<DependencyResponse> {
 		use PersistDependency::*;
 		Ok(match self {
 			File(state) => {
-				let file_dependency = file_dependency.unwrap_or_else(|| panic!("file response with non-file request"));
-				match file_dependency.ret {
+				let post_build = match post_build {
+					PostBuild::FileDependency(f) => f,
+					_ => panic!("file response with non-file request"),
+				};
+				let path = &post_build.path;
+
+				// Only allow a missing file if we are explicitly testing for existence
+				if state.is_none() && post_build.ret != FileDependencyType::Existence {
+					return Err(anyhow!("No such file or directory: {}", &path));
+				}
+
+				match post_build.ret {
 					FileDependencyType::Unit => DependencyResponse::Unit,
 					FileDependencyType::Existence => DependencyResponse::Bool(state.is_some()),
 					FileDependencyType::Contents => {
-						let state = state.ok_or_else(|| anyhow!("No file produced for target {}", &file_dependency.path))?;
+						let state = state.ok_or_else(|| anyhow!("No file produced for target {}", &path))?;
 						let contents = if let Some(ref target) = state.target {
 							let full_path = project.dest_path(&Scoped::new(Scope::root(), target.to_owned()))?;
 							fs::read_to_string(full_path.as_ref()).with_context(||
-								format!("Can't read target {} (from {})", &file_dependency.path, &full_path)
+								format!("Can't read target {} (from {})", &path, &full_path)
 							)
 						} else {
-							fs::read_to_string(&file_dependency.path.0).with_context(||
-								format!("Can't read {}", &file_dependency.path)
+							fs::read_to_string(&path.0).with_context(||
+								format!("Can't read {}", &path)
 							)
 						};
 						DependencyResponse::Str(contents?)
@@ -373,7 +353,7 @@ impl HasDependencies for PersistWasmCall {
 // it's stored in Project, keyed by ActiveBuildToken
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DepSet {
-	pub deps: Vec<(DependencyKey, PersistDependency)>,
+	pub deps: Vec<(BuildRequest, PersistDependency)>,
 }
 
 const EMPTY_DEPSET: DepSet = DepSet { deps: Vec::new() };
@@ -384,7 +364,7 @@ impl DepSet {
 		EMPTY_DEPSET_PTR
 	}
 
-	pub fn add(&mut self, request: DependencyKey, result: PersistDependency) {
+	pub fn add(&mut self, request: BuildRequest, result: PersistDependency) {
 		self.deps.push((request, result));
 	}
 
@@ -392,11 +372,11 @@ impl DepSet {
 		self.deps.len()
 	}
 
-	pub fn iter(&self) -> std::slice::Iter<(DependencyKey, PersistDependency)> {
+	pub fn iter(&self) -> std::slice::Iter<(BuildRequest, PersistDependency)> {
 		self.deps.iter()
 	}
 
-	pub fn get(&self, request: &DependencyKey) -> Option<&PersistDependency> {
+	pub fn get(&self, request: &BuildRequest) -> Option<&PersistDependency> {
 		self.deps.iter().find_map(|(key, dep)| {
 			if key == request {
 				Some(dep)

@@ -4,7 +4,12 @@ use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symli
 use anyhow::*;
 use trou_common::build::{self, FileDependency, GenCommand};
 
-use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason, BuildRequest}, sync::{Mutexed, MutexHandle}, path_util::{External, Absolute, Scope, Scoped, CPath, Simple, Unscoped}, err::result_block, module::BuildModule};
+use crate::persist::{DepSet, PersistDependency, Persist, BuildRequest};
+use crate::project::{Project, BuildReason};
+use crate::sync::{Mutexed, MutexHandle};
+use crate::path_util::{External, Absolute, Scope, Scoped, CPath, Simple, Unscoped};
+use crate::err::result_block;
+use crate::module::BuildModule;
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -34,10 +39,10 @@ impl Sandbox {
 	fn collect_paths<'a, 'b, M: BuildModule>(
 		project: &'a Project<M>,
 		dest: &mut HashSet<Simple>,
-		key: &'b DependencyKey,
+		key: &'b BuildRequest,
 	) -> Result<()> where 'a : 'b {
 		match key {
-			DependencyKey::FileDependency(cpath) => {
+			BuildRequest::FileDependency(cpath) => {
 				if let Result::Ok(rel) = cpath.to_owned().0.into_simple() {
 					if dest.contains(&rel) {
 						return Ok(());
