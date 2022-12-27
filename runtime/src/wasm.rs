@@ -231,9 +231,8 @@ impl BuildModule for WasmModule {
 
 		let mut state = StateRef::empty();
 		
-		let path_arc = Arc::new(module.path.clone());
+		let module_arc = Arc::new(module.path.clone());
 		let state_invoke = state.clone(); // to move into closure
-		let state_module = Arc::new(module.path.to_owned());
 		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, StoreInner>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
 			debug!("trou_invoke");
 			let mut state = state_invoke.clone();
@@ -250,13 +249,10 @@ impl BuildModule for WasmModule {
 				let scope = scope_map.get(&token)
 					.ok_or_else(|| anyhow!("invoke called without an extive scope; this should be impossible"))?;
 
-				let build_request: BuildRequest = BuildRequest::from(request, Some(&path_arc), scope)?;
-
-				let module = state_module.clone();
-				let scoped_request = Scoped::new(scope.to_owned(), &build_request);
+				let build_request: BuildRequest = BuildRequest::from(request, Some(&module_arc), scope)?;
 
 				let project = project_handle.lock("trou_invoke")?;
-				let (project, persist) = Project::build(project, scoped_request, &BuildReason::Dependency(token))?;
+				let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
 
 				let file_request = match build_request {
 					BuildRequest::FileDependency(ref f) => Some(f),

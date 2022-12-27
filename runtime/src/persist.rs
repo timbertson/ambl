@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::D
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
-use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command}, rule::{FunctionSpec, Config}};
+use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
 use crate::{project::{ProjectRef, Project, ProjectHandle, BuildRequest, BuildFnCall, ResolvedFileDependency}, path_util::{Simple, Scope, Scoped, CPath, Unscoped}, module::BuildModule};
 
@@ -14,7 +14,7 @@ pub enum DependencyKey {
 	WasmCall(FunctionSpecKey),
 	EnvVar(String),
 	FileSet(String),
-	Execute(Command),
+	Execute(GenCommand<Unscoped>),
 	Universe,
 }
 
@@ -24,8 +24,7 @@ pub enum DependencyKey {
 // a call from a different scope can have a different result
 // TODO can we unify DependencyKey and BuildRequest?
 impl DependencyKey {
-	pub fn from(scoped_req: Scoped<BuildRequest>) -> Self {
-		let Scoped { scope, value: req } = scoped_req;
+	pub fn from(req: BuildRequest) -> Self {
 		match req {
 			BuildRequest::FileDependency(v) => DependencyKey::FileDependency(v.path),
 
@@ -43,30 +42,26 @@ impl DependencyKey {
 		}
 	}
 	
-	// When we need to reevaluate a dependency, we turn its DB key into a buildable
-	// request. Most of the time that's a simple request with a root scope, except for a
-	// WASM call which embeds its own scope (since it matters where you call a function from).
-	pub fn into_request(self) -> Scoped<BuildRequest> {
-		let root = |req| Scoped::new(Scope::root(), req);
+	// When we need to reevaluate a dependency, we turn its DB key into a buildable request.
+	pub fn into_request(self) -> BuildRequest {
 		match self {
-			DependencyKey::FileDependency(v) => root(BuildRequest::FileDependency(ResolvedFileDependency::new(v))),
+			DependencyKey::FileDependency(v) => BuildRequest::FileDependency(ResolvedFileDependency::new(v)),
 
 			DependencyKey::WasmCall(v) => {
 				let FunctionSpecKey { fn_name, scope, full_module, config } = v;
 				let scope = Scope::from_normalized(scope);
-				let req = BuildRequest::WasmCall(BuildFnCall {
+				BuildRequest::WasmCall(BuildFnCall {
 					scope: scope.clone(),
 					fn_name,
 					config,
 					full_module
-				});
-				Scoped::new(scope, req)
+				})
 			},
 
-			DependencyKey::EnvVar(v) => root(BuildRequest::EnvVar(v)),
-			DependencyKey::FileSet(v) => root(BuildRequest::FileSet(v)),
-			DependencyKey::Execute(v) => root(BuildRequest::Execute(v)),
-			DependencyKey::Universe => root(BuildRequest::Universe),
+			DependencyKey::EnvVar(v) => BuildRequest::EnvVar(v),
+			DependencyKey::FileSet(v) => BuildRequest::FileSet(v),
+			DependencyKey::Execute(v) => BuildRequest::Execute(v),
+			DependencyKey::Universe => BuildRequest::Universe,
 		}
 	}
 }

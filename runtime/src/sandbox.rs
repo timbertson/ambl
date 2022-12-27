@@ -2,9 +2,9 @@ use log::*;
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use trou_common::build::{self, FileDependency};
+use trou_common::build::{self, FileDependency, GenCommand};
 
-use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason, BuildRequest}, sync::{Mutexed, MutexHandle}, path_util::{External, Absolute, Scope, Scoped, CPath, Simple}, err::result_block, module::BuildModule};
+use crate::{persist::{DepSet, PersistDependency, Persist, DependencyKey}, project::{Project, BuildReason, BuildRequest}, sync::{Mutexed, MutexHandle}, path_util::{External, Absolute, Scope, Scoped, CPath, Simple, Unscoped}, err::result_block, module::BuildModule};
 use crate::DependencyRequest;
 
 pub struct Sandbox {
@@ -72,7 +72,7 @@ impl Sandbox {
 	}
 
 	pub fn run<'a, M: BuildModule>(mut project: Mutexed<'a, Project<M>>,
-		command: &Scoped<&build::Command>,
+		command: &GenCommand<Unscoped>,
 		reason: &BuildReason,
 	) -> Result<Mutexed<'a, Project<M>>> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
@@ -82,14 +82,13 @@ impl Sandbox {
 				.context("initializing command sandbox")?;
 		}
 		
-		let build::Command { exe, args, cwd, env, env_inherit, output, input } = command.value;
-		let mut cmd = Command::new(exe);
+		let GenCommand { exe, args, cwd, env, env_inherit, output, input } = command;
+		let mut cmd = Command::new(&exe.0.as_path());
 
 		cmd.env_clear();
 		for k in env_inherit {
-			let dependency_request = BuildRequest::EnvVar(k.to_owned());
-			let request = command.with_value(&dependency_request);
-			let (project_ret, value) = Project::<M>::build(project, request, reason)?;
+			let request = BuildRequest::EnvVar(k.to_owned());
+			let (project_ret, value) = Project::<M>::build(project, &request, reason)?;
 			match value {
 				PersistDependency::Env(value) => {
 					cmd.env(k, value.0);
@@ -137,12 +136,9 @@ impl Sandbox {
 
 			// build up actual CWD from temp + scope + explicit CWD
 			let mut full_cwd: PathBuf = roots.tmp.to_owned().into();
-			if let Some(scope) = command.scope.into_simple() {
-				full_cwd.push::<&CPath>(scope.as_ref());
-			}
 			if let Some(cwd) = cwd {
 				// TODO warn if CWD is absolute?
-				full_cwd.push(cwd);
+				full_cwd.push(&cwd.0);
 			}
 			cmd.current_dir(full_cwd);
 

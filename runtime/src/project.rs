@@ -17,7 +17,7 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::build::{DependencyRequest, DependencyResponse, self, FileDependency, FileDependencyType};
+use trou_common::build::{DependencyRequest, DependencyResponse, self, FileDependency, FileDependencyType, GenCommand};
 use trou_common::ctx::{BaseCtx, TargetCtx};
 use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
@@ -210,7 +210,7 @@ impl<M: BuildModule> Project<M> {
 		debug!("Loading module {:?} for {:?}", full_path, reason);
 		// First, build the module file itself and register it as a dependency.
 		let file_dependency = BuildRequest::FileDependency(ResolvedFileDependency::new(full_path.to_owned()));
-		let (mut project, module_built) = Self::build(project, Scoped::root(&file_dependency), reason)?;
+		let (mut project, module_built) = Self::build(project, &file_dependency, reason)?;
 
 		result_block(|| {
 			let self_ref = project.self_ref.clone().unwrap();
@@ -247,10 +247,9 @@ impl<M: BuildModule> Project<M> {
 		debug!("Loading YAML rules {:?} for {:?}", full_path, reason);
 		// First, build the module itself and register it as a dependency.
 		let request = BuildRequest::FileDependency(ResolvedFileDependency::new(full_path.clone()));
-		let scoped_request = path.with_value(request);
-		let (mut project, module_built) = Self::build(project, scoped_request.as_ref(), reason)?;
+		let (mut project, module_built) = Self::build(project, &request, reason)?;
 		
-		let key = DependencyKey::from(scoped_request);
+		let key = DependencyKey::from(request);
 		project.register_dependency(reason.parent(), key, module_built)?;
 
 		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(&full_path.0)?)?) )
@@ -389,7 +388,7 @@ impl<M: BuildModule> Project<M> {
 
 							let (project_ret, persist_dep) = result_block(|| {
 								let (project, persist_dep) = Project::build(project,
-									name.with_value(&request), // load from the parent scope
+									&request,
 									&BuildReason::Import)?;
 								Ok((project, persist_dep))
 							}).with_context(ctx)?;
@@ -532,12 +531,12 @@ impl<M: BuildModule> Project<M> {
 	// TODO: only FileDependency needs to be scoped, and it doesn't need the scope - it could be pre-resolved!
 	pub fn build<'a>(
 		project: ProjectMutex<'a, M>,
-		request: Scoped<&BuildRequest>,
+		request: &BuildRequest,
 		reason: &BuildReason,
 	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> {
 		debug!("build({:?})", request);
 		
-		match request.value {
+		match request {
 			BuildRequest::FileDependency(file_dependency) => {
 				let file_simple = file_dependency.path.0.clone().into_simple_or_self();
 				let get_target = |project| match file_simple {
@@ -549,7 +548,7 @@ impl<M: BuildModule> Project<M> {
 					Result::Err(ref cpath) => cpath,
 				};
 
-				let key: DependencyKey = DependencyKey::from(request.map_ref(|r| (*r).to_owned()));
+				let key: DependencyKey = DependencyKey::from(request.to_owned());
 
 				let needs_rebuild = |project, target: &Option<FoundTarget>, cached: &Persist| {
 					if let Some(target) = target {
@@ -640,12 +639,10 @@ impl<M: BuildModule> Project<M> {
 			},
 
 			BuildRequest::WasmCall(spec) => {
-				let module_path: Unscoped = todo!();
-
 				let dependency_key = DependencyKey::WasmCall(FunctionSpecKey {
 					fn_name: spec.fn_name.clone(),
-					scope: request.scope.into_simple().map(|n| n.to_owned()),
-					full_module: module_path.clone(),
+					scope: spec.scope.into_simple().map(|n| n.to_owned()),
+					full_module: spec.full_module.clone(),
 					config: spec.config.to_owned(),
 				});
 
@@ -662,16 +659,16 @@ impl<M: BuildModule> Project<M> {
 
 					let (project_ret, mut wasm_module) = Self::load_module_inner(
 						project,
-						&module_path,
+						&spec.full_module,
 						&BuildReason::Dependency(build_token))?;
 					project = project_ret;
 
 					let result: String = project.unlocked_block(|project_handle| {
 						let ctx = BaseCtx::new(spec.config.value().to_owned(), build_token.raw());
 						let build_call = BuildFnCall {
-							scope: request.scope.clone(),
+							scope: spec.scope.clone(),
 							fn_name: spec.fn_name.to_owned(),
-							full_module: module_path.clone(),
+							full_module: spec.full_module.clone(),
 							config: spec.config.clone(),
 						};
 						let bytes = wasm_module.call(&build_call, &ctx, &project_handle)?;
@@ -698,7 +695,7 @@ impl<M: BuildModule> Project<M> {
 				// TODO do we need to add any dependencies first?
 				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
 				// need to add that.
-				let project = Sandbox::run(project, &request.with_value(cmd), reason)?;
+				let project = Sandbox::run(project, cmd, reason)?;
 				Ok((project, PersistDependency::AlwaysClean))
 			},
 			BuildRequest::EnvVar(key) => {
@@ -742,8 +739,8 @@ impl<M: BuildModule> Project<M> {
 			debug!("requires_build() recursing over dependency {:?}", dep_key);
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
-			let request: Scoped<BuildRequest> = dep_key.to_owned().into_request();
-			let (project_ret, dep_latest) = Self::build(project, request.as_ref(), &reason)?;
+			let request = dep_key.to_owned().into_request();
+			let (project_ret, dep_latest) = Self::build(project, &request, &reason)?;
 			project = project_ret;
 			
 			// if the result differs from what this target was based on, rebuild this target
@@ -873,7 +870,7 @@ pub enum BuildRequest {
 	WasmCall(BuildFnCall),
 	EnvVar(String),
 	FileSet(String),
-	Execute(trou_common::build::Command),
+	Execute(GenCommand<Unscoped>),
 	Universe,
 }
 
@@ -889,7 +886,20 @@ impl BuildRequest {
 			DependencyRequest::WasmCall(v) => Self::WasmCall(BuildFnCall::from(v, source_module, scope.to_owned())?),
 			DependencyRequest::EnvVar(v) => Self::EnvVar(v),
 			DependencyRequest::FileSet(v) => Self::FileSet(v),
-			DependencyRequest::Execute(v) => Self::Execute(v),
+			DependencyRequest::Execute(v) => {
+				let gen_str : GenCommand<String> = v.into();
+				let mut gen = gen_str.convert(|s| {
+					Scoped::new(scope.clone(), CPath::new(s)).as_cpath()
+				});
+				// If there is a scope, make sure it's used for the default CWD
+				let override_cwd = match (scope.into_simple(), &gen.cwd) {
+					(Some(scope), None) => {
+						gen.cwd = Some(scope.clone().into());
+					},
+					_ => ()
+				};
+				Self::Execute(gen)
+			},
 			DependencyRequest::Universe => Self::Universe,
 		})
 	}

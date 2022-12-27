@@ -129,7 +129,7 @@ pub struct NestedRule {
 
 
 pub mod dsl {
-	use crate::build::Command;
+	use crate::build::{Command, GenCommand};
 	use super::*;
 
 	// Rule builder functions. Strictly these are just part of the API,
@@ -187,7 +187,7 @@ pub mod dsl {
 	}
 	
 	pub fn cmd<S: Into<String>>(exe: S) -> Command {
-		Command {
+		Command::from(GenCommand::<String> {
 			exe: exe.into(),
 			args: Default::default(),
 			cwd: Default::default(),
@@ -195,6 +195,6 @@ pub mod dsl {
 			env_inherit: Default::default(),
 			output: Default::default(),
 			input: Default::default(),
-		}
+		})
 	}
 }

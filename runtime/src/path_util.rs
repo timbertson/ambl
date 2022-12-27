@@ -198,6 +198,12 @@ impl Scoped<Simple> {
 	}
 }
 
+impl <C: Clone> Clone for Scoped<C> {
+	fn clone(&self) -> Self {
+		Self { scope: self.scope.clone(), value: self.value.clone() }
+	}
+}
+
 // a "canonical" PathBuf which is:
 // - always a valid string
 // - normalized, i.e. contains no trailing `/`, and no internal `../` (but may start with one or more ../ segments)
@@ -424,6 +430,12 @@ impl Deref for Simple {
 impl Into<PathBuf> for Simple {
 	fn into(self) -> PathBuf {
 		self.0.into()
+	}
+}
+
+impl Into<Unscoped> for Simple {
+	fn into(self) -> Unscoped {
+		Unscoped(self.0)
 	}
 }
 

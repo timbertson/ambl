@@ -1,5 +1,5 @@
 use anyhow::*;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::{DerefMut, Deref}};
 
 use serde::{Serialize, Deserialize};
 
@@ -79,10 +79,10 @@ pub enum FileDependencyType {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct Command {
-	pub exe: String,
+pub struct GenCommand<Path> {
+	pub exe: Path,
 	pub args: Vec<String>,
-	pub cwd: Option<String>,
+	pub cwd: Option<Path>,
 	pub env: BTreeMap<String, String>,
 	pub env_inherit: Vec<String>,
 	pub output: Stdio,
@@ -98,6 +98,38 @@ pub struct Command {
 	// impure system deps (look at $PATH and hope for the best)
 	// Also: how do outputs work? Ideally only declared outputs will be allowed back into the project root, but how to declare.
 }
+
+impl<T> GenCommand<T> {
+	pub fn convert<R, F: Fn(T) -> R>(self, f: F) -> GenCommand<R> {
+		let Self { exe, args, cwd, env, env_inherit, output, input } = self;
+		GenCommand {
+			exe: f(exe),
+			args,
+			cwd: cwd.map(f),
+			env,
+			env_inherit,
+			output,
+			input,
+		}
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Command(GenCommand<String>);
+impl Deref for Command {
+	type Target = GenCommand<String>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+impl DerefMut for Command {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.0
+	}
+}
+
 impl Command {
 	pub fn args<S: ToString, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
 		self.args.extend(v.into_iter().map(|a| a.to_string()));
@@ -112,6 +144,18 @@ impl Command {
 	pub fn env_inherit<S: Into<String>, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
 		self.env_inherit.extend(v.into_iter().map(|s| s.into()));
 		self
+	}
+}
+
+impl From<GenCommand<String>> for Command {
+	fn from(c: GenCommand<String>) -> Self {
+		Self(c)
+	}
+}
+
+impl Into<GenCommand<String>> for Command {
+	fn into(self) -> GenCommand<String> {
+		self.0
 	}
 }
 

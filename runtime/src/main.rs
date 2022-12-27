@@ -38,8 +38,7 @@ fn main() -> Result<()> {
 		for arg in args {
 			let request = BuildRequest::FileDependency(ResolvedFileDependency::new(Unscoped::new(arg)));
 			let reason = BuildReason::Explicit;
-			let scope = Scope::root();
-			let (project_ret, _) = Project::build(project_mutexed, Scoped::new(scope, &request), &reason)?;
+			let (project_ret, _) = Project::build(project_mutexed, &request, &reason)?;
 			project_mutexed = project_ret;
 		}
 		Ok(())
