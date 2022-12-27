@@ -74,7 +74,7 @@ pub fn lstat_opt<P: AsRef<Path>>(p: P) -> Result<Option<fs::Metadata>> {
 }
 
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(into = "Option<Simple>", from = "Option<Simple>")]
 pub struct Scope(Option<Arc<Simple>>);
 
@@ -488,6 +488,19 @@ pub enum Kind {
 	Simple,
 	External,
 	Absolute,
+}
+
+pub struct ResolveModule<'a> {
+	pub source_module: Option<&'a Unscoped>,
+	pub explicit_path: Option<Scoped<&'a CPath>>,
+}
+impl<'a> ResolveModule<'a> {
+	pub fn resolve(self) -> Result<Unscoped> {
+		self.explicit_path
+			.map(|scoped| scoped.as_cpath())
+			.or_else(|| self.source_module.map(|p| p.to_owned()))
+			.ok_or_else(||anyhow!("Received a WasmCall without a populated module"))
+	}
 }
 
 #[cfg(test)]

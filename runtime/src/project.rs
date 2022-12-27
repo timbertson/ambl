@@ -24,7 +24,7 @@ use trou_common::rule::*;
 use wasmtime::*;
 
 use crate::{err::*, path_util};
-use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped};
+use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::Sandbox;
@@ -294,10 +294,8 @@ impl<M: BuildModule> Project<M> {
 						explicit_path: module_cpath.as_ref().map(|p| name.with_value(p)),
 					}.resolve()?;
 					Ok((project, Some(FoundTarget {
-						// target: t.to_owned(),
-						// name: Scoped::new(scope, name),
 						rel_name,
-						build: BuildFnCall {
+						build: FunctionSpecKey {
 							scope,
 							fn_name: t.build.fn_name.clone(),
 							full_module,
@@ -379,7 +377,7 @@ impl<M: BuildModule> Project<M> {
 								source_module,
 							}.resolve()?;
 
-							let request = BuildRequest::WasmCall(BuildFnCall {
+							let request = BuildRequest::WasmCall(FunctionSpecKey {
 								scope: absolute_scope.clone(),
 								fn_name: "get_rules".to_string(),
 								full_module: full_module,
@@ -639,12 +637,7 @@ impl<M: BuildModule> Project<M> {
 			},
 
 			BuildRequest::WasmCall(spec) => {
-				let dependency_key = DependencyKey::WasmCall(FunctionSpecKey {
-					fn_name: spec.fn_name.clone(),
-					scope: spec.scope.into_simple().map(|n| n.to_owned()),
-					full_module: spec.full_module.clone(),
-					config: spec.config.to_owned(),
-				});
+				let dependency_key = DependencyKey::WasmCall(spec.to_owned());
 
 				let needs_rebuild = |project, _ctx: &(), cached: &Persist| {
 					if let Persist::Wasm(cached_call) = cached {
@@ -665,13 +658,7 @@ impl<M: BuildModule> Project<M> {
 
 					let result: String = project.unlocked_block(|project_handle| {
 						let ctx = BaseCtx::new(spec.config.value().to_owned(), build_token.raw());
-						let build_call = BuildFnCall {
-							scope: spec.scope.clone(),
-							fn_name: spec.fn_name.to_owned(),
-							full_module: spec.full_module.clone(),
-							config: spec.config.clone(),
-						};
-						let bytes = wasm_module.call(&build_call, &ctx, &project_handle)?;
+						let bytes = wasm_module.call(spec, &ctx, &project_handle)?;
 						Ok(String::from_utf8(bytes)?)
 					})?;
 					
@@ -830,44 +817,14 @@ enum CacheAware<Ctx> {
 #[derive(Debug)]
 pub struct FoundTarget {
 	rel_name: Simple, // the name relative to the build's scope
-	build: BuildFnCall,
+	build: FunctionSpecKey,
 }
-
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-// TODO rename InternalFnCall or ResolvedFnCall?
-// TODO could these be refs?
-pub struct BuildFnCall {
-	pub scope: Scope,
-	pub fn_name: String, // TODO can we default this to `build` for modules?
-	pub full_module: Unscoped,
-	pub config: trou_common::rule::Config,
-}
-
-impl BuildFnCall {
-	pub fn from(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope) -> Result<Self> {
-		let FunctionSpec { fn_name, module, config } = f;
-
-		let explicit_cpath = module.map(CPath::new);
-		let full_module = ResolveModule {
-			source_module,
-			explicit_path: explicit_cpath.as_ref().map(|p| Scoped::new(scope.clone(), p)),
-		}.resolve()?;
-		Ok(Self {
-			scope,
-			fn_name,
-			full_module,
-			config,
-		})
-	}
-}
-
 
 #[derive(Debug, Clone)]
 // Like DependencyRequest but with more detailed FnCall
 pub enum BuildRequest {
 	FileDependency(ResolvedFileDependency),
-	WasmCall(BuildFnCall),
+	WasmCall(FunctionSpecKey),
 	EnvVar(String),
 	FileSet(String),
 	Execute(GenCommand<Unscoped>),
@@ -878,12 +835,12 @@ impl BuildRequest {
 	pub fn from(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &Scope) -> Result<Self> {
 		Ok(match req {
 			DependencyRequest::FileDependency(v) => {
-				// TODO seems silly to go via a clone
+				// TODO seems silly to go via a clone, would be good to have a simple (scope, str) -> Unscoped function
 				let FileDependency { path, ret } = v;
 				let path = Scoped::new(scope.clone(), CPath::new(path)).as_cpath();
 				Self::FileDependency(ResolvedFileDependency { path, ret })
 			},
-			DependencyRequest::WasmCall(v) => Self::WasmCall(BuildFnCall::from(v, source_module, scope.to_owned())?),
+			DependencyRequest::WasmCall(v) => Self::WasmCall(FunctionSpecKey::from(v, source_module, scope.to_owned())?),
 			DependencyRequest::EnvVar(v) => Self::EnvVar(v),
 			DependencyRequest::FileSet(v) => Self::FileSet(v),
 			DependencyRequest::Execute(v) => {
@@ -921,18 +878,4 @@ impl ResolvedFileDependency {
 	pub fn new(path: Unscoped) -> Self {
 		Self { path, ret: FileDependencyType::Unit }
 	}
-}
-
-struct ResolveModule<'a> {
-	source_module: Option<&'a Unscoped>,
-	explicit_path: Option<Scoped<&'a CPath>>,
-}
-impl<'a> ResolveModule<'a> {
-	fn resolve(self) -> Result<Unscoped> {
-		self.explicit_path
-			.map(|scoped| scoped.as_cpath())
-			.or_else(|| self.source_module.map(|p| p.to_owned()))
-			.ok_or_else(||anyhow!("Received a WasmCall without a populated module"))
-	}
-
 }

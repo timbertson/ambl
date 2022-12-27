@@ -5,7 +5,7 @@ use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
-use crate::{project::{ProjectRef, Project, ProjectHandle, BuildRequest, BuildFnCall, ResolvedFileDependency}, path_util::{Simple, Scope, Scoped, CPath, Unscoped}, module::BuildModule};
+use crate::{project::{ProjectRef, Project, ProjectHandle, BuildRequest, ResolvedFileDependency}, path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule}, module::BuildModule};
 
 // A dependency request stripped of information which only affects the return value (not the built item)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -28,13 +28,7 @@ impl DependencyKey {
 		match req {
 			BuildRequest::FileDependency(v) => DependencyKey::FileDependency(v.path),
 
-			BuildRequest::WasmCall(v) => {
-				let BuildFnCall { scope, fn_name, full_module, config } = v;
-				DependencyKey::WasmCall(
-					FunctionSpecKey { fn_name, scope: scope.into_simple().map(|n| n.clone()), full_module, config }
-				)
-			},
-
+			BuildRequest::WasmCall(v) => DependencyKey::WasmCall(v),
 			BuildRequest::EnvVar(v) => DependencyKey::EnvVar(v),
 			BuildRequest::FileSet(v) => DependencyKey::FileSet(v),
 			BuildRequest::Execute(v) => DependencyKey::Execute(v),
@@ -47,17 +41,7 @@ impl DependencyKey {
 		match self {
 			DependencyKey::FileDependency(v) => BuildRequest::FileDependency(ResolvedFileDependency::new(v)),
 
-			DependencyKey::WasmCall(v) => {
-				let FunctionSpecKey { fn_name, scope, full_module, config } = v;
-				let scope = Scope::from_normalized(scope);
-				BuildRequest::WasmCall(BuildFnCall {
-					scope: scope.clone(),
-					fn_name,
-					config,
-					full_module
-				})
-			},
-
+			DependencyKey::WasmCall(v) => BuildRequest::WasmCall(v),
 			DependencyKey::EnvVar(v) => BuildRequest::EnvVar(v),
 			DependencyKey::FileSet(v) => BuildRequest::FileSet(v),
 			DependencyKey::Execute(v) => BuildRequest::Execute(v),
@@ -67,14 +51,33 @@ impl DependencyKey {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+// TODO: rename ResolvedFunctionSpec?
 pub struct FunctionSpecKey {
 	pub fn_name: String,
 	// we track the full path from the project, since that's how modules are keyed
 	pub full_module: Unscoped,
 	// but we also track the scope of this call, since that affects
 	// the results
-	pub scope: Option<Simple>,
+	pub scope: Scope,
 	pub config: Config,
+}
+
+impl FunctionSpecKey {
+	pub fn from(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope) -> Result<Self> {
+		let FunctionSpec { fn_name, module, config } = f;
+
+		let explicit_cpath = module.map(CPath::new);
+		let full_module = ResolveModule {
+			source_module,
+			explicit_path: explicit_cpath.as_ref().map(|p| Scoped::new(scope.clone(), p)),
+		}.resolve()?;
+		Ok(Self {
+			scope,
+			fn_name,
+			full_module,
+			config,
+		})
+	}
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,7 +119,7 @@ pub struct PersistWasmCall {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistWasmDependency {
-	pub spec: BuildFnCall,
+	pub spec: FunctionSpecKey,
 	pub result: String,
 }
 
