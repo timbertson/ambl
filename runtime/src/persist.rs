@@ -13,7 +13,7 @@ use crate::module::BuildModule;
 // Like DependencyRequest but with more detailed FnCall
 pub enum BuildRequest {
 	FileDependency(Unscoped),
-	WasmCall(FunctionSpecKey),
+	WasmCall(ResolvedFnSpec),
 	EnvVar(String),
 	FileSet(String),
 	Execute(GenCommand<Unscoped>),
@@ -22,7 +22,7 @@ pub enum BuildRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 // TODO: rename ResolvedFunctionSpec?
-pub struct FunctionSpecKey {
+pub struct ResolvedFnSpec {
 	pub fn_name: String,
 	// we track the full path from the project, since that's how modules are keyed
 	pub full_module: Unscoped,
@@ -32,7 +32,7 @@ pub struct FunctionSpecKey {
 	pub config: Config,
 }
 
-impl FunctionSpecKey {
+impl ResolvedFnSpec {
 	pub fn from(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope) -> Result<Self> {
 		let FunctionSpec { fn_name, module, config } = f;
 
@@ -89,7 +89,7 @@ pub struct PersistWasmCall {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistWasmDependency {
-	pub spec: FunctionSpecKey,
+	pub spec: ResolvedFnSpec,
 	pub result: String,
 }
 

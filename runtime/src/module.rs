@@ -5,7 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use trou_common::{rule::{Target, Rule, FunctionSpec, Config}, ctx::BaseCtx};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef}, persist::{PersistFile, FunctionSpecKey}, path_util::{CPath, Scope, Unscoped}};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef}, persist::{PersistFile, ResolvedFnSpec}, path_util::{CPath, Scope, Unscoped}};
 
 pub trait BuildModule : Sized {
 	type Compiled: ToOwned;
@@ -16,7 +16,7 @@ pub trait BuildModule : Sized {
 
 	fn call<Ctx: AsRef<BaseCtx> + Serialize>(
 		&mut self,
-		f: &FunctionSpecKey,
+		f: &ResolvedFnSpec,
 		arg: &Ctx,
 		_unlocked_evidence: &ProjectHandle<Self>
 	) -> Result<Vec<u8>>;

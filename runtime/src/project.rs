@@ -294,7 +294,7 @@ impl<M: BuildModule> Project<M> {
 					}.resolve()?;
 					Ok((project, Some(FoundTarget {
 						rel_name,
-						build: FunctionSpecKey {
+						build: ResolvedFnSpec {
 							scope,
 							fn_name: t.build.fn_name.clone(),
 							full_module,
@@ -376,7 +376,7 @@ impl<M: BuildModule> Project<M> {
 								source_module,
 							}.resolve()?;
 
-							let request = BuildRequest::WasmCall(FunctionSpecKey {
+							let request = BuildRequest::WasmCall(ResolvedFnSpec {
 								scope: absolute_scope.clone(),
 								fn_name: "get_rules".to_string(),
 								full_module: full_module,
@@ -803,7 +803,7 @@ enum CacheAware<Ctx> {
 #[derive(Debug)]
 pub struct FoundTarget {
 	rel_name: Simple, // the name relative to the build's scope
-	build: FunctionSpecKey,
+	build: ResolvedFnSpec,
 }
 
 
@@ -819,7 +819,7 @@ impl BuildRequest {
 				(Self::FileDependency(path), PostBuild::FileDependency(ret))
 			},
 			DependencyRequest::WasmCall(v) => (
-				Self::WasmCall(FunctionSpecKey::from(v, source_module, scope.to_owned())?),
+				Self::WasmCall(ResolvedFnSpec::from(v, source_module, scope.to_owned())?),
 				PostBuild::Unit
 			),
 			DependencyRequest::EnvVar(v) => (Self::EnvVar(v), PostBuild::Unit),

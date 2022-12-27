@@ -9,7 +9,7 @@ use tempdir::TempDir;
 use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse, FileDependencyType}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile}, persist::{PersistFile, Persist, PersistDependency, BuildRequest, FunctionSpecKey}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile}, persist::{PersistFile, Persist, PersistDependency, BuildRequest, ResolvedFnSpec}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
@@ -134,7 +134,7 @@ impl<'a> BuildModule for TestModule<'a> {
 		Ok(module.to_owned())
 	}
 
-	fn call<Ctx: serde::Serialize>(&mut self, f: &FunctionSpecKey, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+	fn call<Ctx: serde::Serialize>(&mut self, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
 		if f.fn_name == "get_rules" {
 			let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
 			TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {

@@ -10,7 +10,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::{PersistFile, FunctionSpecKey, BuildRequest}, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::{PersistFile, ResolvedFnSpec, BuildRequest}, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -163,7 +163,7 @@ impl StateRef {
 		Ok(())
 	}
 
-	pub fn call<C: AsContextMut<Data = StoreInner>, Ctx: Serialize + AsRef<BaseCtx>>(&self, mut store: C, f: &FunctionSpecKey, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>) -> Result<Vec<u8>> {
+	pub fn call<C: AsContextMut<Data = StoreInner>, Ctx: Serialize + AsRef<BaseCtx>>(&self, mut store: C, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>) -> Result<Vec<u8>> {
 		debug!("call({:?})", f);
 		let mut write = self.write();
 		let state = write.as_ref()?;
@@ -301,7 +301,7 @@ impl BuildModule for WasmModule {
 		Ok(WasmModule { state, store })
 	}
 
-	fn call<Ctx: AsRef<BaseCtx> + Serialize>(&mut self, f: &FunctionSpecKey, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+	fn call<Ctx: AsRef<BaseCtx> + Serialize>(&mut self, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
 		self.state.call(&mut self.store, f, arg, _unlocked_evidence)
 	}
 }
