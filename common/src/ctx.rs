@@ -3,7 +3,8 @@ use std::{ops::{Deref}, path::{PathBuf, Path}};
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
-use crate::{ffi::{ResultFFI, SizedPtr}, build::{TaggedDependencyRequest, DependencyRequest, DependencyResponse, Command, FileDependencyType, FileDependency}};
+use crate::ffi::{ResultFFI, SizedPtr};
+use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, WriteFile, CopyFile};
 
 #[cfg(target_arch = "wasm32")]
 extern {
@@ -17,6 +18,10 @@ pub unsafe fn trou_invoke(_: *const u8, _: u32, _: &mut *mut u8, _: &mut u32) { 
 
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn trou_debug(_: *const u8, _: u32) {}
+
+fn ignore_result<T>(r: Result<T>) -> Result<()> {
+	r.map(|_| ())
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct BaseCtx {
@@ -41,8 +46,8 @@ impl BaseCtx {
 		}
 	}
 
-	fn invoke_ffi(&self, request: DependencyRequest) -> Result<DependencyResponse> {
-		let tagged = TaggedDependencyRequest { token: self.token, request };
+	fn invoke_ffi(&self, request: Invoke) -> Result<InvokeResponse> {
+		let tagged = TaggedInvoke { token: self.token, request };
 		let buf = serde_json::to_vec(&tagged)?;
 		let mut response = SizedPtr::empty();
 		let response_slice = unsafe {
@@ -52,11 +57,19 @@ impl BaseCtx {
 		ResultFFI::deserialize(response_slice)
 	}
 
-	fn invoke(&self, request: DependencyRequest) -> Result<DependencyResponse> {
+	fn invoke(&self, request: Invoke) -> Result<InvokeResponse> {
 		match &self.invoker {
 			None => self.invoke_ffi(request),
 			Some(invoker) => invoker.invoke(request),
 		}
+	}
+
+	fn invoke_dep(&self, dep: DependencyRequest) -> Result<InvokeResponse> {
+		self.invoke(Invoke::Dependency(dep))
+	}
+
+	fn invoke_action(&self, act: InvokeAction) -> Result<InvokeResponse> {
+		self.invoke(Invoke::Action(act))
 	}
 	
 	// ideally cfg(test), but that doesn't work cross-module
@@ -66,41 +79,41 @@ impl BaseCtx {
 
 	// invoke shortcuts
 	pub fn build<S: Into<String>>(&self, path: S) -> Result<()> {
-		self.invoke(DependencyRequest::FileDependency(FileDependency {
+		self.invoke_dep(DependencyRequest::FileDependency(FileDependency {
 			path: path.into(),
 			ret: FileDependencyType::Unit,
 		})).map(|ret| match ret {
-			DependencyResponse::Unit => (),
+			InvokeResponse::Unit => (),
 			other => panic!("Unexpected file dependency response: {:?}", other),
 		})
 	}
 
 	pub fn exists<S: Into<String>>(&self, path: S) -> Result<bool> {
-		self.invoke(DependencyRequest::FileDependency(FileDependency {
+		self.invoke_dep(DependencyRequest::FileDependency(FileDependency {
 			path: path.into(),
 			ret: FileDependencyType::Existence,
 		})).map(|ret| match ret {
-			DependencyResponse::Bool(b) => b,
+			InvokeResponse::Bool(b) => b,
 			other => panic!("Unexpected file dependency response: {:?}", other),
 		})
 	}
 
 	pub fn read_file<S: Into<String>>(&self, path: S) -> Result<String> {
-		self.invoke(DependencyRequest::FileDependency(FileDependency {
+		self.invoke_dep(DependencyRequest::FileDependency(FileDependency {
 			path: path.into(),
 			ret: FileDependencyType::Contents,
 		})).map(|ret| match ret {
-			DependencyResponse::Str(s) => s,
+			InvokeResponse::Str(s) => s,
 			other => panic!("Unexpected file dependency response: {:?}", other),
 		})
 	}
 
-	pub fn run(&self, cmd: Command) -> Result<DependencyResponse> {
-		self.invoke(DependencyRequest::Execute(cmd))
+	pub fn run(&self, cmd: Command) -> Result<InvokeResponse> {
+		self.invoke_dep(DependencyRequest::Execute(cmd))
 	}
 
 	pub fn always_rebuild(&self) -> Result<()> {
-		self.invoke(DependencyRequest::Universe).map(|_|())
+		ignore_result(self.invoke_dep(DependencyRequest::Universe))
 	}
 }
 
@@ -118,7 +131,7 @@ impl AsMut<BaseCtx> for BaseCtx {
 
 
 pub trait Invoker {
-	fn invoke(&self, request: DependencyRequest) -> Result<DependencyResponse>;
+	fn invoke(&self, request: Invoke) -> Result<InvokeResponse>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -142,6 +155,20 @@ impl TargetCtx {
 	pub fn target(&self) -> &str { &self.target }
 
 	pub fn dest(&self) -> &Path { self.dest.as_path() }
+
+	pub fn write_dest<C: Into<Vec<u8>>>(&self, contents: C) -> Result<()> {
+		ignore_result(self.invoke_action(InvokeAction::WriteFile(WriteFile {
+			path: self.dest.to_str().unwrap().to_owned(),
+			contents: contents.into(),
+		})))
+	}
+
+	pub fn copy_to_dest<S: Into<String>>(&self, path: S) -> Result<()> {
+		ignore_result(self.invoke_action(InvokeAction::CopyFile(CopyFile {
+			src: path.into(),
+			dest: self.dest.to_str().unwrap().to_owned(),
+		})))
+	}
 }
 
 impl Deref for TargetCtx {

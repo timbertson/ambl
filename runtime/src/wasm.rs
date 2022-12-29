@@ -10,7 +10,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::{PersistFile, ResolvedFnSpec, BuildRequest}, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::{PersistFile, ResolvedFnSpec, BuildRequest}, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block, invoke};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -230,29 +230,30 @@ impl BuildModule for WasmModule {
 		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, StoreInner>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
 			debug!("trou_invoke");
 			let mut state = state_invoke.clone();
-			let response: Result<DependencyResponse> = (|| { // TODO: return DependencyResponse
+			let response: Result<InvokeResponse> = (|| { // TODO: return InvokeResponse
 				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
 				let s = String::from_utf8(data_bytes)?;
 				debug!("Got string from wasm: {}", &s);
-				let request: TaggedDependencyRequest = serde_json::from_str(&s)?;
+				let request: TaggedInvoke = serde_json::from_str(&s)?;
 				debug!("Got dep request: {:?} from WebAssembly", &request);
 				let mut project_handle = project.handle();
-				let TaggedDependencyRequest { token, request } = request;
+				let TaggedInvoke { token, request } = request;
 				let token = ActiveBuildToken::from_raw(token);
 				let scope_map = caller.data_mut();
 				let scope = scope_map.get(&token)
-					.ok_or_else(|| anyhow!("invoke called without an extive scope; this should be impossible"))?;
+					.ok_or_else(|| anyhow!("invoke called without an active scope; this should be impossible"))?;
 
-				let (build_request, post_build) = BuildRequest::from(request, Some(&module_arc), scope)?;
-
-				let project = project_handle.lock("trou_invoke")?;
-				let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
-
-				let file_request = match build_request {
-					BuildRequest::FileDependency(ref f) => Some(f),
-					_ => None,
-				};
-				persist.into_response(&project, &post_build)
+				match request {
+					Invoke::Action(action) => {
+						invoke::perform(action)
+					},
+					Invoke::Dependency(request) => {
+						let (build_request, post_build) = BuildRequest::from(request, Some(&module_arc), scope)?;
+						let project = project_handle.lock("trou_invoke")?;
+						let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
+						persist.into_response(&project, &post_build)
+					},
+				}
 			})();
 			debug!("trou_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {

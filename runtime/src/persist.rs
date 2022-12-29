@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::D
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
-use trou_common::{build::{DependencyRequest, DependencyResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
+use trou_common::{build::{DependencyRequest, InvokeResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
 use crate::project::{ProjectRef, Project, ProjectHandle, PostBuild};
 use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
@@ -290,7 +290,7 @@ impl PersistDependency {
 	}
 
 	// TODO should this be a method on Project now that it needs access to one?
-	pub fn into_response<M: BuildModule>(self, project: &Project<M>, post_build: &PostBuild) -> Result<DependencyResponse> {
+	pub fn into_response<M: BuildModule>(self, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
 		use PersistDependency::*;
 		Ok(match self {
 			File(state) => {
@@ -306,8 +306,8 @@ impl PersistDependency {
 				}
 
 				match post_build.ret {
-					FileDependencyType::Unit => DependencyResponse::Unit,
-					FileDependencyType::Existence => DependencyResponse::Bool(state.is_some()),
+					FileDependencyType::Unit => InvokeResponse::Unit,
+					FileDependencyType::Existence => InvokeResponse::Bool(state.is_some()),
 					FileDependencyType::Contents => {
 						let state = state.ok_or_else(|| anyhow!("No file produced for target {}", &path))?;
 						let contents = if let Some(ref target) = state.target {
@@ -320,14 +320,14 @@ impl PersistDependency {
 								format!("Can't read {}", &path)
 							)
 						};
-						DependencyResponse::Str(contents?)
+						InvokeResponse::Str(contents?)
 					},
 				}
 			},
-			Env(env) => DependencyResponse::Str(env.0),
-			Wasm(wasm) => DependencyResponse::Str(wasm.result),
-			AlwaysDirty => DependencyResponse::Unit,
-			AlwaysClean => DependencyResponse::Unit,
+			Env(env) => InvokeResponse::Str(env.0),
+			Wasm(wasm) => InvokeResponse::Str(wasm.result),
+			AlwaysDirty => InvokeResponse::Unit,
+			AlwaysClean => InvokeResponse::Unit,
 		})
 	}
 

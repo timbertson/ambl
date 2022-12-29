@@ -1,5 +1,5 @@
 [workspace]
-members = [ "common", "api", "builder", "runtime", "builtin/rust" ]
+members = [ "common", "api", "builder", "runtime", "builtin/cargo" ]
 
 [profile.release]
 panic = "abort"

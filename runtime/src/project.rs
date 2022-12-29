@@ -17,7 +17,7 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::build::{DependencyRequest, DependencyResponse, self, FileDependency, FileDependencyType, GenCommand};
+use trou_common::build::{DependencyRequest, InvokeResponse, self, FileDependency, FileDependencyType, GenCommand};
 use trou_common::ctx::{BaseCtx, TargetCtx};
 use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
@@ -391,7 +391,7 @@ impl<M: BuildModule> Project<M> {
 							}).with_context(ctx)?;
 
 							let rules: Vec<Rule> = match persist_dep.into_response(&project_ret, &PostBuild::Unit)? {
-								DependencyResponse::Str(json) => serde_json::from_str(&json)?,
+								InvokeResponse::Str(json) => serde_json::from_str(&json)?,
 								other => {
 									return Err(anyhow!("Unexpected wasm call response: {:?}", other));
 								},
@@ -593,8 +593,8 @@ impl<M: BuildModule> Project<M> {
 								fs::rename(&tmp_path, &dest_path)?
 							},
 							None => {
-								// write a dummy file to register the build time
-								fs::write(&dest_path, "")?;
+								return Err(anyhow!("Builder for {} didn't produce an output file (at {})",
+									&name_scoped, tmp_path.display()));
 							},
 						}
 

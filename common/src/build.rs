@@ -5,9 +5,17 @@ use serde::{Serialize, Deserialize};
 
 use crate::rule::FunctionSpec;
 
+// Top level argument to trou_invoke. May be a dependency or an action
+// (e.g write to output file)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Invoke {
+	Dependency(DependencyRequest),
+	Action(InvokeAction),
+}
+
 // A request, which can be turned into a Dependency by resolving
 // the requested resource.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DependencyRequest {
 	// File (or target)
 	FileDependency(FileDependency),
@@ -23,22 +31,27 @@ pub enum DependencyRequest {
 
 // Used to associate a request with the implicit build context
 // in which this code is running
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct TaggedDependencyRequest {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaggedInvoke {
 	pub token: u32,
-	pub request: DependencyRequest,
+	pub request: Invoke,
 }
 
 // response types corresponding to the above
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum DependencyResponse {
+pub enum InvokeResponse {
 	Unit,
 	Bool(bool),
 	Str(String),
 	FileSet(String),
 }
 
-impl TryInto<String> for DependencyResponse {
+impl InvokeResponse {
+	pub fn into_string(self) -> Result<String> { self.try_into() }
+	pub fn into_bool(self) -> Result<bool> { self.try_into() }
+}
+
+impl TryInto<String> for InvokeResponse {
 	type Error = anyhow::Error;
 
 	fn try_into(self) -> Result<String> {
@@ -49,7 +62,7 @@ impl TryInto<String> for DependencyResponse {
 	}
 }
 
-impl TryInto<bool> for DependencyResponse {
+impl TryInto<bool> for InvokeResponse {
 	type Error = anyhow::Error;
 
 	fn try_into(self) -> Result<bool> {
@@ -136,6 +149,16 @@ impl Command {
 		self
 	}
 
+	pub fn arg<S: ToString>(mut self, s: S) -> Self {
+		self.args.push(s.to_string());
+		self
+	}
+
+	pub fn cwd<S: ToString>(mut self, s: S) -> Self {
+		self.cwd = Some(s.to_string());
+		self
+	}
+
 	pub fn env<V: IntoIterator<Item=(String, String)>>(mut self, v: V) -> Self {
 		self.env.extend(v.into_iter());
 		self
@@ -143,6 +166,11 @@ impl Command {
 
 	pub fn env_inherit<S: Into<String>, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
 		self.env_inherit.extend(v.into_iter().map(|s| s.into()));
+		self
+	}
+	
+	pub fn stdout(mut self, v: Stdout) -> Self {
+		self.output.stdout = v;
 		self
 	}
 }
@@ -210,4 +238,22 @@ impl Default for Stdin {
 	fn default() -> Self {
 		Self::Inherit
 	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum InvokeAction {
+	WriteFile(WriteFile),
+	CopyFile(CopyFile),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WriteFile {
+	pub path: String,
+	pub contents: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CopyFile {
+	pub src: String,
+	pub dest: String,
 }

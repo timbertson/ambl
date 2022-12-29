@@ -6,10 +6,10 @@ use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, de
 
 use anyhow::*;
 use tempdir::TempDir;
-use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, DependencyResponse, FileDependencyType}, ctx::{TargetCtx, Invoker, BaseCtx}};
+use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, InvokeResponse, FileDependencyType, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile}, persist::{PersistFile, Persist, PersistDependency, BuildRequest, ResolvedFnSpec}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile}, persist::{PersistFile, Persist, PersistDependency, BuildRequest, ResolvedFnSpec}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}, invoke};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
@@ -218,20 +218,25 @@ impl TestInvoker {
 	}
 }
 impl Invoker for TestInvoker {
-	fn invoke(&self, request: DependencyRequest) -> Result<DependencyResponse> {
-		let arc = Arc::clone(&INVOKE_REFERENCES);
-		let map = arc.lock().unwrap();
-		let build_state = map.get(&self.token)
-			.ok_or_else(|| format!("No invoke reference found for token {:?}", &self.token))
-			.unwrap()
-			.to_owned();
-		drop(map);
-		let BuildState { project, module, scope } = build_state;
-		let project = project.lock();
-		let (build_request, post_build) = BuildRequest::from(request, Some(module), &scope)?;
-		debug!("TestInvoker building {:?}", &build_request);
-		let (project, dep) = Project::build(project, &build_request, &BuildReason::Dependency(self.token))?;
-		dep.into_response(&project, &post_build)
+	fn invoke(&self, request: Invoke) -> Result<InvokeResponse> {
+		match request {
+			Invoke::Action(action) => invoke::perform(action),
+			Invoke::Dependency(request) => {
+				let arc = Arc::clone(&INVOKE_REFERENCES);
+				let map = arc.lock().unwrap();
+				let build_state = map.get(&self.token)
+					.ok_or_else(|| format!("No invoke reference found for token {:?}", &self.token))
+					.unwrap()
+					.to_owned();
+				drop(map);
+				let BuildState { project, module, scope } = build_state;
+				let project = project.lock();
+				let (build_request, post_build) = BuildRequest::from(request, Some(module), &scope)?;
+				debug!("TestInvoker building {:?}", &build_request);
+				let (project, dep) = Project::build(project, &build_request, &BuildReason::Dependency(self.token))?;
+				dep.into_response(&project, &post_build)
+			},
+		}
 	}
 }
 
@@ -375,7 +380,7 @@ impl<'a> TestProject<'a> {
 		self.build_file_as(f, FileDependencyType::Contents)?.try_into()
 	}
 
-	pub fn build_file_as(&self, f: &str, ret: FileDependencyType) -> Result<DependencyResponse> {
+	pub fn build_file_as(&self, f: &str, ret: FileDependencyType) -> Result<InvokeResponse> {
 		let project = self.lock();
 		println!("\n=== start build_file({})", f);
 		let path = Unscoped::new(f.to_owned());

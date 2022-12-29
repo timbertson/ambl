@@ -12,12 +12,14 @@ use super::test_module::DEFAULT_BUILD_FN;
 #[serial]
 fn simple_build() -> Result<()> {
 	TestProject::in_tempdir(|p: &TestProject| {
-		p.target_builder("a", |p, _| {
-			Ok(p.record("built!"))
+		p.target_builder("a", |p, c| {
+			p.record("built!");
+			c.write_dest("output")
 		})
 		.build_file("a")?;
 
 		eq!(p.log(), vec!("built!"));
+		eq!(fs::read_to_string(".trou/out/a")?, "output".to_owned());
 		Ok(())
 	})
 }

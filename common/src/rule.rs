@@ -1,3 +1,4 @@
+use anyhow::*;
 use serde::{Serialize, Deserialize};
 use std::hash::Hash;
 
@@ -85,9 +86,9 @@ pub struct FunctionSpec {
 }
 
 impl FunctionSpec {
-	pub fn config(mut self, v: serde_json::Value) -> Self {
-		self.config = Config(Some(v));
-		self
+	pub fn config<C: Serialize>(mut self, c: C) -> Result<Self> {
+		self.config = Config(Some(serde_json::to_value(c)?));
+		Ok(self)
 	}
 
 	pub fn module<S: Into<String>>(mut self, s: S) -> Self {

@@ -1188,6 +1188,15 @@ dependencies = [
 
 [[package]]
 name = "toml"
+version = "0.4.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "758664fc71a3a69038656bee8b6be6477d2a6c315a6b81f7081f591bffa4111f"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "toml"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d82e1a7758622a465f8cee077614c73484dac5b836c02ff6a40d5d1010324d7"
@@ -1206,12 +1215,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "trou-builtin-rust"
+name = "trou-builtin-cargo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "toml 0.4.10",
  "trou-api",
 ]
 
@@ -1367,7 +1377,7 @@ dependencies = [
  "rustix",
  "serde",
  "sha2",
- "toml",
+ "toml 0.5.9",
  "windows-sys 0.36.1",
  "zstd",
 ]
