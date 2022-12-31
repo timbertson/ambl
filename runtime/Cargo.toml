@@ -15,8 +15,8 @@ log = "0.4"
 env_logger = "0.9"
 walkdir = "2"
 glob = "0.3"
+lazy_static = "1"
 
 [dev-dependencies]
 ctor = "0.1"
-lazy_static = "1"
 serial_test = "0.9"

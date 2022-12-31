@@ -1,7 +1,9 @@
 use anyhow::*;
+use lazy_static;
 use log::*;
 use core::fmt;
 use std::ffi::OsStr;
+use std::iter;
 use std::{ops::Deref, sync::Arc, fmt::{Display, Debug}, path::Components};
 use serde::{Deserialize, Serialize};
 use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::prelude::PermissionsExt, borrow::{Cow, Borrow}};
@@ -31,7 +33,7 @@ pub fn str_of_os(p: &OsStr) -> &str {
 	p.to_str().unwrap_or_else(|| panic!("Invalid path"))
 }
 
-pub fn str_of_path<P: AsRef<Path>>(p: &P) -> &str {
+pub fn str_of_path<P: AsRef<Path> + ?Sized>(p: &P) -> &str {
 	str_of_os(p.as_ref().as_os_str())
 }
 
@@ -221,18 +223,25 @@ impl <C: Clone> Clone for Scoped<C> {
 // - always a valid string
 // - normalized, i.e. contains no trailing `/`, and no internal `../` (but may start with one or more ../ segments)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct CPath(PathBuf);
+pub enum CPath {
+	P(PathBuf),
+	Cwd,
+}
+
+lazy_static::lazy_static! {
+	static ref CWD_PATH: PathBuf = PathBuf::from(".");
+}
+
 impl CPath {
 	pub fn new(s: String) -> Self {
-		Self(Self::canonicalize(PathBuf::from(s)))
+		Self::canonicalize(PathBuf::from(s))
 	}
 
-	pub fn new_in(s: String) -> Self {
-		Self(Self::canonicalize(PathBuf::from(s)))
-	}
-	
 	pub fn as_path(&self) -> &Path {
-		self.0.as_ref()
+		match self {
+			Self::P(p) => p.as_ref(),
+			Self::Cwd => &CWD_PATH,
+		}
 	}
 
 	pub fn as_str(&self) -> &str {
@@ -285,11 +294,14 @@ impl CPath {
 		}
 	}
 
-	fn canonicalize(orig: PathBuf) -> PathBuf {
+	fn canonicalize(orig: PathBuf) -> Self {
 		if Self::is_canon(&orig) {
-			orig
+			Self::P(orig)
 		} else {
 			let mut ret = PathBuf::new();
+			if iter::once(Component::CurDir).eq(orig.components()) {
+				return Self::Cwd
+			}
 			for part in orig.components() {
 				match part {
 					Component::RootDir => ret.push(Component::RootDir),
@@ -303,60 +315,68 @@ impl CPath {
 					Component::Prefix(_) => todo!(),
 				}
 			}
-			ret
+			Self::P(ret)
 		}
 	}
 	
 	fn kind(&self) -> Kind {
-		match self.0.components().next().expect("empty path") {
-			Component::RootDir => Kind::Absolute,
-			Component::ParentDir => Kind::External,
-			Component::Normal(s) => Kind::Simple,
-			Component::CurDir | Component::Prefix(_) => panic!("Invalid CPath"),
+		match self {
+			Self::Cwd => Kind::External,
+			Self::P(p) => match p.components().next().expect("empty path") {
+				Component::RootDir => Kind::Absolute,
+				Component::ParentDir => Kind::External,
+				Component::Normal(s) => Kind::Simple,
+				Component::CurDir | Component::Prefix(_) => panic!("Invalid CPath"),
+			}
 		}
 	}
 	
 	pub fn join(&self, other: &CPath) -> Self {
-		Self(match other.kind() {
-			Kind::Simple => {
-				// Simples can just be concatenated
-				let path: &Path = self.as_ref();
-				let mut buf = path.to_owned();
-				buf.push::<&Path>(other.as_ref());
-				buf
-			},
+		match (self, other) {
+			(Self::Cwd, other) => other.to_owned(),
+			(other, Self::Cwd) => other.to_owned(),
+			(Self::P(p_self), Self::P(p_other)) => {
+				Self::P(match other.kind() {
+					Kind::Simple => {
+						// Simples can just be concatenated
+						let path: &Path = self.as_ref();
+						let mut buf = p_self.to_owned();
+						buf.push::<&Path>(p_other);
+						buf
+					},
 
-			Kind::Absolute => {
-				// ignore self
-				other.0.to_owned()
-			},
+					Kind::Absolute => {
+						// ignore self
+						p_other.to_owned()
+					},
 
-			Kind::External => {
-				// Appending an external might create any output type, depending on
-				// the kind of self and how many parent components there are
-				let path: &Path = self.as_ref();
-				let mut ret: PathBuf = path.to_owned();
-				let other_path: &Path = other.as_ref();
-				for component in other_path.components() {
-					match component {
-						Component::ParentDir => {
-							if !ret.pop() {
-								ret.push("..");
+					Kind::External => {
+						// Appending an external might create any output type, depending on
+						// the kind of self and how many parent components there are
+						let mut ret: PathBuf = p_self.to_owned();
+						for component in p_other.components() {
+							match component {
+								Component::ParentDir => {
+									if !ret.pop() {
+										ret.push("..");
+									}
+								},
+								Component::Normal(n) => ret.push(n),
+								Component::RootDir | Component::Prefix(_) | Component::CurDir => panic!("invalid path"),
 							}
-						},
-						Component::Normal(n) => ret.push(n),
-						Component::RootDir | Component::Prefix(_) | Component::CurDir => panic!("invalid path"),
-					}
-				}
-				ret
+						}
+						ret
+					},
+				})
 			},
-		})
+		}
 	}
 }
 
 impl Display for CPath {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		Display::fmt(&self.0.display(), f)
+		let path: &Path = self.as_ref();
+		Display::fmt(&path.display(), f)
 	}
 }
 
@@ -378,13 +398,17 @@ impl TryFrom<PathBuf> for CPath {
 
 impl Into<String> for CPath {
 	fn into(self) -> String {
-		string_of_pathbuf(self.0)
+		let pb: PathBuf = self.into();
+		string_of_pathbuf(pb)
 	}
 }
 
 impl Into<PathBuf> for CPath {
 	fn into(self) -> PathBuf {
-		self.0
+		match self {
+			CPath::P(p) => p,
+			CPath::Cwd => CWD_PATH.to_owned(),
+		}
 	}
 }
 
@@ -396,7 +420,7 @@ impl AsRef<Path> for CPath {
 
 impl AsRef<str> for CPath {
 	fn as_ref(&self) -> &str {
-		str_of_path(&self.0)
+		str_of_path(self.as_path())
 	}
 }
 
