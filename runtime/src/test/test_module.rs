@@ -404,7 +404,10 @@ impl<'a> TestProject<'a> {
 			path.as_ref().display(),
 			env::current_dir()?.display()
 		);
-		fs::write(path, contents)?;
+		let pb = path.as_ref().to_owned();
+		fs::create_dir_all(pb.parent().unwrap())?;
+		let path = path.as_ref();
+		fs::write(path, contents).with_context(|| format!("Writing file {:?}", path))?;
 		Ok(self)
 	}
 

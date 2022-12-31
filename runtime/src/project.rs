@@ -17,13 +17,13 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::build::{DependencyRequest, InvokeResponse, self, FileDependency, FileDependencyType, GenCommand};
+use trou_common::build::{DependencyRequest, InvokeResponse, self, FileDependency, FileDependencyType, GenCommand, FilesetDependency};
 use trou_common::ctx::{BaseCtx, TargetCtx};
 use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{err::*, path_util};
+use crate::{err::*, path_util, fileset};
 use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::persist::*;
 use crate::module::*;
@@ -525,7 +525,7 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	pub fn build<'a>(
-		project: ProjectMutex<'a, M>,
+		mut project: ProjectMutex<'a, M>,
 		request: &BuildRequest,
 		reason: &BuildReason,
 	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> {
@@ -663,7 +663,13 @@ impl<M: BuildModule> Project<M> {
 					project, reason, request.to_owned(),
 					get_ctx, needs_rebuild, do_build)
 			},
-			BuildRequest::FileSet(_) => todo!("handle FileSet"),
+			BuildRequest::Fileset(spec) => {
+				// TODO: yield project mutex?
+				let list = project.unlocked_block(|_| {
+					fileset::scan(spec)
+				})?;
+				Ok((project, PersistDependency::Fileset(PersistFileset { spec: spec.to_owned(), list })))
+			},
 			BuildRequest::Execute(cmd) => {
 				// TODO do we need to add any dependencies first?
 				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
@@ -822,7 +828,11 @@ impl BuildRequest {
 				PostBuild::Unit
 			),
 			DependencyRequest::EnvVar(v) => (Self::EnvVar(v), PostBuild::Unit),
-			DependencyRequest::FileSet(v) => (Self::FileSet(v), PostBuild::Unit),
+			DependencyRequest::Fileset(v) => {
+				let FilesetDependency { root, dirs, files } = v;
+				let root = Scoped::new(scope.clone(), CPath::new(root)).as_cpath();
+				(Self::Fileset(ResolvedFilesetDependency{ root, dirs, files }), PostBuild::Unit)
+			},
 			DependencyRequest::Execute(v) => {
 				let gen_str : GenCommand<String> = v.into();
 				let mut gen = gen_str.convert(|s| {

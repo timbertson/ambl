@@ -130,7 +130,7 @@ pub struct NestedRule {
 
 
 pub mod dsl {
-	use crate::build::{Command, GenCommand};
+	use crate::build::{Command, GenCommand, FilesetDependency};
 	use super::*;
 
 	// Rule builder functions. Strictly these are just part of the API,
@@ -197,5 +197,13 @@ pub mod dsl {
 			output: Default::default(),
 			input: Default::default(),
 		})
+	}
+
+	pub fn fileset<S: Into<String>>(root: S) -> FilesetDependency {
+		FilesetDependency {
+			root: root.into(),
+			dirs: Default::default(),
+			files: Default::default(),
+		}
 	}
 }

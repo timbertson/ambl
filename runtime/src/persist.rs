@@ -1,4 +1,5 @@
 use log::*;
+use trou_common::build::FileSelection;
 use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
 
 use anyhow::*;
@@ -15,7 +16,7 @@ pub enum BuildRequest {
 	FileDependency(Unscoped),
 	WasmCall(ResolvedFnSpec),
 	EnvVar(String),
-	FileSet(String),
+	Fileset(ResolvedFilesetDependency),
 	Execute(GenCommand<Unscoped>),
 	Universe,
 }
@@ -46,6 +47,53 @@ impl ResolvedFnSpec {
 			fn_name,
 			full_module,
 			config,
+		})
+	}
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ResolvedFilesetDependency {
+	pub root: Unscoped,
+	pub dirs: Vec<FileSelection>,
+	pub files: Vec<FileSelection>,
+}
+
+pub struct CompiledGlobs {
+	pub dirs: Vec<FileSelectionGlob>,
+	pub files: Vec<FileSelectionGlob>,
+}
+
+#[derive(Debug)]
+pub enum FileSelectionGlob {
+	IncludeGlob(glob::Pattern),
+	ExcludeGlob(glob::Pattern),
+}
+impl FileSelectionGlob {
+	pub fn is_include(&self) -> bool {
+		match self {
+			FileSelectionGlob::IncludeGlob(_) => true,
+			FileSelectionGlob::ExcludeGlob(_) => false,
+		}
+	}
+}
+
+impl ResolvedFilesetDependency {
+	fn compile_one(sel: &FileSelection) -> Result<FileSelectionGlob> {
+		Ok(match sel {
+			FileSelection::IncludeGlob(p) => FileSelectionGlob::IncludeGlob(glob::Pattern::new(p)?),
+			FileSelection::ExcludeGlob(p) => FileSelectionGlob::ExcludeGlob(glob::Pattern::new(p)?),
+		})
+	}
+
+	fn compile_many(sels: &Vec<FileSelection>) -> Result<Vec<FileSelectionGlob>> {
+		sels.iter().map(Self::compile_one).collect()
+	}
+
+	pub fn compile(&self) -> Result<CompiledGlobs> {
+		Ok(CompiledGlobs {
+			dirs: Self::compile_many(&self.dirs)?,
+			files: Self::compile_many(&self.files)?,
 		})
 	}
 }
@@ -91,6 +139,12 @@ pub struct PersistWasmCall {
 pub struct PersistWasmDependency {
 	pub spec: ResolvedFnSpec,
 	pub result: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistFileset {
+	pub spec: ResolvedFilesetDependency,
+	pub list: Vec<String>,
 }
 
 // dumb workaround for JSON only allowing string keys
@@ -264,10 +318,15 @@ impl Persist {
 // in a DepSet. This is not the canonical store of a dependency,
 // it's a snapshot of a dependency without including that dependency's
 // own (recursive) dependencies.
+// TODO store a (BuildRequest, PersistDependency) instead of
+// embedding the build request into the persist type.
+// Then the PersistDependency type can be a simple BuildResponse
+// for most variants.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PersistDependency {
 	File(Option<PersistFile>),
 	Env(PersistEnv),
+	Fileset(PersistFileset),
 	Wasm(PersistWasmDependency),
 	AlwaysClean,
 	AlwaysDirty,
@@ -279,7 +338,8 @@ impl PersistDependency {
 		match (self, prior) {
 			(File(a), File(b)) => a != b,
 			(Env(a), Env(b)) => a != b,
-			(Wasm(_), Wasm(_)) => todo!(),
+			(Wasm(a), Wasm(b)) => a != b,
+			(Fileset(a), Fileset(b)) => a != b,
 			(AlwaysDirty, AlwaysDirty) => true,
 			(AlwaysClean, AlwaysClean) => false,
 			other => {
@@ -324,6 +384,7 @@ impl PersistDependency {
 					},
 				}
 			},
+			Fileset(fileset) => InvokeResponse::StrVec(fileset.list),
 			Env(env) => InvokeResponse::Str(env.0),
 			Wasm(wasm) => InvokeResponse::Str(wasm.result),
 			AlwaysDirty => InvokeResponse::Unit,

@@ -4,7 +4,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::ffi::{ResultFFI, SizedPtr};
-use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, WriteFile, CopyFile};
+use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, WriteFile, CopyFile, FilesetDependency};
 
 #[cfg(target_arch = "wasm32")]
 extern {
@@ -106,6 +106,10 @@ impl BaseCtx {
 			InvokeResponse::Str(s) => s,
 			other => panic!("Unexpected file dependency response: {:?}", other),
 		})
+	}
+	
+	pub fn list_fileset(&self, fileset: FilesetDependency) -> Result<Vec<String>> {
+		self.invoke_dep(DependencyRequest::Fileset(fileset))?.into_string_vec()
 	}
 
 	pub fn run(&self, cmd: Command) -> Result<InvokeResponse> {

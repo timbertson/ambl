@@ -24,7 +24,7 @@ pub enum DependencyRequest {
 	WasmCall(FunctionSpec),
 
 	EnvVar(String),
-	FileSet(String),
+	Fileset(FilesetDependency),
 	Execute(Command),
 	Universe,
 }
@@ -43,11 +43,13 @@ pub enum InvokeResponse {
 	Unit,
 	Bool(bool),
 	Str(String),
+	StrVec(Vec<String>),
 	FileSet(String),
 }
 
 impl InvokeResponse {
 	pub fn into_string(self) -> Result<String> { self.try_into() }
+	pub fn into_string_vec(self) -> Result<Vec<String>> { self.try_into() }
 	pub fn into_bool(self) -> Result<bool> { self.try_into() }
 }
 
@@ -58,6 +60,17 @@ impl TryInto<String> for InvokeResponse {
 		match self {
 			Self::Str(s) => Ok(s),
 			other => Err(anyhow!("Expected string, got {:?}", other)),
+		}
+	}
+}
+
+impl TryInto<Vec<String>> for InvokeResponse {
+	type Error = anyhow::Error;
+
+	fn try_into(self) -> Result<Vec<String>> {
+		match self {
+			Self::StrVec(s) => Ok(s),
+			other => Err(anyhow!("Expected string array, got {:?}", other)),
 		}
 	}
 }
@@ -89,6 +102,51 @@ pub enum FileDependencyType {
 	Unit, // just depend on it
 	Existence, // check existence
 	Contents, // return contents
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct FilesetDependency {
+	pub root: String,
+	pub dirs: Vec<FileSelection>,
+	pub files: Vec<FileSelection>,
+}
+
+impl FilesetDependency {
+	pub fn include<S: Into<String>>(self, v: S) -> Self {
+		let v = v.into();
+		self.include_dirs(v.clone()).include_files(v)
+	}
+
+	pub fn exclude<S: Into<String>>(self, v: S) -> Self {
+		let v = v.into();
+		self.exclude_dirs(v.clone()).exclude_files(v)
+	}
+
+	pub fn include_dirs<S: Into<String>>(mut self, v: S) -> Self {
+		self.dirs.push(FileSelection::IncludeGlob(v.into()));
+		self
+	}
+
+	pub fn include_files<S: Into<String>>(mut self, v: S) -> Self {
+		self.files.push(FileSelection::IncludeGlob(v.into()));
+		self
+	}
+
+	pub fn exclude_dirs<S: Into<String>>(mut self, v: S) -> Self {
+		self.dirs.push(FileSelection::ExcludeGlob(v.into()));
+		self
+	}
+
+	pub fn exclude_files<S: Into<String>>(mut self, v: S) -> Self {
+		self.files.push(FileSelection::ExcludeGlob(v.into()));
+		self
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum FileSelection {
+	IncludeGlob(String),
+	ExcludeGlob(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]

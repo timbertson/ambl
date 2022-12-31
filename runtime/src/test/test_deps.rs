@@ -154,3 +154,33 @@ fn rebuild_on_transitive_dep_change() -> Result<()> {
 		Ok(())
 	})
 }
+
+#[test]
+#[serial]
+fn rebuild_on_fileset_change() -> Result<()> {
+	TestProject::in_tempdir(|p: &TestProject| {
+		p.target_builder("list", |p, c| {
+			let files: Vec<String> = c.list_fileset(fileset(".").include("*.txt"))?;
+			p.record("build");
+			fs::write(c.dest(), format!("{}", files.join("\n")))?;
+			Ok(())
+		});
+		p.write_file("a.txt", "1")?;
+		
+		// dotfiles are ignored implicitly
+		p.write_file(".a.txt", "1")?;
+		p.write_file(".dir/a.txt", "1")?;
+
+		eq!(p.build_file_contents("list")?, "a.txt");
+		eq!(p.log().reset(), vec!("build"));
+
+		// changing file contents doesn't matter
+		p.write_file("a.txt", "2")?;
+		assert_prop!(p.log().reset(), Log::is_empty);
+
+		p.write_file("subdir/b.txt", "1")?;
+		eq!(p.build_file_contents("list")?, "a.txt\nsubdir/b.txt");
+		
+		Ok(())
+	})
+}

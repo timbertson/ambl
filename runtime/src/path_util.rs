@@ -1,6 +1,7 @@
 use anyhow::*;
 use log::*;
 use core::fmt;
+use std::ffi::OsStr;
 use std::{ops::Deref, sync::Arc, fmt::{Display, Debug}, path::Components};
 use serde::{Deserialize, Serialize};
 use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::prelude::PermissionsExt, borrow::{Cow, Borrow}};
@@ -10,7 +11,7 @@ use walkdir::{WalkDir, DirEntry};
 Paths in trou:
 
 For simplicity, all paths are normalized _without_ regard to symlinks. foo/../bar is always terated the same as `bar`.
-No normalized path contains a `.` component, or ends with a slash.
+No normalized path contains a `.` component, or ends with a slash, unless they are literally `.` or `/`
 
 Absolute paths start with /
 External paths start with ../
@@ -21,6 +22,18 @@ Simple paths are just a series of path component, with no `..`
 Scopes are represented as a Simple path from the project root.
 File dependencies can be any kind.
 */
+
+pub fn string_of_pathbuf(p: PathBuf) -> String {
+	p.into_os_string().into_string().unwrap_or_else(|os| panic!("Invalid path: {:?}", os))
+}
+
+pub fn str_of_os(p: &OsStr) -> &str {
+	p.to_str().unwrap_or_else(|| panic!("Invalid path"))
+}
+
+pub fn str_of_path<P: AsRef<Path>>(p: &P) -> &str {
+	str_of_os(p.as_ref().as_os_str())
+}
 
 pub fn rm_rf_and_ensure_parent<P: AsRef<Path>>(p: P) -> Result<()> {
 	let p = p.as_ref();
@@ -251,7 +264,7 @@ impl CPath {
 	}
 
 	fn is_canon(p: &PathBuf) -> bool {
-		let s: &str = p.as_os_str().to_str().unwrap();
+		let s: &str = str_of_path(p);
 		// treat traling slash as non-canon (unless it's "/")
 		if s.ends_with(|c| c == '/' || c == '\\') && s != "/" {
 			false
@@ -365,7 +378,7 @@ impl TryFrom<PathBuf> for CPath {
 
 impl Into<String> for CPath {
 	fn into(self) -> String {
-		self.0.into_os_string().into_string().unwrap()
+		string_of_pathbuf(self.0)
 	}
 }
 
@@ -383,7 +396,7 @@ impl AsRef<Path> for CPath {
 
 impl AsRef<str> for CPath {
 	fn as_ref(&self) -> &str {
-		&self.0.as_os_str().to_str().unwrap()
+		str_of_path(&self.0)
 	}
 }
 
@@ -519,12 +532,14 @@ mod test {
 	fn test_normalization() {
 		assert_eq!(p("foo/bar/.././/baz/"), p("foo/baz"));
 		assert_eq!(p("foo/bar/../baz").kind(), Kind::Simple);
+		assert_eq!(p("/").as_str(), "/");
+		assert_eq!(p(".").as_str(), ".");
 
 		assert_eq!(p("/foo/../foo"), p("/foo"));
 		assert_eq!(p("/foo").kind(), Kind::Absolute);
 
-		assert_eq!(p("../z").as_path(), PathBuf::from("../z"));
-		assert_eq!(p("../../z").as_path(), PathBuf::from("../../z"));
+		assert_eq!(p("../z").as_str(), "../z");
+		assert_eq!(p("../../z").as_str(), "../../z");
 		assert_eq!(p("../z").kind(), Kind::External);
 	}
 
@@ -535,5 +550,6 @@ mod test {
 		assert_eq!(join("foo/bar").0, p("x/y/foo/bar"));
 		assert_eq!(join("../z").0, p("x/z"));
 		assert_eq!(join("../../../z").0, p("../z"));
+		assert_eq!(join(".").0, p("x/y"));
 	}
 }
