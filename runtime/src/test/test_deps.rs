@@ -160,18 +160,17 @@ fn rebuild_on_transitive_dep_change() -> Result<()> {
 fn rebuild_on_fileset_change() -> Result<()> {
 	TestProject::in_tempdir(|p: &TestProject| {
 		p.target_builder("list", |p, c| {
-			let files: Vec<String> = c.list_fileset(fileset(".").include("*.txt"))?;
+			let files: Vec<String> = c.list_fileset(fileset(".").include_files("*.txt"))?;
 			p.record("build");
 			fs::write(c.dest(), format!("{}", files.join("\n")))?;
 			Ok(())
 		});
 		p.write_file("a.txt", "1")?;
 		
-		// dotfiles are ignored implicitly
-		p.write_file(".a.txt", "1")?;
-		p.write_file(".dir/a.txt", "1")?;
+		// dotfiles are ignored implicitly, as long as they don't match an explicit rule
+		p.write_file(".dir/b.txt", "1")?;
 
-		eq!(p.build_file_contents("list")?, "a.txt");
+		eq!(p.build_file_contents("list")?, "./a.txt");
 		eq!(p.log().reset(), vec!("build"));
 
 		// changing file contents doesn't matter
@@ -179,7 +178,7 @@ fn rebuild_on_fileset_change() -> Result<()> {
 		assert_prop!(p.log().reset(), Log::is_empty);
 
 		p.write_file("subdir/b.txt", "1")?;
-		eq!(p.build_file_contents("list")?, "a.txt\nsubdir/b.txt");
+		eq!(p.build_file_contents("list")?, "./a.txt\n./subdir/b.txt");
 		
 		Ok(())
 	})

@@ -438,6 +438,10 @@ impl<M: BuildModule> Project<M> {
 		debug!("target for {}: {:?}", &name, target);
 		Ok((project, target))
 	}
+	
+	fn noop_ctx(project: Mutexed<Project<M>>) -> Result<ProjectMutexPair<M, ()>> {
+		Ok((project, ()))
+	}
 
 	/* Build this dependency, persisting (and returning) its result
 
@@ -465,7 +469,6 @@ impl<M: BuildModule> Project<M> {
 	// - cached, but does not need rebuilding (after potentially building dependencies)
 	fn build_with_cache_awareness<'a, Ctx, ComputeCtx, NeedsRebuild, Build>(
 		mut project: ProjectMutex<'a, M>,
-		// scope: &Scope,
 		reason: &BuildReason,
 		key: BuildRequest,
 		get_ctx: ComputeCtx,
@@ -512,26 +515,21 @@ impl<M: BuildModule> Project<M> {
 
 				let (project_ret, built) = build_fn(project, &ctx, build_token)?;
 				project = project_ret;
-				debug!("built {:?} with token {:?}, saving against parent {:?}", &key, build_token, reason.parent());
 				project.build_cache.update(key.clone(), built.clone())?;
 				built.into_dependency()
 			},
 		};
-		
-		// always register dependency on parent, even if we returned a cached value
-		project.register_dependency(reason.parent(), key, result.to_owned())?;
-		
 		Ok((project, result))
 	}
 
 	pub fn build<'a>(
-		mut project: ProjectMutex<'a, M>,
+		project: ProjectMutex<'a, M>,
 		request: &BuildRequest,
 		reason: &BuildReason,
 	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> {
 		debug!("build({:?})", request);
 		
-		match request {
+		let (mut project, result) = match request {
 			BuildRequest::FileDependency(path) => {
 				let file_simple = path.0.clone().into_simple_or_self();
 				let get_target = |project| match file_simple {
@@ -658,17 +656,40 @@ impl<M: BuildModule> Project<M> {
 					Ok((project, persist))
 				};
 
-				let get_ctx = |project| Ok((project, ()));
+				Self::build_with_cache_awareness(
+					project, reason, request.to_owned(),
+					Self::noop_ctx, needs_rebuild, do_build)
+			},
+			BuildRequest::Fileset(spec) => {
+				let get_ctx = |project| {
+					let mut project: Mutexed<Project<M>> = project;
+					// always scan
+					let list = project.unlocked_block(|_| {
+						fileset::scan(spec)
+					})?;
+					Ok((project, list))
+				};
+
+				// TODO there should be a simplified version for always-evaluated, equality-based rebuilds
+				let needs_rebuild = |project, latest: &Vec<String>, cached: &Persist| {
+					let ret = if let Persist::Fileset(cached) = cached {
+						latest != &cached.list
+					} else {
+						true
+					};
+					Ok((project, ret))
+				};
+
+				let do_build = |project, latest: &Vec<String>, build_token| {
+					Ok((project, Persist::Fileset(PersistFileset {
+						list: latest.to_owned(),
+						spec: spec.to_owned(),
+					})))
+				};
+
 				Self::build_with_cache_awareness(
 					project, reason, request.to_owned(),
 					get_ctx, needs_rebuild, do_build)
-			},
-			BuildRequest::Fileset(spec) => {
-				// TODO: yield project mutex?
-				let list = project.unlocked_block(|_| {
-					fileset::scan(spec)
-				})?;
-				Ok((project, PersistDependency::Fileset(PersistFileset { spec: spec.to_owned(), list })))
 			},
 			BuildRequest::Execute(cmd) => {
 				// TODO do we need to add any dependencies first?
@@ -681,8 +702,13 @@ impl<M: BuildModule> Project<M> {
 				Ok((project, PersistDependency::Env(PersistEnv(std::env::var(key)?))))
 			},
 			BuildRequest::Universe => Ok((project, PersistDependency::AlwaysDirty)),
+		}?;
 
-		}
+		debug!("built {:?}, saving against parent {:?}", &request, reason.parent());
+
+		// always register dependency on parent, even if we short-circuited via the cache
+		project.register_dependency(reason.parent(), request.to_owned(), result.to_owned())?;
+		Ok((project, result))
 	}
 
 	fn collect_deps(&mut self, token: ActiveBuildToken) -> DepSet {

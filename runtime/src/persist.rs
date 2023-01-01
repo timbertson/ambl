@@ -274,6 +274,7 @@ impl Default for DepStore {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Persist {
 	File(Option<PersistFile>),
+	Fileset(PersistFileset),
 	Target(PersistTarget),
 	Env(PersistEnv),
 	Wasm(PersistWasmCall),
@@ -308,6 +309,7 @@ impl Persist {
 			Persist::Target(v) => PersistDependency::File(v.file),
 			Persist::Wasm(v) => PersistDependency::Wasm(v.call),
 			Persist::File(v) => PersistDependency::File(v),
+			Persist::Fileset(v) => PersistDependency::Fileset(v),
 			Persist::Env(v) => PersistDependency::Env(v),
 			Persist::AlwaysDirty => PersistDependency::AlwaysDirty,
 		}

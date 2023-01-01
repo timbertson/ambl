@@ -112,12 +112,12 @@ pub struct FilesetDependency {
 }
 
 impl FilesetDependency {
-	pub fn include<S: Into<String>>(self, v: S) -> Self {
+	pub fn include_both<S: Into<String>>(self, v: S) -> Self {
 		let v = v.into();
 		self.include_dirs(v.clone()).include_files(v)
 	}
 
-	pub fn exclude<S: Into<String>>(self, v: S) -> Self {
+	pub fn exclude_both<S: Into<String>>(self, v: S) -> Self {
 		let v = v.into();
 		self.exclude_dirs(v.clone()).exclude_files(v)
 	}
