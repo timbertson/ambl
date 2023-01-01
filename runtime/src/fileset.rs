@@ -5,8 +5,8 @@ use env_logger::DEFAULT_FILTER_ENV;
 use log::*;
 use trou_common::build::FileSelection;
 use walkdir::WalkDir;
+use crate::build_request::{FileSelectionGlob, ResolvedFilesetDependency};
 use crate::path_util::{string_of_pathbuf, str_of_os};
-use crate::persist::{ResolvedFilesetDependency, FileSelectionGlob};
 
 lazy_static::lazy_static! {
 	static ref IGNORE_DOTFILE: FileSelectionGlob = FileSelectionGlob::ExcludeGlob(glob::Pattern::new(".*").unwrap());

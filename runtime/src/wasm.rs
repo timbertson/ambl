@@ -10,7 +10,8 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::{PersistFile, ResolvedFnSpec, BuildRequest}, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block, invoke};
+use crate::build_request::{ResolvedFnSpec, BuildRequest};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, BuildReason, ProjectHandle, ActiveBuildToken}, persist::{PersistFile}, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block, invoke};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 

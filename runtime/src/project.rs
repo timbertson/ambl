@@ -23,6 +23,7 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
+use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
 use crate::{err::*, path_util, fileset};
 use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::persist::*;

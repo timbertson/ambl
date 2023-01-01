@@ -9,7 +9,8 @@ use tempdir::TempDir;
 use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, InvokeResponse, FileDependencyType, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile}, persist::{PersistFile, Persist, PersistDependency, BuildRequest, ResolvedFnSpec}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}, invoke};
+use crate::build_request::{ResolvedFnSpec, BuildRequest};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile}, persist::{PersistFile, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}, invoke};
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 

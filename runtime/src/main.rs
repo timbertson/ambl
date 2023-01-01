@@ -13,13 +13,14 @@ mod init;
 mod test;
 mod invoke;
 mod fileset;
+mod build_request;
 
 use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult, Mutex}, env, collections::{HashMap, hash_map::Entry}};
 use log::*;
 
 use anyhow::*;
 use path_util::{Scope, Scoped, CPath, Unscoped};
-use persist::BuildRequest;
+use build_request::BuildRequest;
 use project::{Project, ModuleCache, BuildReason};
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
