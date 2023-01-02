@@ -444,6 +444,111 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, ()))
 	}
 
+	fn build_with_cache_awareness_and_deps<'a, Ctx, ComputeCtx, Build>(
+		project: ProjectMutex<'a, M>,
+		reason: &BuildReason,
+		key: &BuildRequest,
+		get_ctx: ComputeCtx,
+		build_fn: Build
+	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
+		ComputeCtx: FnOnce(ProjectMutex<'a, M>) -> Result<ProjectMutexPair<'a, M, Ctx>>,
+		Build: FnOnce(ProjectMutex<'a, M>, &Ctx, ActiveBuildToken) -> Result<ProjectMutexPair<'a, M, BuildResultWithDeps>>
+	{
+		let build_fn = |project, ctx: Ctx| {
+			let build_token = ActiveBuildToken::generate();
+			debug!("created build token {:?} beneath {:?} for {:?}", build_token, reason.parent(), key);
+			build_fn(project, &ctx, build_token)
+		};
+		let needs_rebuild = |project, ctx: &Ctx, cached: &BuildResultWithDeps| {
+			// if cached value doesn't have deps, it may have been e.g. a File which has now become a Target
+			if let Some(ref deps) = cached.deps {
+				return Self::requires_build(project, cached.require_deps()?);
+			}
+			Ok((project, true))
+		};
+		Self::build_with_cache_awareness_full(project, key, get_ctx, needs_rebuild, build_fn)
+	}
+
+	fn build_with_cache_awareness_full<'a, Ctx, ComputeCtx, NeedsRebuild, Build>(
+		mut project: ProjectMutex<'a, M>,
+		key: &BuildRequest,
+		get_ctx: ComputeCtx,
+		needs_rebuild: NeedsRebuild,
+		build_fn: Build
+	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
+		ComputeCtx: FnOnce(ProjectMutex<'a, M>) -> Result<ProjectMutexPair<'a, M, Ctx>>,
+		NeedsRebuild: FnOnce(ProjectMutex<'a, M>, &Ctx, &BuildResultWithDeps) -> Result<ProjectMutexPair<'a, M, bool>>,
+		Build: FnOnce(ProjectMutex<'a, M>, Ctx) -> Result<ProjectMutexPair<'a, M, BuildResultWithDeps>>
+	{
+		// to_owned releases project borrow
+		let from_cache = match project.build_cache.lookup(key)?.map(|c| c.to_owned()) {
+			Some(Cached::Fresh(cached)) => {
+				// already checked in this invocation, short-circuit
+				debug!("Short circuit, already built {:?} ({:?})", key, &cached);
+				CacheAware::Fresh(cached.result)
+			},
+
+			Some(Cached::Cached(cached)) => {
+				let (project_ret, ctx) = get_ctx(project)?;
+				let (project_ret, needs_build) = needs_rebuild(project_ret, &ctx, &cached)?;
+				project = project_ret;
+				if !needs_build {
+					debug!("Marking cached result for {:?} ({:?}) as fresh", key, &cached);
+					project.build_cache.update(key.to_owned(), cached.to_owned())?;
+					CacheAware::Fresh(cached.result)
+				} else {
+					CacheAware::Stale(ctx)
+				}
+			},
+
+			None => {
+				let (project_ret, ctx) = get_ctx(project)?;
+				project = project_ret;
+				CacheAware::Stale(ctx)
+			},
+		};
+		
+		let result = match from_cache {
+			CacheAware::Fresh(dep) => dep,
+			CacheAware::Stale(ctx) => {
+				let (project_ret, built) = build_fn(project, ctx)?;
+				project = project_ret;
+				project.build_cache.update(key.clone(), built.clone())?;
+				built.result
+			},
+		};
+		Ok((project, result))
+	}
+
+	fn simple_build_with_cache_awareness<'a, Build>(
+		project: ProjectMutex<'a, M>,
+		key: &BuildRequest,
+		build_fn: Build
+	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
+		Build: FnOnce() -> Result<BuildResult>
+	{
+		// TODO name better?
+		let get_ctx = |project| {
+			let mut project: Mutexed<Project<M>> = project;
+			let ret = project.unlocked_block(|_| {
+				build_fn()
+			});
+			Ok((project, ret?))
+		};
+
+		let needs_rebuild = |project, ctx: &BuildResult, cached: &BuildResultWithDeps| {
+			let project: Mutexed<Project<M>> = project;
+			Ok((project, ctx != &cached.result))
+		};
+
+		let do_build = |project, ctx: BuildResult| {
+			let project: Mutexed<Project<M>> = project;
+			Ok((project, BuildResultWithDeps::simple(ctx)))
+		};
+
+		Self::build_with_cache_awareness_full(project, key, get_ctx, needs_rebuild, do_build)
+	}
+
 	/* Build this dependency, persisting (and returning) its result
 
 	There are two types of staleness to consider:
@@ -468,61 +573,6 @@ impl<M: BuildModule> Project<M> {
 	// Return the PersistDependency if the value is either:
 	// - fresh (already built)
 	// - cached, but does not need rebuilding (after potentially building dependencies)
-	fn build_with_cache_awareness<'a, Ctx, ComputeCtx, NeedsRebuild, Build>(
-		mut project: ProjectMutex<'a, M>,
-		reason: &BuildReason,
-		key: BuildRequest,
-		get_ctx: ComputeCtx,
-		needs_rebuild: NeedsRebuild,
-		build_fn: Build
-	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
-		ComputeCtx: FnOnce(ProjectMutex<'a, M>) -> Result<ProjectMutexPair<'a, M, Ctx>>,
-		NeedsRebuild: FnOnce(ProjectMutex<'a, M>, &Ctx, &BuildResultWithDeps) -> Result<ProjectMutexPair<'a, M, bool>>,
-		Build: FnOnce(ProjectMutex<'a, M>, &Ctx, ActiveBuildToken) -> Result<ProjectMutexPair<'a, M, BuildResultWithDeps>>
-	{
-		// to_owned releases project borrow
-		let from_cache = match project.build_cache.lookup(&key)?.map(|c| c.to_owned()) {
-			Some(Cached::Fresh(cached)) => {
-				// already checked in this invocation, short-circuit
-				debug!("Short circuit, already built {:?} ({:?})", &key, &cached);
-				CacheAware::Fresh(cached.result)
-			},
-
-			Some(Cached::Cached(cached)) => {
-				let (project_ret, ctx) = get_ctx(project)?;
-				let (project_ret, needs_build) = needs_rebuild(project_ret, &ctx, &cached)?;
-				project = project_ret;
-				if !needs_build {
-					debug!("Marking cached result for {:?} ({:?}) as fresh", &key, &cached);
-					project.build_cache.update(key.to_owned(), cached.to_owned())?;
-					CacheAware::Fresh(cached.result)
-				} else {
-					CacheAware::Stale(ctx)
-				}
-			},
-
-			None => {
-				let (project_ret, ctx) = get_ctx(project)?;
-				project = project_ret;
-				CacheAware::Stale(ctx)
-			},
-		};
-		
-		let result = match from_cache {
-			CacheAware::Fresh(dep) => dep,
-			CacheAware::Stale(ctx) => {
-				let build_token = ActiveBuildToken::generate();
-				debug!("created build token {:?} beneath {:?} for {:?}", build_token, reason.parent(), &key);
-
-				let (project_ret, built) = build_fn(project, &ctx, build_token)?;
-				project = project_ret;
-				project.build_cache.update(key.clone(), built.clone())?;
-				built.result
-			},
-		};
-		Ok((project, result))
-	}
-
 	pub fn build<'a>(
 		project: ProjectMutex<'a, M>,
 		request: &BuildRequest,
@@ -540,16 +590,6 @@ impl<M: BuildModule> Project<M> {
 				let cpath_ref = match file_simple {
 					Result::Ok(ref simple) => simple.as_ref(),
 					Result::Err(ref cpath) => cpath,
-				};
-
-				let needs_rebuild = |project, target: &Option<FoundTarget>, cached: &BuildResultWithDeps| {
-					if let Some(target) = target {
-						if let BuildResult::Target(_) = cached.result {
-							// only a _target_ with the same seps ay be rebuildable
-							return Self::requires_build(project, cached.require_deps()?);
-						}
-					}
-					Ok((project, true))
 				};
 
 				let do_build = |project, found_target: &Option<FoundTarget>, build_token| {
@@ -620,20 +660,12 @@ impl<M: BuildModule> Project<M> {
 				
 				// NOTE: scope needs to be for the TARGET, not the name.
 				// But only a buildable has that....
-				Self::build_with_cache_awareness(
-					project, reason, request.to_owned(),
-					get_target, needs_rebuild, do_build)
+				Self::build_with_cache_awareness_and_deps(
+					project, reason, request,
+					get_target, do_build)
 			},
 
 			BuildRequest::WasmCall(spec) => {
-				let needs_rebuild = |project, _ctx: &(), cached: &BuildResultWithDeps| {
-					if let BuildResult::Wasm(_) = cached.result {
-						Self::requires_build(project, cached.require_deps()?)
-					} else {
-						Ok((project, true))
-					}
-				};
-
 				let do_build = |project, _ctx: &(), build_token| {
 					let mut project: Mutexed<Project<M>> = project;
 
@@ -656,47 +688,28 @@ impl<M: BuildModule> Project<M> {
 					Ok((project, persist))
 				};
 
-				Self::build_with_cache_awareness(
-					project, reason, request.to_owned(),
-					Self::noop_ctx, needs_rebuild, do_build)
+				Self::build_with_cache_awareness_and_deps(
+					project, reason, request,
+					Self::noop_ctx, do_build)
 			},
 			BuildRequest::Fileset(spec) => {
-				let get_ctx = |project| {
-					let mut project: Mutexed<Project<M>> = project;
-					// always scan
-					let list = project.unlocked_block(|_| {
-						fileset::scan(spec)
-					})?;
-					Ok((project, list))
-				};
-
-				// TODO there should be a simplified version for always-evaluated, equality-based rebuilds
-				let needs_rebuild = |project, latest: &Vec<String>, cached: &BuildResultWithDeps| {
-					let ret = if let BuildResult::Fileset(ref cached) = cached.result {
-						latest != cached
-					} else {
-						true
-					};
-					Ok((project, ret))
-				};
-
-				let do_build = |project, latest: &Vec<String>, build_token| {
-					Ok((project, BuildResultWithDeps::simple(BuildResult::Fileset(latest.to_owned()))))
-				};
-
-				Self::build_with_cache_awareness(
-					project, reason, request.to_owned(),
-					get_ctx, needs_rebuild, do_build)
+				Self::simple_build_with_cache_awareness(project, request, || {
+					Ok(BuildResult::Fileset(fileset::scan(spec)?))
+				})
 			},
+
 			BuildRequest::Execute(cmd) => {
-				// TODO do we need to add any dependencies first?
-				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
-				// need to add that.
+				// Note: executes are never cached. Since an exec depends implicitly on all files
+				// already depended upon by the parent, we'd have to track all of those states,
+				// which is unlikely to result in many cache hits if the target is being rebuilt anyway.
+				// (Also: executes aren't necessarly hemetic)
 				let project = Sandbox::run(project, cmd, reason)?;
 				Ok((project, BuildResult::AlwaysClean))
 			},
 			BuildRequest::EnvVar(key) => {
-				Ok((project, BuildResult::Env(std::env::var(key)?)))
+				Self::simple_build_with_cache_awareness(project, request, || {
+					Ok(BuildResult::Env(std::env::var(key)?))
+				})
 			},
 			BuildRequest::Universe => Ok((project, BuildResult::AlwaysDirty)),
 		}?;
