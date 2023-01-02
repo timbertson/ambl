@@ -12,12 +12,6 @@ use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::module::BuildModule;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PersistTarget {
-	pub file: Option<PersistFile>,
-	pub deps: DepSet,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistFile {
 	pub mtime: u128,
 	pub target: Option<Simple>,
@@ -63,7 +57,7 @@ pub struct PersistFileset {
 // dumb workaround for JSON only allowing string keys
 #[derive(Serialize, Deserialize)]
 struct DepStorePersist {
-	items: Vec<(BuildRequest, Persist)>,
+	items: Vec<(BuildRequest, BuildResultWithDeps)>,
 }
 
 impl From<HashMap<BuildRequest, Cached>> for DepStorePersist {
@@ -90,20 +84,19 @@ impl From<DepStorePersist> for DepStore {
 
 #[derive(Clone, Debug)]
 pub enum Cached {
-	Fresh(Persist),
-	Cached(Persist),
-	// Missing(Persist),
+	Fresh(BuildResultWithDeps),
+	Cached(BuildResultWithDeps),
 }
 
 impl Cached {
-	pub fn raw(&self) -> &Persist {
+	pub fn raw(&self) -> &BuildResultWithDeps {
 		match self {
 			Cached::Fresh(r) => r,
 			Cached::Cached(r) => r,
 		}
 	}
 
-	pub fn into_raw(self) -> Persist {
+	pub fn into_raw(self) -> BuildResultWithDeps {
 		match self {
 			Cached::Fresh(r) => r,
 			Cached::Cached(r) => r,
@@ -156,7 +149,7 @@ impl DepStore {
 	}
 
 	// advanced use (in tests)
-	pub fn invalidate_if<F: Fn(&Persist) -> bool>(&mut self, f: F) -> () {
+	pub fn invalidate_if<F: Fn(&BuildResultWithDeps) -> bool>(&mut self, f: F) -> () {
 		// Mark all Fresh entries as Cached
 		debug!("Invalidating cache ...");
 		for (k,v) in self.cache.iter_mut() {
@@ -168,7 +161,7 @@ impl DepStore {
 	}
 
 	// TODO remove these result types if we don't do IO directly...
-	pub fn update(&mut self, key: BuildRequest, persist: Persist) -> Result<()> {
+	pub fn update(&mut self, key: BuildRequest, persist: BuildResultWithDeps) -> Result<()> {
 		self.cache.insert(key, Cached::Fresh(persist));
 		Ok(())
 	}
@@ -184,85 +177,50 @@ impl Default for DepStore {
 	}
 }
 
+// TODO should this be an Enum Simple(SimpleBuildResult) | Complex(ComplexBuildResult), where
+// we partition up the BuildResult enum types?
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Persist {
-	File(Option<PersistFile>),
-	Fileset(PersistFileset),
-	Target(PersistTarget),
-	Env(PersistEnv),
-	Wasm(PersistWasmCall),
-	AlwaysDirty,
+pub struct BuildResultWithDeps {
+	pub result: BuildResult, // the result of building this item
+	pub deps: Option<DepSet>, // direct dependencies which were used to build this item. This will only be populated for Target + WASM deps
 }
 
-impl Persist {
-	pub fn as_env(&self) -> Option<&PersistEnv> {
-		todo!()
+impl BuildResultWithDeps {
+	pub fn simple(result: BuildResult) -> Self {
+		Self { result, deps: None }
 	}
-
-	pub fn as_wasm_call(&self) -> Option<&PersistWasmCall> {
-		todo!()
-	}
-
-	pub fn as_target(&self) -> Option<&PersistTarget> {
-		match &self {
-			Persist::Target(f) => Some(f),
-			_ => None,
-		}
-	}
-
-	pub fn as_file(&self) -> Option<&PersistFile> {
-		match self {
-			Persist::File(f) => f.as_ref(),
-			_ => None,
-		}
-	}
-
-	pub fn into_dependency(self) -> PersistDependency {
-		match self {
-			Persist::Target(v) => PersistDependency::File(v.file),
-			Persist::Wasm(v) => PersistDependency::Wasm(v.call),
-			Persist::File(v) => PersistDependency::File(v),
-			Persist::Fileset(v) => PersistDependency::Fileset(v),
-			Persist::Env(v) => PersistDependency::Env(v),
-			Persist::AlwaysDirty => PersistDependency::AlwaysDirty,
-		}
+	
+	pub fn require_deps(&self) -> Result<&DepSet> {
+		self.deps.as_ref().ok_or_else(|| anyhow!("BuildResult {:?} has no deps", &self.result))
 	}
 }
 
-/* BuildResult is persisted, and used to detect whether
-   builds are up to date.
+impl std::ops::Deref for BuildResultWithDeps {
+	type Target = BuildResult;
+
+	fn deref(&self) -> &Self::Target {
+		&self.result
+	}
+}
+
+/*
+BuildResult is part of the result of Project::build,
+and is stored in the cache (in BuildResultWithDeps).
 */
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BuildResult {
 	File(Option<PersistFile>),
-	Env(PersistEnv),
-	Fileset(PersistFileset),
-	Wasm(PersistWasmDependency),
+	Target(PersistFile), // TODO can we just use File() variant here?
+	Env(String),
+	Fileset(Vec<String>),
+	Wasm(String),
 	AlwaysClean,
 	AlwaysDirty,
 }
 
-// PersistDependency is a simplified version of Persist, stored
-// in a DepSet. This is not the canonical store of a dependency,
-// it's a snapshot of a dependency without including that dependency's
-// own (recursive) dependencies.
-// TODO store a (BuildRequest, PersistDependency) instead of
-// embedding the build request into the persist type.
-// Then the PersistDependency type can be a simple BuildResponse
-// for most variants.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum PersistDependency {
-	File(Option<PersistFile>),
-	Env(PersistEnv),
-	Fileset(PersistFileset),
-	Wasm(PersistWasmDependency),
-	AlwaysClean,
-	AlwaysDirty,
-}
-
-impl PersistDependency {
+impl BuildResult {
 	pub fn has_changed_since(&self, prior: &Self) -> bool {
-		use PersistDependency::*;
+		use BuildResult::*;
 		match (self, prior) {
 			(File(a), File(b)) => a != b,
 			(Env(a), Env(b)) => a != b,
@@ -277,64 +235,50 @@ impl PersistDependency {
 		}
 	}
 
-	// TODO should this be a method on Project now that it needs access to one?
-	pub fn into_response<M: BuildModule>(self, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
-		use PersistDependency::*;
-		Ok(match self {
-			File(state) => {
-				let post_build = match post_build {
-					PostBuild::FileDependency(f) => f,
-					_ => panic!("file response with non-file request"),
+	fn response_of_file<M: BuildModule>(file: Option<PersistFile>, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
+		let post_build = match post_build {
+			PostBuild::FileDependency(f) => f,
+			_ => panic!("file response with non-file request"),
+		};
+		let path = &post_build.path;
+
+		// Only allow a missing file if we are explicitly testing for existence
+		if file.is_none() && post_build.ret != FileDependencyType::Existence {
+			return Err(anyhow!("No such file or directory: {}", &path));
+		}
+
+		Ok(match post_build.ret {
+			FileDependencyType::Unit => InvokeResponse::Unit,
+			FileDependencyType::Existence => InvokeResponse::Bool(file.is_some()),
+			FileDependencyType::Contents => {
+				let file = file.ok_or_else(|| anyhow!("No file produced for target {}", &path))?;
+				let contents = if let Some(ref target) = file.target {
+					let full_path = project.dest_path(&Scoped::new(Scope::root(), target.to_owned()))?;
+					fs::read_to_string(full_path.as_ref()).with_context(||
+						format!("Can't read target {} (from {})", &path, &full_path)
+					)
+				} else {
+					fs::read_to_string(&path.0).with_context(||
+						format!("Can't read {}", &path)
+					)
 				};
-				let path = &post_build.path;
-
-				// Only allow a missing file if we are explicitly testing for existence
-				if state.is_none() && post_build.ret != FileDependencyType::Existence {
-					return Err(anyhow!("No such file or directory: {}", &path));
-				}
-
-				match post_build.ret {
-					FileDependencyType::Unit => InvokeResponse::Unit,
-					FileDependencyType::Existence => InvokeResponse::Bool(state.is_some()),
-					FileDependencyType::Contents => {
-						let state = state.ok_or_else(|| anyhow!("No file produced for target {}", &path))?;
-						let contents = if let Some(ref target) = state.target {
-							let full_path = project.dest_path(&Scoped::new(Scope::root(), target.to_owned()))?;
-							fs::read_to_string(full_path.as_ref()).with_context(||
-								format!("Can't read target {} (from {})", &path, &full_path)
-							)
-						} else {
-							fs::read_to_string(&path.0).with_context(||
-								format!("Can't read {}", &path)
-							)
-						};
-						InvokeResponse::Str(contents?)
-					},
-				}
+				InvokeResponse::Str(contents?)
 			},
-			Fileset(fileset) => InvokeResponse::StrVec(fileset.list),
-			Env(env) => InvokeResponse::Str(env.0),
-			Wasm(wasm) => InvokeResponse::Str(wasm.result),
-			AlwaysDirty => InvokeResponse::Unit,
-			AlwaysClean => InvokeResponse::Unit,
 		})
 	}
 
-}
-
-pub trait HasDependencies {
-	fn dep_set(&self) -> &DepSet;
-}
-
-impl HasDependencies for PersistTarget {
-	fn dep_set(&self) -> &DepSet {
-		&self.deps
-	}
-}
-
-impl HasDependencies for PersistWasmCall {
-	fn dep_set(&self) -> &DepSet {
-		&self.deps
+	// TODO should this be a method on Project now that it needs access to one?
+	pub fn into_response<M: BuildModule>(self, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
+		use BuildResult::*;
+		match self {
+			File(file) => Self::response_of_file(file, project, post_build),
+			Target(file) => Self::response_of_file(Some(file), project, post_build),
+			Fileset(fileset) => Ok(InvokeResponse::StrVec(fileset)),
+			Env(env) => Ok(InvokeResponse::Str(env)),
+			Wasm(wasm) => Ok(InvokeResponse::Str(wasm)),
+			AlwaysDirty => Ok(InvokeResponse::Unit),
+			AlwaysClean => Ok(InvokeResponse::Unit),
+		}
 	}
 }
 
@@ -342,7 +286,7 @@ impl HasDependencies for PersistWasmCall {
 // it's stored in Project, keyed by ActiveBuildToken
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DepSet {
-	pub deps: Vec<(BuildRequest, PersistDependency)>,
+	pub deps: Vec<(BuildRequest, BuildResult)>,
 }
 
 const EMPTY_DEPSET: DepSet = DepSet { deps: Vec::new() };
@@ -353,7 +297,7 @@ impl DepSet {
 		EMPTY_DEPSET_PTR
 	}
 
-	pub fn add(&mut self, request: BuildRequest, result: PersistDependency) {
+	pub fn add(&mut self, request: BuildRequest, result: BuildResult) {
 		self.deps.push((request, result));
 	}
 
@@ -361,11 +305,11 @@ impl DepSet {
 		self.deps.len()
 	}
 
-	pub fn iter(&self) -> std::slice::Iter<(BuildRequest, PersistDependency)> {
+	pub fn iter(&self) -> std::slice::Iter<(BuildRequest, BuildResult)> {
 		self.deps.iter()
 	}
 
-	pub fn get(&self, request: &BuildRequest) -> Option<&PersistDependency> {
+	pub fn get(&self, request: &BuildRequest) -> Option<&BuildResult> {
 		self.deps.iter().find_map(|(key, dep)| {
 			if key == request {
 				Some(dep)

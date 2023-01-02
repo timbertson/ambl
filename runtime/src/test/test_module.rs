@@ -10,7 +10,13 @@ use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyReq
 use wasmtime::Engine;
 
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile}, persist::{PersistFile, Persist, PersistDependency}, module::BuildModule, sync::{Mutexed, MutexHandle}, err::result_block, path_util::{Scoped, Scope, CPath, Unscoped}, invoke};
+use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile};
+use crate::persist::{PersistFile, BuildResult, BuildResultWithDeps};
+use crate::module::BuildModule;
+use crate::sync::{Mutexed, MutexHandle};
+use crate::err::result_block;
+use crate::path_util::{Scoped, Scope, CPath, Unscoped};
+use crate::invoke;
 
 type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
 
@@ -262,8 +268,8 @@ impl<'a> TestProject<'a> {
 		p.replace_rules(rules.clone());
 
 		p.cache_mut().invalidate_if(|dep| {
-			match dep.as_file() {
-				Some(f) if f == &FAKE_FILE => false,
+			match dep.result {
+				BuildResult::File(Some(ref f)) if f == &FAKE_FILE => false,
 				_ => true,
 			}
 		});
@@ -352,7 +358,7 @@ impl<'a> TestProject<'a> {
 		// mark the module file as fresh to skip having to write an actual file
 		p.inject_cache(
 			BuildRequest::FileDependency(Unscoped::new(s)),
-			Persist::File(Some(FAKE_FILE.clone()))
+			BuildResultWithDeps::simple(BuildResult::File(Some(FAKE_FILE.clone())))
 		).expect("inject_module");
 		drop(p);
 		self
@@ -366,7 +372,7 @@ impl<'a> TestProject<'a> {
 		};
 		p.inject_cache(
 			BuildRequest::FileDependency(Unscoped::new(v.into())),
-			Persist::File(Some(stat))
+			BuildResultWithDeps::simple(BuildResult::File(Some(stat)))
 		).expect("touch_fake");
 		drop(p);
 		self

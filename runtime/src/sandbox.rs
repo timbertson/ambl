@@ -5,7 +5,7 @@ use anyhow::*;
 use trou_common::build::{self, FileDependency, GenCommand};
 
 use crate::build_request::BuildRequest;
-use crate::persist::{DepSet, PersistDependency, Persist};
+use crate::persist::{DepSet, BuildResult};
 use crate::project::{Project, BuildReason};
 use crate::sync::{Mutexed, MutexHandle};
 use crate::path_util::{External, Absolute, Scope, Scoped, CPath, Simple, Unscoped};
@@ -51,16 +51,17 @@ impl Sandbox {
 					let persist = project.lookup(&key)?
 						.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
 						.raw();
-					match persist {
-						Persist::File(Some(_)) => {
+					match &persist.result {
+						BuildResult::File(Some(_)) => {
 							dest.insert(rel);
 						},
-						Persist::Target(target) => {
-							if let Some(output) = target.file.as_ref().and_then(|f| f.target.to_owned()) {
+						BuildResult::Target(file) => {
+							if let Some(output) = file.target.to_owned() {
+								// don't use `rel`, use the shadow path within .trou/out
 								dest.insert(project.dest_path(&Scoped::root(output))?);
 							}
 							// TODO don't include transitive deps if there is a checksum
-							for (key, _) in target.deps.deps.iter() {
+							for (key, _) in persist.require_deps()?.iter() {
 								Self::collect_paths(project, dest, key)?;
 							}
 						},
@@ -96,8 +97,8 @@ impl Sandbox {
 			let request = BuildRequest::EnvVar(k.to_owned());
 			let (project_ret, value) = Project::<M>::build(project, &request, reason)?;
 			match value {
-				PersistDependency::Env(value) => {
-					cmd.env(k, value.0);
+				BuildResult::Env(value) => {
+					cmd.env(k, value);
 				},
 				_ => panic!("impossible result from Envvar request"),
 			}

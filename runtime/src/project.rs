@@ -475,17 +475,17 @@ impl<M: BuildModule> Project<M> {
 		get_ctx: ComputeCtx,
 		needs_rebuild: NeedsRebuild,
 		build_fn: Build
-	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> where
+	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
 		ComputeCtx: FnOnce(ProjectMutex<'a, M>) -> Result<ProjectMutexPair<'a, M, Ctx>>,
-		NeedsRebuild: FnOnce(ProjectMutex<'a, M>, &Ctx, &Persist) -> Result<ProjectMutexPair<'a, M, bool>>,
-		Build: FnOnce(ProjectMutex<'a, M>, &Ctx, ActiveBuildToken) -> Result<ProjectMutexPair<'a, M, Persist>>
+		NeedsRebuild: FnOnce(ProjectMutex<'a, M>, &Ctx, &BuildResultWithDeps) -> Result<ProjectMutexPair<'a, M, bool>>,
+		Build: FnOnce(ProjectMutex<'a, M>, &Ctx, ActiveBuildToken) -> Result<ProjectMutexPair<'a, M, BuildResultWithDeps>>
 	{
 		// to_owned releases project borrow
 		let from_cache = match project.build_cache.lookup(&key)?.map(|c| c.to_owned()) {
 			Some(Cached::Fresh(cached)) => {
 				// already checked in this invocation, short-circuit
 				debug!("Short circuit, already built {:?} ({:?})", &key, &cached);
-				CacheAware::Fresh(cached.into_dependency())
+				CacheAware::Fresh(cached.result)
 			},
 
 			Some(Cached::Cached(cached)) => {
@@ -495,7 +495,7 @@ impl<M: BuildModule> Project<M> {
 				if !needs_build {
 					debug!("Marking cached result for {:?} ({:?}) as fresh", &key, &cached);
 					project.build_cache.update(key.to_owned(), cached.to_owned())?;
-					CacheAware::Fresh(cached.into_dependency())
+					CacheAware::Fresh(cached.result)
 				} else {
 					CacheAware::Stale(ctx)
 				}
@@ -517,7 +517,7 @@ impl<M: BuildModule> Project<M> {
 				let (project_ret, built) = build_fn(project, &ctx, build_token)?;
 				project = project_ret;
 				project.build_cache.update(key.clone(), built.clone())?;
-				built.into_dependency()
+				built.result
 			},
 		};
 		Ok((project, result))
@@ -527,7 +527,7 @@ impl<M: BuildModule> Project<M> {
 		project: ProjectMutex<'a, M>,
 		request: &BuildRequest,
 		reason: &BuildReason,
-	) -> Result<ProjectMutexPair<'a, M, PersistDependency>> {
+	) -> Result<ProjectMutexPair<'a, M, BuildResult>> {
 		debug!("build({:?})", request);
 		
 		let (mut project, result) = match request {
@@ -542,10 +542,11 @@ impl<M: BuildModule> Project<M> {
 					Result::Err(ref cpath) => cpath,
 				};
 
-				let needs_rebuild = |project, target: &Option<FoundTarget>, cached: &Persist| {
+				let needs_rebuild = |project, target: &Option<FoundTarget>, cached: &BuildResultWithDeps| {
 					if let Some(target) = target {
-						if let Some(cached_target) = cached.as_target() {
-							return Self::requires_build(project, cached_target);
+						if let BuildResult::Target(_) = cached.result {
+							// only a _target_ with the same seps ay be rebuildable
+							return Self::requires_build(project, cached.require_deps()?);
 						}
 					}
 					Ok((project, true))
@@ -586,21 +587,22 @@ impl<M: BuildModule> Project<M> {
 						
 						let dest_path: PathBuf = project.dest_path(&name_scoped)?.into();
 						path_util::rm_rf_and_ensure_parent(&dest_path)?;
-						match path_util::lstat_opt::<&Path>(tmp_path.as_ref())? {
+						let stat = match path_util::lstat_opt::<&Path>(tmp_path.as_ref())? {
 							Some(_) => {
 								debug!("promoting temp path {:?} to {:?}", &tmp_path, &dest_path);
-								fs::rename(&tmp_path, &dest_path)?
+								fs::rename(&tmp_path, &dest_path)?;
+								fs::symlink_metadata(&dest_path)?
 							},
 							None => {
 								return Err(anyhow!("Builder for {} didn't produce an output file (at {})",
 									&name_scoped, tmp_path.display()));
 							},
-						}
+						};
 
-						Persist::Target(PersistTarget {
-							file: PersistFile::from_path(&dest_path, Some(name_scoped.flatten()))?,
-							deps: project.collect_deps(build_token),
-						})
+						BuildResultWithDeps {
+							result: BuildResult::Target(PersistFile::from_stat(stat, Some(name_scoped.flatten()))?),
+							deps: Some(project.collect_deps(build_token)),
+						}
 					} else {
 						debug!("Treating dependency as a plain file: {:?}", &request);
 						match reason {
@@ -609,7 +611,7 @@ impl<M: BuildModule> Project<M> {
 							},
 							_ => {
 								// treat it as a source file
-								Persist::File(PersistFile::from_path(cpath_ref, None)?)
+								BuildResultWithDeps::simple(BuildResult::File(PersistFile::from_path(cpath_ref, None)?))
 							},
 						}
 					};
@@ -624,9 +626,9 @@ impl<M: BuildModule> Project<M> {
 			},
 
 			BuildRequest::WasmCall(spec) => {
-				let needs_rebuild = |project, _ctx: &(), cached: &Persist| {
-					if let Persist::Wasm(cached_call) = cached {
-						Self::requires_build(project, cached_call)
+				let needs_rebuild = |project, _ctx: &(), cached: &BuildResultWithDeps| {
+					if let BuildResult::Wasm(_) = cached.result {
+						Self::requires_build(project, cached.require_deps()?)
 					} else {
 						Ok((project, true))
 					}
@@ -647,13 +649,10 @@ impl<M: BuildModule> Project<M> {
 						Ok(String::from_utf8(bytes)?)
 					})?;
 					
-					let persist = Persist::Wasm(PersistWasmCall {
-						deps: project.collect_deps(build_token),
-						call: PersistWasmDependency {
-							spec: spec.to_owned(),
-							result,
-						}
-					});
+					let persist = BuildResultWithDeps {
+						deps: Some(project.collect_deps(build_token)),
+						result: BuildResult::Wasm(result),
+					};
 					Ok((project, persist))
 				};
 
@@ -672,9 +671,9 @@ impl<M: BuildModule> Project<M> {
 				};
 
 				// TODO there should be a simplified version for always-evaluated, equality-based rebuilds
-				let needs_rebuild = |project, latest: &Vec<String>, cached: &Persist| {
-					let ret = if let Persist::Fileset(cached) = cached {
-						latest != &cached.list
+				let needs_rebuild = |project, latest: &Vec<String>, cached: &BuildResultWithDeps| {
+					let ret = if let BuildResult::Fileset(ref cached) = cached.result {
+						latest != cached
 					} else {
 						true
 					};
@@ -682,10 +681,7 @@ impl<M: BuildModule> Project<M> {
 				};
 
 				let do_build = |project, latest: &Vec<String>, build_token| {
-					Ok((project, Persist::Fileset(PersistFileset {
-						list: latest.to_owned(),
-						spec: spec.to_owned(),
-					})))
+					Ok((project, BuildResultWithDeps::simple(BuildResult::Fileset(latest.to_owned()))))
 				};
 
 				Self::build_with_cache_awareness(
@@ -697,12 +693,12 @@ impl<M: BuildModule> Project<M> {
 				// Not currently, but when an Exec can carry information (like arguments) that might be deps, we'll
 				// need to add that.
 				let project = Sandbox::run(project, cmd, reason)?;
-				Ok((project, PersistDependency::AlwaysClean))
+				Ok((project, BuildResult::AlwaysClean))
 			},
 			BuildRequest::EnvVar(key) => {
-				Ok((project, PersistDependency::Env(PersistEnv(std::env::var(key)?))))
+				Ok((project, BuildResult::Env(std::env::var(key)?)))
 			},
-			BuildRequest::Universe => Ok((project, PersistDependency::AlwaysDirty)),
+			BuildRequest::Universe => Ok((project, BuildResult::AlwaysDirty)),
 		}?;
 
 		debug!("built {:?}, saving against parent {:?}", &request, reason.parent());
@@ -723,7 +719,7 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
-	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: PersistDependency) -> Result<()> {
+	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: BuildResult) -> Result<()> {
 		if let Some(parent) = parent {
 			debug!("registering dependency {:?} against build {:?} (result: {:?}", &key, parent, &result);
 
@@ -733,15 +729,16 @@ impl<M: BuildModule> Project<M> {
 		Ok(())
 	}
 	
-	pub fn requires_build<'a, T: HasDependencies>(
+	pub fn requires_build<'a>(
 		mut project: ProjectMutex<'a, M>,
-		cached: &T,
+		// TODO accept BuildResultWithDeps and a build type?
+		cached: &DepSet,
 	) -> Result<ProjectMutexPair<'a, M, bool>> {
 		let mut needs_build = false;
 
 		let reason = BuildReason::Speculative;
 
-		for (dep_key, dep_cached) in cached.dep_set().iter() {
+		for (dep_key, dep_cached) in cached.iter() {
 			debug!("requires_build() recursing over dependency {:?}", dep_key);
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
@@ -819,7 +816,7 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	#[cfg(test)]
-	pub fn inject_cache(&mut self, k: BuildRequest, v: Persist) -> Result<()> {
+	pub fn inject_cache(&mut self, k: BuildRequest, v: BuildResultWithDeps) -> Result<()> {
 		warn!("injecting cache state: {:?}={:?}", &k, &v);
 		self.build_cache.update(k, v)
 	}
@@ -827,7 +824,7 @@ impl<M: BuildModule> Project<M> {
 
 // helper for build_with_cache_awareness
 enum CacheAware<Ctx> {
-	Fresh(PersistDependency),
+	Fresh(BuildResult),
 	Stale(Ctx),
 }
 

@@ -50,7 +50,7 @@ pub fn rules_ffi(_: BaseCtx) -> Result<Vec<Rule>> {
 		target("all", build_fn("build_all")),
 		targets(vec!("a", "b", "c"), build_fn("build_all")),
 
-		target("lint", build_via("builtin:lint.wasm", "build_all").config(json!({}))),
+		target("lint", build_via("builtin:lint.wasm", "build_all").config(json!({}))?),
 		
 		include(module("builtin:scala.wasm").config(json!({ "x": 123 }))),
 
