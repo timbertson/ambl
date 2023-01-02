@@ -502,17 +502,17 @@ impl<M: BuildModule> Project<M> {
 						
 						let dest_path: PathBuf = project.dest_path(&name_scoped)?.into();
 						path_util::rm_rf_and_ensure_parent(&dest_path)?;
-						let stat = match path_util::lstat_opt::<&Path>(tmp_path.as_ref())? {
+						match path_util::lstat_opt::<&Path>(tmp_path.as_ref())? {
 							Some(_) => {
 								debug!("promoting temp path {:?} to {:?}", &tmp_path, &dest_path);
 								fs::rename(&tmp_path, &dest_path)?;
-								fs::symlink_metadata(&dest_path)?
 							},
 							None => {
-								return Err(anyhow!("Builder for {} didn't produce an output file (at {})",
-									&name_scoped, tmp_path.display()));
+								debug!("Builder for {:?} didn't produce an output file; writing an empty one", &name_scoped);
+								fs::write(&dest_path, "")?;
 							},
-						};
+						}
+						let stat = fs::symlink_metadata(&dest_path)?;
 
 						BuildResultWithDeps {
 							result: BuildResult::Target(PersistFile::from_stat(stat, Some(name_scoped.flatten()))?),

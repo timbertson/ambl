@@ -4,6 +4,7 @@ macro_rules! eq {
 		{
 			let a = $a;
 			let b = $b;
+			log::debug!("eq!({}, {}) -- {:?} == {:?}", stringify!($a), stringify!($b), &a, &b);
 			anyhow::ensure!(a == b, "Expected {:?} == {:?}", &a, &b)
 		}
 	}
@@ -17,7 +18,8 @@ macro_rules! assert_prop {
 		{
 			let a = $a;
 			let prop = $fn(&a);
-			anyhow::ensure!(prop, "Expected property to hold on {:?}:\n{}", &a, stringify!($fn))
+			log::debug!("assert_prop!({}, {})", stringify!($a), stringify!($fn));
+			anyhow::ensure!(prop, "Expected property to hold on {:?}: {}", &a, stringify!($fn))
 		}
 	}
 }

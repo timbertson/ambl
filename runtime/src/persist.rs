@@ -220,18 +220,32 @@ pub enum BuildResult {
 
 impl BuildResult {
 	pub fn has_changed_since(&self, prior: &Self) -> bool {
+		let incompatible = || {
+			debug!("Comparing incompatible persisted dependencies: ({:?}, {:?})", self, prior);
+			true
+		};
 		use BuildResult::*;
 		match (self, prior) {
 			(File(a), File(b)) => a != b,
+			(File(_), _) => incompatible(),
+
+			(Target(a), Target(b)) => a != b,
+			(Target(_), _) => incompatible(),
+
 			(Env(a), Env(b)) => a != b,
+			(Env(_), _) => incompatible(),
+
 			(Wasm(a), Wasm(b)) => a != b,
+			(Wasm(_), _) => incompatible(),
+
 			(Fileset(a), Fileset(b)) => a != b,
+			(Fileset(_), _) => incompatible(),
+
 			(AlwaysDirty, AlwaysDirty) => true,
+			(AlwaysDirty, _) => incompatible(),
+
 			(AlwaysClean, AlwaysClean) => false,
-			other => {
-				debug!("Comparing incompatible persisted dependencies: {:?}", other);
-				true
-			},
+			(AlwaysClean, _) => incompatible(),
 		}
 	}
 
