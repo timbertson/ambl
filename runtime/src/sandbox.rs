@@ -4,9 +4,10 @@ use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symli
 use anyhow::*;
 use trou_common::build::{self, FileDependency, GenCommand};
 
+use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
 use crate::persist::{DepSet, BuildResult};
-use crate::project::{Project, BuildReason};
+use crate::project::{Project};
 use crate::sync::{Mutexed, MutexHandle};
 use crate::path_util::{External, Absolute, Scope, Scoped, CPath, Simple, Unscoped};
 use crate::err::result_block;

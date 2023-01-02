@@ -1,12 +1,12 @@
 use log::*;
-use trou_common::build::FileSelection;
+use trou_common::build::{FileSelection, FilesetDependency};
 use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, InvokeResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
-use crate::project::{ProjectRef, Project, ProjectHandle, PostBuild};
+use crate::project::{ProjectRef, Project, ProjectHandle};
 use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::module::BuildModule;
 
@@ -21,6 +21,58 @@ pub enum BuildRequest {
 	Execute(GenCommand<Unscoped>),
 	Universe,
 }
+
+impl BuildRequest {
+	pub fn from(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &Scope) -> Result<(Self, PostBuild)> {
+		Ok(match req {
+			DependencyRequest::FileDependency(v) => {
+				let FileDependency { path, ret } = v;
+				// TODO seems silly to go via a clone, would be good to have a simple (scope, str) -> Unscoped function
+				let path = Scoped::new(scope.clone(), CPath::new(path)).as_cpath();
+
+				let ret = PostBuildFile { path: path.clone(), ret };
+				(Self::FileDependency(path), PostBuild::FileDependency(ret))
+			},
+			DependencyRequest::WasmCall(v) => (
+				Self::WasmCall(ResolvedFnSpec::from(v, source_module, scope.to_owned())?),
+				PostBuild::Unit
+			),
+			DependencyRequest::EnvVar(v) => (Self::EnvVar(v), PostBuild::Unit),
+			DependencyRequest::Fileset(v) => {
+				let FilesetDependency { root, dirs, files } = v;
+				let root = Scoped::new(scope.clone(), CPath::new(root)).as_cpath();
+				(Self::Fileset(ResolvedFilesetDependency{ root, dirs, files }), PostBuild::Unit)
+			},
+			DependencyRequest::Execute(v) => {
+				let gen_str : GenCommand<String> = v.into();
+				let mut gen = gen_str.convert(|s| {
+					Scoped::new(scope.clone(), CPath::new(s)).as_cpath()
+				});
+				// If there is a scope, make sure it's used for the default CWD
+				let override_cwd = match (scope.into_simple(), &gen.cwd) {
+					(Some(scope), None) => {
+						gen.cwd = Some(scope.clone().into());
+					},
+					_ => ()
+				};
+				(Self::Execute(gen), PostBuild::Unit)
+			},
+			DependencyRequest::Universe => (Self::Universe, PostBuild::Unit),
+		})
+	}
+}
+
+// Information not needed in the build itself, but used to formuate a response
+pub enum PostBuild {
+	FileDependency(PostBuildFile),
+	Unit,
+}
+
+pub struct PostBuildFile {
+	pub path: Unscoped,
+	pub ret: FileDependencyType,
+}
+
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 // TODO: rename ResolvedFunctionSpec?

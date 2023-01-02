@@ -23,7 +23,8 @@ use trou_common::ffi::ResultFFI;
 use trou_common::rule::*;
 use wasmtime::*;
 
-use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
+use crate::build::{BuildCache, BuildReason};
+use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency, PostBuild};
 use crate::{err::*, path_util, fileset};
 use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::persist::*;
@@ -136,26 +137,6 @@ impl ProjectRule {
 	}
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum BuildReason {
-	Dependency(ActiveBuildToken),
-	Speculative, // speculative execution of a build target, not associated with an active build
-	Import, // Importing a module to evaluate its rules. This doesn't cause
-	// dependencies to be registered, but the get_rules() call may
-	Explicit, // explicit user request, fail if not a target
-}
-
-impl BuildReason {
-	pub fn parent(&self) -> Option<ActiveBuildToken> {
-		match self {
-			BuildReason::Dependency(p) => Some(*p),
-			BuildReason::Speculative => None,
-			BuildReason::Import => None,
-			BuildReason::Explicit => None,
-		}
-	}
-}
-
 pub struct ModuleCache<M> {
 	pub engine: Engine,
 	pub modules: HashMap<Unscoped, M>,
@@ -173,17 +154,16 @@ impl<M> ModuleCache<M> {
 pub struct Project<M: BuildModule> {
 	root: Absolute,
 	module_cache: ModuleCache<M::Compiled>,
-	build_cache: DepStore,
+	pub build_cache: DepStore,
 	active_tasks: HashMap<ActiveBuildToken, DepSet>,
 	root_rule: Arc<ProjectRule>,
 	self_ref: Option<ProjectRef<M>>,
 }
 
-type ProjectMutex<'a, M> = Mutexed<'a, Project<M>>;
-type ProjectMutexPair<'a, M, T> = (Mutexed<'a, Project<M>>, T);
+pub type ProjectMutex<'a, M> = Mutexed<'a, Project<M>>;
+pub type ProjectMutexPair<'a, M, T> = (Mutexed<'a, Project<M>>, T);
 
 impl<M: BuildModule> Project<M> {
-
 	pub fn new(root: Absolute) -> Result<ProjectRef<M>> {
 		let root_scope = Scope::root();
 		let project = MutexRef::new(Project {
@@ -444,111 +424,6 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, ()))
 	}
 
-	fn build_with_cache_awareness_and_deps<'a, Ctx, ComputeCtx, Build>(
-		project: ProjectMutex<'a, M>,
-		reason: &BuildReason,
-		key: &BuildRequest,
-		get_ctx: ComputeCtx,
-		build_fn: Build
-	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
-		ComputeCtx: FnOnce(ProjectMutex<'a, M>) -> Result<ProjectMutexPair<'a, M, Ctx>>,
-		Build: FnOnce(ProjectMutex<'a, M>, &Ctx, ActiveBuildToken) -> Result<ProjectMutexPair<'a, M, BuildResultWithDeps>>
-	{
-		let build_fn = |project, ctx: Ctx| {
-			let build_token = ActiveBuildToken::generate();
-			debug!("created build token {:?} beneath {:?} for {:?}", build_token, reason.parent(), key);
-			build_fn(project, &ctx, build_token)
-		};
-		let needs_rebuild = |project, ctx: &Ctx, cached: &BuildResultWithDeps| {
-			// if cached value doesn't have deps, it may have been e.g. a File which has now become a Target
-			if let Some(ref deps) = cached.deps {
-				return Self::requires_build(project, cached.require_deps()?);
-			}
-			Ok((project, true))
-		};
-		Self::build_with_cache_awareness_full(project, key, get_ctx, needs_rebuild, build_fn)
-	}
-
-	fn build_with_cache_awareness_full<'a, Ctx, ComputeCtx, NeedsRebuild, Build>(
-		mut project: ProjectMutex<'a, M>,
-		key: &BuildRequest,
-		get_ctx: ComputeCtx,
-		needs_rebuild: NeedsRebuild,
-		build_fn: Build
-	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
-		ComputeCtx: FnOnce(ProjectMutex<'a, M>) -> Result<ProjectMutexPair<'a, M, Ctx>>,
-		NeedsRebuild: FnOnce(ProjectMutex<'a, M>, &Ctx, &BuildResultWithDeps) -> Result<ProjectMutexPair<'a, M, bool>>,
-		Build: FnOnce(ProjectMutex<'a, M>, Ctx) -> Result<ProjectMutexPair<'a, M, BuildResultWithDeps>>
-	{
-		// to_owned releases project borrow
-		let from_cache = match project.build_cache.lookup(key)?.map(|c| c.to_owned()) {
-			Some(Cached::Fresh(cached)) => {
-				// already checked in this invocation, short-circuit
-				debug!("Short circuit, already built {:?} ({:?})", key, &cached);
-				CacheAware::Fresh(cached.result)
-			},
-
-			Some(Cached::Cached(cached)) => {
-				let (project_ret, ctx) = get_ctx(project)?;
-				let (project_ret, needs_build) = needs_rebuild(project_ret, &ctx, &cached)?;
-				project = project_ret;
-				if !needs_build {
-					debug!("Marking cached result for {:?} ({:?}) as fresh", key, &cached);
-					project.build_cache.update(key.to_owned(), cached.to_owned())?;
-					CacheAware::Fresh(cached.result)
-				} else {
-					CacheAware::Stale(ctx)
-				}
-			},
-
-			None => {
-				let (project_ret, ctx) = get_ctx(project)?;
-				project = project_ret;
-				CacheAware::Stale(ctx)
-			},
-		};
-		
-		let result = match from_cache {
-			CacheAware::Fresh(dep) => dep,
-			CacheAware::Stale(ctx) => {
-				let (project_ret, built) = build_fn(project, ctx)?;
-				project = project_ret;
-				project.build_cache.update(key.clone(), built.clone())?;
-				built.result
-			},
-		};
-		Ok((project, result))
-	}
-
-	fn simple_build_with_cache_awareness<'a, Build>(
-		project: ProjectMutex<'a, M>,
-		key: &BuildRequest,
-		build_fn: Build
-	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
-		Build: FnOnce() -> Result<BuildResult>
-	{
-		// TODO name better?
-		let get_ctx = |project| {
-			let mut project: Mutexed<Project<M>> = project;
-			let ret = project.unlocked_block(|_| {
-				build_fn()
-			});
-			Ok((project, ret?))
-		};
-
-		let needs_rebuild = |project, ctx: &BuildResult, cached: &BuildResultWithDeps| {
-			let project: Mutexed<Project<M>> = project;
-			Ok((project, ctx != &cached.result))
-		};
-
-		let do_build = |project, ctx: BuildResult| {
-			let project: Mutexed<Project<M>> = project;
-			Ok((project, BuildResultWithDeps::simple(ctx)))
-		};
-
-		Self::build_with_cache_awareness_full(project, key, get_ctx, needs_rebuild, do_build)
-	}
-
 	/* Build this dependency, persisting (and returning) its result
 
 	There are two types of staleness to consider:
@@ -660,7 +535,7 @@ impl<M: BuildModule> Project<M> {
 				
 				// NOTE: scope needs to be for the TARGET, not the name.
 				// But only a buildable has that....
-				Self::build_with_cache_awareness_and_deps(
+				BuildCache::build_with_deps(
 					project, reason, request,
 					get_target, do_build)
 			},
@@ -688,12 +563,12 @@ impl<M: BuildModule> Project<M> {
 					Ok((project, persist))
 				};
 
-				Self::build_with_cache_awareness_and_deps(
+				BuildCache::build_with_deps(
 					project, reason, request,
 					Self::noop_ctx, do_build)
 			},
 			BuildRequest::Fileset(spec) => {
-				Self::simple_build_with_cache_awareness(project, request, || {
+				BuildCache::build_simple(project, request, || {
 					Ok(BuildResult::Fileset(fileset::scan(spec)?))
 				})
 			},
@@ -707,7 +582,7 @@ impl<M: BuildModule> Project<M> {
 				Ok((project, BuildResult::AlwaysClean))
 			},
 			BuildRequest::EnvVar(key) => {
-				Self::simple_build_with_cache_awareness(project, request, || {
+				BuildCache::build_simple(project, request, || {
 					Ok(BuildResult::Env(std::env::var(key)?))
 				})
 			},
@@ -742,36 +617,6 @@ impl<M: BuildModule> Project<M> {
 		Ok(())
 	}
 	
-	pub fn requires_build<'a>(
-		mut project: ProjectMutex<'a, M>,
-		// TODO accept BuildResultWithDeps and a build type?
-		cached: &DepSet,
-	) -> Result<ProjectMutexPair<'a, M, bool>> {
-		let mut needs_build = false;
-
-		let reason = BuildReason::Speculative;
-
-		for (dep_key, dep_cached) in cached.iter() {
-			debug!("requires_build() recursing over dependency {:?}", dep_key);
-			
-			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
-			let (project_ret, dep_latest) = Self::build(project, dep_key, &reason)?;
-			project = project_ret;
-			
-			// if the result differs from what this target was based on, rebuild this target
-			if dep_latest.has_changed_since(dep_cached) {
-				debug!("Dependency {:?} state ({:?}) has changed since ({:?}); triggering rebuild of parent",
-					dep_key,
-					&dep_latest,
-					dep_cached,
-				);
-				needs_build = true;
-				break;
-			}
-		}
-
-		Ok((project, needs_build))
-	}
 	
 	pub fn lookup(&self, key: &BuildRequest) -> Result<Option<&Cached>> {
 		self.build_cache.lookup(key)
@@ -835,67 +680,9 @@ impl<M: BuildModule> Project<M> {
 	}
 }
 
-// helper for build_with_cache_awareness
-enum CacheAware<Ctx> {
-	Fresh(BuildResult),
-	Stale(Ctx),
-}
-
 // TODO more references instead of owned?
 #[derive(Debug)]
 pub struct FoundTarget {
 	rel_name: Simple, // the name relative to the build's scope
 	build: ResolvedFnSpec,
-}
-
-
-impl BuildRequest {
-	pub fn from(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &Scope) -> Result<(Self, PostBuild)> {
-		Ok(match req {
-			DependencyRequest::FileDependency(v) => {
-				let FileDependency { path, ret } = v;
-				// TODO seems silly to go via a clone, would be good to have a simple (scope, str) -> Unscoped function
-				let path = Scoped::new(scope.clone(), CPath::new(path)).as_cpath();
-
-				let ret = PostBuildFile { path: path.clone(), ret };
-				(Self::FileDependency(path), PostBuild::FileDependency(ret))
-			},
-			DependencyRequest::WasmCall(v) => (
-				Self::WasmCall(ResolvedFnSpec::from(v, source_module, scope.to_owned())?),
-				PostBuild::Unit
-			),
-			DependencyRequest::EnvVar(v) => (Self::EnvVar(v), PostBuild::Unit),
-			DependencyRequest::Fileset(v) => {
-				let FilesetDependency { root, dirs, files } = v;
-				let root = Scoped::new(scope.clone(), CPath::new(root)).as_cpath();
-				(Self::Fileset(ResolvedFilesetDependency{ root, dirs, files }), PostBuild::Unit)
-			},
-			DependencyRequest::Execute(v) => {
-				let gen_str : GenCommand<String> = v.into();
-				let mut gen = gen_str.convert(|s| {
-					Scoped::new(scope.clone(), CPath::new(s)).as_cpath()
-				});
-				// If there is a scope, make sure it's used for the default CWD
-				let override_cwd = match (scope.into_simple(), &gen.cwd) {
-					(Some(scope), None) => {
-						gen.cwd = Some(scope.clone().into());
-					},
-					_ => ()
-				};
-				(Self::Execute(gen), PostBuild::Unit)
-			},
-			DependencyRequest::Universe => (Self::Universe, PostBuild::Unit),
-		})
-	}
-}
-
-// Information not needed in the build itself, but used to formuate a response
-pub enum PostBuild {
-	FileDependency(PostBuildFile),
-	Unit,
-}
-
-pub struct PostBuildFile {
-	pub path: Unscoped,
-	pub ret: FileDependencyType,
 }

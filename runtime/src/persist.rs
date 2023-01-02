@@ -6,8 +6,8 @@ use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use trou_common::{build::{DependencyRequest, InvokeResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
-use crate::build_request::{ResolvedFnSpec, ResolvedFilesetDependency, BuildRequest};
-use crate::project::{ProjectRef, Project, ProjectHandle, PostBuild};
+use crate::build_request::{ResolvedFnSpec, ResolvedFilesetDependency, BuildRequest, PostBuild};
+use crate::project::{ProjectRef, Project, ProjectHandle};
 use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::module::BuildModule;
 

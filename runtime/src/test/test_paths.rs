@@ -2,7 +2,7 @@ use std::{fs, sync::{Arc, Mutex}};
 use serial_test::serial;
 
 use anyhow::*;
-use crate::{module::*, test::test_module::{TestModule, TestProject}, project::{Project, BuildReason}};
+use crate::{module::*, test::test_module::{TestModule, TestProject}, project::Project};
 use trou_common::{rule::dsl::{*, self}, build::{DependencyRequest, FileDependency}};
 use super::util::*;
 

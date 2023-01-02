@@ -9,8 +9,9 @@ use tempdir::TempDir;
 use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, InvokeResponse, FileDependencyType, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::build_request::{ResolvedFnSpec, BuildRequest};
-use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, BuildReason, PostBuild, PostBuildFile};
+use crate::build::BuildReason;
+use crate::build_request::{ResolvedFnSpec, BuildRequest, PostBuild, PostBuildFile};
+use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project};
 use crate::persist::{PersistFile, BuildResult, BuildResultWithDeps};
 use crate::module::BuildModule;
 use crate::sync::{Mutexed, MutexHandle};
