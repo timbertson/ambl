@@ -75,13 +75,13 @@ impl Default for ModuleConfig {
 #[derive(Deserialize)]
 struct CargoMetaMinimal {
 	packages: Vec<CargoMetaPackage>,
-	workspace_root: String,
+	// workspace_root: String,
 }
 
 #[derive(Deserialize)]
 struct CargoMetaPackage {
 	name: String,
-	manifest_path: String,
+	// manifest_path: String,
 	dependencies: Vec<CargoMetaDependency>,
 }
 
@@ -128,11 +128,12 @@ fn build_lockfile(c: TargetCtx) -> Result<()> {
 	Ok(())
 }
 
-ffi!(rules);
-pub fn rules(_: BaseCtx) -> Result<Vec<Rule>> {
+ffi!(get_rules);
+pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
 	Ok(vec!(
-		target("workspace-meta", build_fn("build_workspace_meta")),
-		target("Cargo.lock", build_fn("build_lockfile")),
+		target("workspace-meta", function("build_workspace_meta")),
+		target("Cargo.lock", function("build_lockfile")),
+		include(this_module().function("module_rules")),
 		// TODO: include(module_rules)
 	))
 }
@@ -143,7 +144,7 @@ pub fn module_rules(c: BaseCtx) -> Result<Vec<Rule>> {
 	
 	let mut result: Vec<Rule> = vec!();
 	let module_names: Vec<String> = meta.packages.iter().map(|p| p.name.to_owned()).collect();
-	result.push(target("build", build_fn("build_all").config(&module_names)?));
+	result.push(target("build", function("build_all").config(&module_names)?));
 
 	for p in meta.packages {
 		let dep_names: Vec<String> = p.dependencies.iter()
@@ -155,12 +156,12 @@ pub fn module_rules(c: BaseCtx) -> Result<Vec<Rule>> {
 		};
 		result.push(target(
 				format!("sources/{}", &p.name),
-				build_fn("module_sources")
+				function("module_sources")
 					.config(&conf)?));
 
 		result.push(target(
-				format!("build/{}", &p.name),
-				build_fn("module_build")
+				format!("module/{}", &p.name),
+				function("module_build")
 					.config(&conf)?));
 	}
 	Ok(result)

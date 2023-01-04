@@ -31,13 +31,17 @@ impl Default for Config {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct Include {
-	module: String,
+	#[serde(default)]
+	module: Option<String>,
 
 	#[serde(default)]
 	scope: Option<String>,
 
 	#[serde(default)]
 	config: Config,
+
+	#[serde(rename = "fn", default)]
+	fn_name: Option<String>,
 
 	// TODO: just detect file extension?
 	mode: IncludeMode, // TODO this is bad modelling, YAML doesn't use config
@@ -55,12 +59,21 @@ impl Include {
 		self
 	}
 
+	pub fn function<S: Into<String>>(mut self, s: S) -> Self {
+		self.fn_name = Some(s.into());
+		self
+	}
+
 	pub fn get_scope(& self) -> &Option<String> {
 		&self.scope
 	}
 
-	pub fn get_module(& self) -> &String {
+	pub fn get_module(& self) -> &Option<String> {
 		&self.module
+	}
+
+	pub fn get_fn_name(& self) -> &Option<String> {
+		&self.fn_name
 	}
 
 	pub fn get_config(& self) -> &Config {
@@ -155,7 +168,18 @@ pub mod dsl {
 
 	pub fn module<S: Into<String>>(module: S) -> Include {
 		Include {
-			module: module.into(),
+			module: Some(module.into()),
+			fn_name: None,
+			scope: None,
+			config: Default::default(),
+			mode: IncludeMode::WASM
+		}
+	}
+
+	pub fn this_module() -> Include {
+		Include {
+			module: None,
+			fn_name: None,
 			scope: None,
 			config: Default::default(),
 			mode: IncludeMode::WASM
@@ -164,25 +188,26 @@ pub mod dsl {
 
 	pub fn yaml<S: Into<String>>(path: S) -> Include {
 		Include {
-			module: path.into(),
+			module: Some(path.into()),
+			fn_name: None,
 			scope: None,
 			config: Default::default(),
 			mode: IncludeMode::YAML
 		}
 	}
 
-	pub fn build_mod<S: Into<String>>(module: S) -> FunctionSpec {
+	pub fn function<S: Into<String>>(fn_name: S) -> FunctionSpec {
 		FunctionSpec {
-			fn_name: None,
-			module: Some(module.into()),
+			fn_name: Some(fn_name.into()),
+			module: None,
 			config: Default::default()
 		}
 	}
 
-	pub fn build_fn<S: Into<String>>(fn_name: S) -> FunctionSpec {
+	pub fn default_function() -> FunctionSpec {
 		FunctionSpec {
-			fn_name: Some(fn_name.into()),
 			module: None,
+			fn_name: None,
 			config: Default::default()
 		}
 	}

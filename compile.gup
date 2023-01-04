@@ -1,10 +1,6 @@
 #!bash -eu
 cargo build \
 	--color always \
-	--package ambl-sample-builder \
-	--target=wasm32-unknown-unknown \
-	&& cargo build \
-	--color always \
 	--package ambl-builtin-cargo \
 	--target=wasm32-unknown-unknown \
 	&& cargo build \
