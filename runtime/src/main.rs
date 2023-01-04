@@ -26,9 +26,9 @@ use project::{Project, ModuleCache};
 use build::BuildReason;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::build::*;
-use trou_common::ffi::ResultFFI;
-use trou_common::rule::*;
+use ambl_common::build::*;
+use ambl_common::ffi::ResultFFI;
+use ambl_common::rule::*;
 use wasm::WasmModule;
 use wasmtime::*;
 

@@ -3,7 +3,7 @@ use std::iter;
 use anyhow::*;
 use env_logger::DEFAULT_FILTER_ENV;
 use log::*;
-use trou_common::build::FileSelection;
+use ambl_common::build::FileSelection;
 use walkdir::WalkDir;
 use crate::build_request::{FileSelectionGlob, ResolvedFilesetDependency};
 use crate::path_util::{string_of_pathbuf, str_of_os};
@@ -78,8 +78,8 @@ mod test {
 
 use super::*;
 	use FileSelection::*;
-	use trou_common::build::FilesetDependency;
-use trou_common::rule::dsl::*;
+	use ambl_common::build::FilesetDependency;
+use ambl_common::rule::dsl::*;
 	fn base() -> FilesetDependency {
 		fileset("unused".to_owned())
 	}

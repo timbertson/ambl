@@ -2,7 +2,7 @@ use log::*;
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use trou_common::build::{self, FileDependency, GenCommand};
+use ambl_common::build::{self, FileDependency, GenCommand};
 
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
@@ -58,7 +58,7 @@ impl Sandbox {
 						},
 						BuildResult::Target(file) => {
 							if let Some(output) = file.target.to_owned() {
-								// don't use `rel`, use the shadow path within .trou/out
+								// don't use `rel`, use the shadow path within .ambl/out
 								dest.insert(project.dest_path(&Scoped::root(output))?);
 							}
 							// TODO don't include transitive deps if there is a checksum
@@ -110,7 +110,7 @@ impl Sandbox {
 		}
 		
 		project.unlocked_block(|project_handle| {
-			let tmp = tempdir::TempDir::new("trou")?;
+			let tmp = tempdir::TempDir::new("ambl")?;
 			debug!("created command sandbox {:?}", &tmp);
 			let roots = Roots {
 				tmp: CPath::try_from(tmp.path().to_owned())?.into_absolute()?,

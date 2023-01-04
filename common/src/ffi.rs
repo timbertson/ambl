@@ -17,7 +17,7 @@ impl<'a> SizedPtrRef<'a> {
 		*self.ptr = bytes.as_ptr() as *mut u8;
 		// debug(&format!("wrote to addr {:?} value {:?}", self.ptr, *self.ptr));
 		*self.len = bytes.len() as u32;
-		// the bytes still reside in memory, the host will need to call trou_free to drop them
+		// the bytes still reside in memory, the host will need to call ambl_free to drop them
 		std::mem::forget(bytes);
 		Ok(())
 	}

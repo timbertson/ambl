@@ -1,6 +1,6 @@
 # Dependencies
 
-Trou, like quite a few modern build tools, is based on _dynamic_ dependencies.
+Ambl, like quite a few modern build tools, is based on _dynamic_ dependencies.
 
 That is, you don't define upfront "target `all` depends on `a`, `b` and `c`".
 

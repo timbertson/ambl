@@ -1,17 +1,17 @@
-# Trou hasn't been built yet
+# Ambl hasn't been built yet
 
  - I'm hacking on some ideas to see if it's plausible
  - It's a laughably bad name, I'm absolutely going to change it
 
 # What's the idea?
 
-Trou will be a build tool similar to bazel, pants, buck, etc.
+Ambl will be a build tool similar to bazel, pants, buck, etc.
 
-The main difference is the choice of language used to define build targets and rules: where bazel uses starlark and pants uses python, trou will use WebAssembly. This likely requires more work to define how you want to build a WebAssembly module, with the payoff being that you get to use a real language, and can implement your build system in the same language as your software (as long as it can compile to wasm).
+The main difference is the choice of language used to define build targets and rules: where bazel uses starlark and pants uses python, ambl will use WebAssembly. This likely requires more work to define how you want to build a WebAssembly module, with the payoff being that you get to use a real language, and can implement your build system in the same language as your software (as long as it can compile to wasm).
 
 The sandboxed model of wasm ensures build logic can't perform side effects, providing the reproducibility guarantees of bazel without inventing a new language (starlark is a strangely weird and limited language, despite having python-like syntax).
 
-Unlike bazel, trou doesn't force you to supply all dependencies upfront. During the build process itself, you can dynamically add dependencies based on the results of the build so far. This is sometimes called monadic dependencies, and should result in a convenient-yet-powerful API similar to shake, but for arbitrary languages instead of just Haskell.
+Unlike bazel, ambl doesn't force you to supply all dependencies upfront. During the build process itself, you can dynamically add dependencies based on the results of the build so far. This is sometimes called monadic dependencies, and should result in a convenient-yet-powerful API similar to shake, but for arbitrary languages instead of just Haskell.
 
 Part of the unknowns I hope to validate are:
 
@@ -19,12 +19,12 @@ Part of the unknowns I hope to validate are:
  - will juggling many wasm modules in order to define build rules be fast enough to rival bazel?
  - how nice will it be to compose build logic implemented in different languages?
  - can we provide static typing for the boundaries between modules, or will it have to resort to untyped JSON-like strucures?
-   - something like capnp can be cross-language, but integrating it with the build process may be more trouble than it's worth
+   - something like capnp can be cross-language, but integrating it with the build process may be more amblble than it's worth
  - how to represent build rules such that changing one rule doesn't invalidate too many unrelated rules
 
 # Motivation / goals:
 
-This section describes how trou differs from other similar build systems. I'm not an expert in all these other build systems, so my comparisons may be patchy at times.
+This section describes how ambl differs from other similar build systems. I'm not an expert in all these other build systems, so my comparisons may be patchy at times.
 
 ### Hermetic (sandoxed) builds
 
@@ -78,7 +78,7 @@ Most tools are completely different to the code you're building. Shake and mill 
 
 **Unlike**: bazel
 
-I don't know exactly how this will play out yet, but I want nix and trou to play well together. Bazel wants you to specify all dependencies using bazel, but for dependencies outside of the project I'll often want to use nix. But I also want it to be fully useable without nix. This is a tricky goal without a specific plan, so we'll see what happens.
+I don't know exactly how this will play out yet, but I want nix and ambl to play well together. Bazel wants you to specify all dependencies using bazel, but for dependencies outside of the project I'll often want to use nix. But I also want it to be fully useable without nix. This is a tricky goal without a specific plan, so we'll see what happens.
 
 ### Works well enough without a daemon
 
@@ -90,7 +90,7 @@ Most complex build tools end up having a daemon to keep various information in-m
 
 # Non-goals:
 
- - trivial builds. If you want a simple task runner and you don't mind slinging around a bit of YAML / JSON, trou is likely too much cognitive overhead to bother.
+ - trivial builds. If you want a simple task runner and you don't mind slinging around a bit of YAML / JSON, ambl is likely too much cognitive overhead to bother.
  - minimal build rule invalidation. Providing a more powerful build language likely requires more conservative invalidation, rebuilding code more than bazel. This only applies when changing build rules, rebuilding after code changes should rival bazel.
 
 # Undecided

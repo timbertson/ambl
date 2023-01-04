@@ -10,7 +10,7 @@ use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::
 use walkdir::{WalkDir, DirEntry};
 
 /*
-Paths in trou:
+Paths in ambl:
 
 For simplicity, all paths are normalized _without_ regard to symlinks. foo/../bar is always terated the same as `bar`.
 No normalized path contains a `.` component, or ends with a slash, unless they are literally `.` or `/`

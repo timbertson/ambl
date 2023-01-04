@@ -2,7 +2,7 @@ use std::{collections::HashMap, ops::Index};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned};
-use trou_common::{rule::{Target, Rule, FunctionSpec, Config}, ctx::BaseCtx};
+use ambl_common::{rule::{Target, Rule, FunctionSpec, Config}, ctx::BaseCtx};
 use wasmtime::Engine;
 
 use crate::build_request::ResolvedFnSpec;

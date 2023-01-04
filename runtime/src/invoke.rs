@@ -2,7 +2,7 @@ use std::fs;
 
 use anyhow::*;
 use log::*;
-use trou_common::build::{InvokeResponse, InvokeAction};
+use ambl_common::build::{InvokeResponse, InvokeAction};
 
 pub fn perform(action: InvokeAction) -> Result<InvokeResponse> {
 	match action {

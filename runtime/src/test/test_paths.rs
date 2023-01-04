@@ -3,7 +3,7 @@ use serial_test::serial;
 
 use anyhow::*;
 use crate::{module::*, test::test_module::{TestModule, TestProject}, project::Project};
-use trou_common::{rule::dsl::{*, self}, build::{DependencyRequest, FileDependency}};
+use ambl_common::{rule::dsl::{*, self}, build::{DependencyRequest, FileDependency}};
 use super::util::*;
 
 use super::test_module::DEFAULT_BUILD_FN;
@@ -46,12 +46,12 @@ fn test_paths_of_nested_module() -> Result<()> {
 		p.build_file("subdir/a")?;
 		let cwd = std::env::current_dir()?;
 		eq!(p.log(), vec!(
-			format!("root build of root with dest .trou/tmp/root"),
-			format!("nested build of a with dest .trou/tmp/subdir/a")
+			format!("root build of root with dest .ambl/tmp/root"),
+			format!("nested build of a with dest .ambl/tmp/subdir/a")
 		));
 
-		eq!(fs::read_to_string(cwd.join(".trou/out/subdir/a"))?, "nested!");
-		eq!(fs::read_to_string(cwd.join(".trou/out/root"))?, "");
+		eq!(fs::read_to_string(cwd.join(".ambl/out/subdir/a"))?, "nested!");
+		eq!(fs::read_to_string(cwd.join(".ambl/out/root"))?, "");
 
 		Ok(())
 	})

@@ -1,5 +1,5 @@
 [package]
-name = "trou-builtin-cargo"
+name = "ambl-builtin-cargo"
 version = "0.1.0"
 edition = "2021"
 # forced-target = "wasm32-unknown-unknown"
@@ -8,7 +8,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-trou-api = { path = "../../api" }
+ambl-api = { path = "../../api" }
 toml = "0.4"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }

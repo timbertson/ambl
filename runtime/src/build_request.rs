@@ -1,10 +1,10 @@
 use log::*;
-use trou_common::build::{FileSelection, FilesetDependency};
+use ambl_common::build::{FileSelection, FilesetDependency};
 use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
-use trou_common::{build::{DependencyRequest, InvokeResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
+use ambl_common::{build::{DependencyRequest, InvokeResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
 use crate::project::{ProjectRef, Project, ProjectHandle};
 use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};

@@ -8,16 +8,16 @@ use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, Fil
 
 #[cfg(target_arch = "wasm32")]
 extern {
-	pub fn trou_invoke(data: *const u8, len: u32, out: &mut *mut u8, out_len: &mut u32);
-	pub fn trou_debug(data: *const u8, len: u32);
+	pub fn ambl_invoke(data: *const u8, len: u32, out: &mut *mut u8, out_len: &mut u32);
+	pub fn ambl_debug(data: *const u8, len: u32);
 }
 
 // stubs so that code compiles outside wasm
 #[cfg(not(target_arch = "wasm32"))]
-pub unsafe fn trou_invoke(_: *const u8, _: u32, _: &mut *mut u8, _: &mut u32) { panic!("stub") }
+pub unsafe fn ambl_invoke(_: *const u8, _: u32, _: &mut *mut u8, _: &mut u32) { panic!("stub") }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub unsafe fn trou_debug(_: *const u8, _: u32) {}
+pub unsafe fn ambl_debug(_: *const u8, _: u32) {}
 
 fn ignore_result<T>(r: Result<T>) -> Result<()> {
 	r.map(|_| ())
@@ -51,7 +51,7 @@ impl BaseCtx {
 		let buf = serde_json::to_vec(&tagged)?;
 		let mut response = SizedPtr::empty();
 		let response_slice = unsafe {
-			trou_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
+			ambl_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
 			response.to_slice()
 		};
 		ResultFFI::deserialize(response_slice)

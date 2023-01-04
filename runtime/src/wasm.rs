@@ -6,10 +6,10 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::build::*;
-use trou_common::ctx::*;
-use trou_common::ffi::ResultFFI;
-use trou_common::rule::*;
+use ambl_common::build::*;
+use ambl_common::ctx::*;
+use ambl_common::ffi::ResultFFI;
+use ambl_common::rule::*;
 use wasmtime::*;
 
 use crate::build::BuildReason;
@@ -40,8 +40,8 @@ pub struct State {
 	instance: Instance,
 	memory: Memory,
 
-	trou_alloc: TypedFunc<u32, u32>,
-	trou_free: TypedFunc<(u32, u32), ()>,
+	ambl_alloc: TypedFunc<u32, u32>,
+	ambl_free: TypedFunc<(u32, u32), ()>,
 
 	// outbox for receiving dynamically-sized results from a call
 	outbox_ptr: WasmOffset,
@@ -126,7 +126,7 @@ impl StateRef {
 		let state = write.as_ref()?;
 		let strlen = s.len() as u32;
 
-		let buf_offset = WasmOffset::new(state.trou_alloc.call(store.as_context_mut(), strlen)?);
+		let buf_offset = WasmOffset::new(state.ambl_alloc.call(store.as_context_mut(), strlen)?);
 		state.memory.write(store.as_context_mut(), buf_offset.raw as usize, s.as_bytes())?;
 		debug!("send_string complete");
 		Ok((buf_offset, strlen))
@@ -161,8 +161,8 @@ impl StateRef {
 	fn drop<R>(&self, mut store: Store<R>) -> Result<()> {
 		let read = self.read();
 		let state = read.as_ref()?;
-		state.trou_free.call(&mut store, (state.outbox_ptr.raw, U32_SIZE))?;
-		state.trou_free.call(&mut store, (state.outbox_len.raw, U32_SIZE))?;
+		state.ambl_free.call(&mut store, (state.outbox_ptr.raw, U32_SIZE))?;
+		state.ambl_free.call(&mut store, (state.outbox_len.raw, U32_SIZE))?;
 		drop(store);
 		Ok(())
 	}
@@ -230,7 +230,7 @@ impl BuildModule for WasmModule {
 		let mut owned_path: PathBuf;
 		if let Some(builtin) = path.0.as_str().strip_prefix("builtin:") {
 			owned_path = BUILTINS_ROOT.to_owned();
-			owned_path.push(format!("trou_builtin_{}.wasm", builtin));
+			owned_path.push(format!("ambl_builtin_{}.wasm", builtin));
 			raw_path = &owned_path;
 		}
 		debug!("Loading {}", raw_path.display());
@@ -248,8 +248,8 @@ impl BuildModule for WasmModule {
 		
 		let module_arc = Arc::new(module.path.clone());
 		let state_invoke = state.clone(); // to move into closure
-		linker.func_wrap("env", "trou_invoke", move |mut caller: Caller<'_, StoreInner>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
-			debug!("trou_invoke");
+		linker.func_wrap("env", "ambl_invoke", move |mut caller: Caller<'_, StoreInner>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
+			debug!("ambl_invoke");
 			let mut state = state_invoke.clone();
 			let response: Result<InvokeResponse> = (|| { // TODO: return InvokeResponse
 				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
@@ -270,22 +270,22 @@ impl BuildModule for WasmModule {
 					},
 					Invoke::Dependency(request) => {
 						let (build_request, post_build) = BuildRequest::from(request, Some(&module_arc), scope)?;
-						let project = project_handle.lock("trou_invoke")?;
+						let project = project_handle.lock("ambl_invoke")?;
 						let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
 						persist.into_response(&project, &post_build)
 					},
 				}
 			})();
-			debug!("trou_invoke: returning {:?}", response);
+			debug!("ambl_invoke: returning {:?}", response);
 			let result: Result<()> = (|| {
 				let response_str = ResultFFI::serialize(response)?;
 				state.return_string(caller, &response_str, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset))
 			})();
-			result.expect("trou_invoke couldn't send return value")
+			result.expect("ambl_invoke couldn't send return value")
 		})?;
 
 		let state_debug = state.clone(); // to move into closure
-		linker.func_wrap("env", "trou_debug", move |mut caller: Caller<'_, _>, data: u32, data_len: u32| {
+		linker.func_wrap("env", "ambl_debug", move |mut caller: Caller<'_, _>, data: u32, data_len: u32| {
 			let state = state_debug.clone();
 			let s: Result<String> = (||{
 				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
@@ -298,10 +298,10 @@ impl BuildModule for WasmModule {
 		debug!("instantiating...");
 		let instance = linker.instantiate(&mut store, &module.wasm)?;
 
-		let trou_alloc = instance.get_typed_func::<u32, u32, _>(&mut store, "trou_alloc")?;
+		let ambl_alloc = instance.get_typed_func::<u32, u32, _>(&mut store, "ambl_alloc")?;
 
-		let outbox_ptr = offset(trou_alloc.call(&mut store, U32_SIZE)?);
-		let outbox_len = offset(trou_alloc.call(&mut store, U32_SIZE)?);
+		let outbox_ptr = offset(ambl_alloc.call(&mut store, U32_SIZE)?);
+		let outbox_len = offset(ambl_alloc.call(&mut store, U32_SIZE)?);
 
 		let inner = State {
 			instance,
@@ -309,8 +309,8 @@ impl BuildModule for WasmModule {
 				.get_memory(&mut store, "memory")
 				.ok_or(anyhow!("failed to find `memory` export"))?,
 
-			trou_alloc,
-			trou_free: instance.get_typed_func::<(u32, u32), (), _>(&mut store, "trou_free")?,
+			ambl_alloc,
+			ambl_free: instance.get_typed_func::<(u32, u32), (), _>(&mut store, "ambl_free")?,
 
 			outbox_ptr,
 			outbox_len,
@@ -318,8 +318,8 @@ impl BuildModule for WasmModule {
 
 		state.set(inner)?;
 
-		let trou_api_version: TypedFunc<(), u32> = instance.get_typed_func::<(), u32, _>(&mut store, "trou_api_version")?;
-		debug!("API version: {}", trou_api_version.call(&mut store, ())?);
+		let ambl_api_version: TypedFunc<(), u32> = instance.get_typed_func::<(), u32, _>(&mut store, "ambl_api_version")?;
+		debug!("API version: {}", ambl_api_version.call(&mut store, ())?);
 		Ok(WasmModule { state, store })
 	}
 

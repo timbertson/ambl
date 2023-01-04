@@ -1,5 +1,5 @@
 [package]
-name = "trou-example-cargo"
+name = "ambl-example-cargo"
 version = "0.1.0"
 edition = "2021"
 

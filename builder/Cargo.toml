@@ -1,5 +1,5 @@
 [package]
-name = "trou-sample-builder"
+name = "ambl-sample-builder"
 version = "0.1.0"
 edition = "2021"
 # requires https://github.com/rust-lang/cargo/issues/9406
@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 # ]
 
 [dependencies]
-trou-api = { path = "../api" }
+ambl-api = { path = "../api" }
 # capnp = "0.14"
 # wasm-bindgen = "0.2"
 serde_json = "1.0"

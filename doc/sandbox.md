@@ -1,4 +1,4 @@
-Trou's sandboxing is lightweight aimed at preventing accidental circumvention, it's not supposed to be unbreakable.
+Ambl's sandboxing is lightweight aimed at preventing accidental circumvention, it's not supposed to be unbreakable.
 
 Its goals:
 

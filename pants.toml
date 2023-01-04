@@ -4,7 +4,7 @@ use_deprecated_directory_cli_args_semantics = false
 pythonpath = ["%(buildroot)s/pants-plugins"]
 
 backend_packages.add = [
-  "trou",
+  "ambl",
   "pants.backend.python",
   "pants.backend.plugin_development",
 ]

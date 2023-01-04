@@ -1,10 +1,10 @@
 use log::*;
-use trou_common::build::FileSelection;
+use ambl_common::build::FileSelection;
 use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
-use trou_common::{build::{DependencyRequest, InvokeResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
+use ambl_common::{build::{DependencyRequest, InvokeResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
 use crate::build_request::{ResolvedFnSpec, ResolvedFilesetDependency, BuildRequest, PostBuild};
 use crate::project::{ProjectRef, Project, ProjectHandle};
@@ -115,15 +115,15 @@ pub struct DepStore {
 	cache: HashMap<BuildRequest, Cached>
 }
 
-const TROU_CACHE_PATH: &str = ".trou/cache.json";
+const AMBL_CACHE_PATH: &str = ".ambl/cache.json";
 
 impl DepStore {
 	pub fn load() -> Self {
 		let cache: Result<Option<Self>> = (|| {
-			let contents = match fs::read_to_string(TROU_CACHE_PATH) {
+			let contents = match fs::read_to_string(AMBL_CACHE_PATH) {
 				Result::Ok(s) => s,
 				Result::Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-				Result::Err(e) => return Err(e).with_context(|| format!("loading {}", TROU_CACHE_PATH)),
+				Result::Err(e) => return Err(e).with_context(|| format!("loading {}", AMBL_CACHE_PATH)),
 			};
 			let cache : DepStorePersist = serde_json::from_str(&contents)?;
 			Ok(Some(cache.into()))
@@ -142,9 +142,9 @@ impl DepStore {
 		debug!("Writing cache: {:?}", &self);
 		let persist: DepStorePersist = self.cache.clone().into();
 		let str = serde_json::to_string(&persist).context("serializing build cache")?;
-		let cache_path = PathBuf::from(TROU_CACHE_PATH);
+		let cache_path = PathBuf::from(AMBL_CACHE_PATH);
 		fs::create_dir_all(cache_path.parent().unwrap())?;
-		Ok(fs::write(TROU_CACHE_PATH, str).context("writing cache file")?)
+		Ok(fs::write(AMBL_CACHE_PATH, str).context("writing cache file")?)
 	}
 
 	// Mark all Fresh entries as Cached

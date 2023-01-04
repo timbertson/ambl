@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize};
 
 use crate::rule::FunctionSpec;
 
-// Top level argument to trou_invoke. May be a dependency or an action
+// Top level argument to ambl_invoke. May be a dependency or an action
 // (e.g write to output file)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Invoke {
@@ -165,7 +165,7 @@ pub struct GenCommand<Path> {
 	//
 	// I wonder if there's a way to transitively allow a given tool, declaring "I take responsibility for this tool being impure"
 	// and providing appropriate evidence (checksum, TTL, version command, etc?)
-	// Then you could have varying levels of correctness, from internal (built with trou), to nix (checksum the path), to
+	// Then you could have varying levels of correctness, from internal (built with ambl), to nix (checksum the path), to
 	// impure system deps (look at $PATH and hope for the best)
 	// Also: how do outputs work? Ideally only declared outputs will be allowed back into the project root, but how to declare.
 }

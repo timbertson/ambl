@@ -3,7 +3,7 @@ use serial_test::serial;
 
 use anyhow::*;
 use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::Project};
-use trou_common::{rule::dsl::*, build::{DependencyRequest, FileDependency}};
+use ambl_common::{rule::dsl::*, build::{DependencyRequest, FileDependency}};
 use super::util::*;
 
 use super::test_module::DEFAULT_BUILD_FN;
@@ -19,7 +19,7 @@ fn simple_build() -> Result<()> {
 		.build_file("a")?;
 
 		eq!(p.log(), vec!("built!"));
-		eq!(fs::read_to_string(".trou/out/a")?, "output".to_owned());
+		eq!(fs::read_to_string(".ambl/out/a")?, "output".to_owned());
 		Ok(())
 	})
 }

@@ -68,9 +68,9 @@ Pants makes everything a goal, and you can pass targets to goals. I'm not sure a
 
 ## Namespace spec:
 
-Pick a buildroot. Say .trou/
-.trou/meta contains all the build DB / lockfiles etc
-.trou/target contains the built files
+Pick a buildroot. Say .ambl/
+.ambl/meta contains all the build DB / lockfiles etc
+.ambl/target contains the built files
 
 All targets by default go in here.
 
@@ -81,7 +81,7 @@ Cleanup: if a target becomes unbuildable, we remove the source version _if_ it's
 
 ### Symlinks:
 
-symlinks in .trou/target won't naturally work. Options:
+symlinks in .ambl/target won't naturally work. Options:
  - make them all absolute? This doesn't work if they're made from an exec'd command
   - we could rewrite them post-build? And if we're promoting them, _don't_ rewrite those versions.
  - install a symlink tree / copy of source files. I think this is what dune does, it seems rather heavy.
@@ -91,7 +91,7 @@ symlinks in .trou/target won't naturally work. Options:
 If a target produces multiple files, we can declare them upfront.
 But what if they're dynamically done? Perhaps after execing something, we can dynamically register additional files as a side effect? You won't be able to build those individually, but we can track them.
 
-Since we execute things hermetically, you'd have to do something to get trou to persist them anyway.
+Since we execute things hermetically, you'd have to do something to get ambl to persist them anyway.
 
 # Pants fine-grained targets:
 

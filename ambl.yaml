@@ -9,7 +9,7 @@
 
 - target:
     names: [all] # TODO `name: all` for convenience
-    module: target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm
+    module: target/wasm32-unknown-unknown/debug/ambl_sample_builder.wasm
     fn: build_all
 
 - target:
@@ -17,7 +17,7 @@
      - a
      - b
      - c
-    module: target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm
+    module: target/wasm32-unknown-unknown/debug/ambl_sample_builder.wasm
     fn: build_all
     mode: WASM
     # config:
@@ -25,11 +25,11 @@
 
 - target:
     ## TODO: add scope?
-    names: [target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm]
-    module: target/wasm32-unknown-unknown/debug/trou_builtin_rust.wasm
+    names: [target/wasm32-unknown-unknown/debug/ambl_sample_builder.wasm]
+    module: target/wasm32-unknown-unknown/debug/ambl_builtin_rust.wasm
     fn: cargo
     config:
-      package: trou-sample-builder
+      package: ambl-sample-builder
 
 # - include:
 #     mode: WASM
@@ -50,6 +50,6 @@
 #     scope: builder
 #     config: |
 #       # NOTE: should scope change the conceptual "cwd"?
-#       package: trou-builder
+#       package: ambl-builder
 
 # # assume a builtin module which can build a rust cargo project into wasm :thinking: ...

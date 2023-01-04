@@ -17,10 +17,10 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use trou_common::build::{DependencyRequest, InvokeResponse, self, FileDependency, FileDependencyType, GenCommand, FilesetDependency};
-use trou_common::ctx::{BaseCtx, TargetCtx};
-use trou_common::ffi::ResultFFI;
-use trou_common::rule::*;
+use ambl_common::build::{DependencyRequest, InvokeResponse, self, FileDependency, FileDependencyType, GenCommand, FilesetDependency};
+use ambl_common::ctx::{BaseCtx, TargetCtx};
+use ambl_common::ffi::ResultFFI;
+use ambl_common::rule::*;
 use wasmtime::*;
 
 use crate::build::{BuildCache, BuildReason};
@@ -85,7 +85,7 @@ impl Nested {
 pub struct ScopedInclude {
 	pub module: CPath,
 	pub relative_scope: Option<Simple>,
-	pub config: trou_common::rule::Config,
+	pub config: ambl_common::rule::Config,
 	pub mode: IncludeMode, // TODO this is bad modelling, YAML doesn't use config
 }
 
@@ -172,7 +172,7 @@ impl<M: BuildModule> Project<M> {
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
 			self_ref: None,
-			root_rule: Arc::new(ProjectRule::from_rule(dsl::include(dsl::yaml("trou.yaml")), &root_scope)?),
+			root_rule: Arc::new(ProjectRule::from_rule(dsl::include(dsl::yaml("ambl.yaml")), &root_scope)?),
 		});
 
 		// lock the project to populate self_ref
@@ -631,7 +631,7 @@ impl<M: BuildModule> Project<M> {
 	}
 	
 	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<Simple> {
-		let mut ret: PathBuf = PathBuf::from(".trou");
+		let mut ret: PathBuf = PathBuf::from(".ambl");
 		ret.push(base);
 		ret.push::<&CPath>(&name.as_cpath().0);
 		CPath::try_from(ret)?.into_simple()

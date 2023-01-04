@@ -1,0 +1,9 @@
+- target:
+    names: [default]
+    module: ambl-builder/target/wasm32-unknown-unknown/debug/ambl_sample_builder.wasm
+ 
+- target:
+    names: [ambl-builder/target/wasm32-unknown-unknown/debug/ambl_sample_builder.wasm]
+    module: builtin:cargo
+    # config:
+    #   package: ambl-example-cargo-builder

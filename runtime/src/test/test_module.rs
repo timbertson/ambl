@@ -6,7 +6,7 @@ use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, de
 
 use anyhow::*;
 use tempdir::TempDir;
-use trou_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, InvokeResponse, FileDependencyType, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
+use ambl_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, InvokeResponse, FileDependencyType, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
 use crate::build::BuildReason;
@@ -277,7 +277,7 @@ impl<'a> TestProject<'a> {
 	}
 
 	fn new() -> Result<Self> {
-		let root = TempDir::new("troutest")?;
+		let root = TempDir::new("ambltest")?;
 		// silly mac has a /tmp symlink
 		let root_abs = fs::canonicalize(root.path())?;
 		let project = Project::new(CPath::new(root_abs.to_str().unwrap().to_owned()).into_absolute()?)?;

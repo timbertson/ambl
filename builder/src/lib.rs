@@ -2,14 +2,14 @@
 
 use anyhow::*;
 use serde_json::json;
-use trou_api::*;
+use ambl_api::*;
 
 macro_rules! ffi {
 	($orig:ident) => {
 		// place it in a module to avoid namespace clash, but export it to C unmangled.
 		// I'd rather export as e.g. ${orig}_ffi but I don't think that's possible
 		pub mod $orig {
-			// use trou_api::*;
+			// use ambl_api::*;
 
 			#[no_mangle]
 			pub extern "C" fn $orig<'a>(ptr_in: *const u8, len_in: u32, ptr_out: &'a mut *mut u8, len_out: &'a mut u32) {
@@ -24,7 +24,7 @@ macro_rules! ffi {
 // 		// place it in a module to avoid namespace clash, but export it to C unmangled.
 // 		// I'd rather export as e.g. ${orig}_ffi but I don't think that's possible
 // 		pub mod $orig {
-// 			// use trou_api::*;
+// 			// use ambl_api::*;
 
 // 			#[no_mangle]
 // 			pub extern "C" fn $orig<'a>(ptr_in: *const u8, len_in: u32, ptr_out: &'a mut *mut u8, len_out: &'a mut u32) {

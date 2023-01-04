@@ -1,9 +1,0 @@
-- target:
-    names: [default]
-    module: trou-builder/target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm
- 
-- target:
-    names: [trou-builder/target/wasm32-unknown-unknown/debug/trou_sample_builder.wasm]
-    module: builtin:cargo
-    # config:
-    #   package: trou-example-cargo-builder
