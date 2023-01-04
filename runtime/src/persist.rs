@@ -252,52 +252,6 @@ impl BuildResult {
 			(AlwaysClean, _) => incompatible(),
 		}
 	}
-
-	fn response_of_file<M: BuildModule>(file: Option<PersistFile>, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
-		let post_build = match post_build {
-			PostBuild::FileDependency(f) => f,
-			_ => panic!("file response with non-file request"),
-		};
-		let path = &post_build.path;
-
-		// Only allow a missing file if we are explicitly testing for existence
-		if file.is_none() && post_build.ret != FileDependencyType::Existence {
-			return Err(anyhow!("No such file or directory: {}", &path));
-		}
-
-		Ok(match post_build.ret {
-			FileDependencyType::Unit => InvokeResponse::Unit,
-			FileDependencyType::Existence => InvokeResponse::Bool(file.is_some()),
-			FileDependencyType::Contents => {
-				let file = file.ok_or_else(|| anyhow!("No file produced for target {}", &path))?;
-				let contents = if let Some(ref target) = file.target {
-					let full_path = project.dest_path(&Scoped::new(Scope::root(), target.to_owned()))?;
-					fs::read_to_string(full_path.as_ref()).with_context(||
-						format!("Can't read target {} (from {})", &path, &full_path)
-					)
-				} else {
-					fs::read_to_string(&path.0).with_context(||
-						format!("Can't read {}", &path)
-					)
-				};
-				InvokeResponse::Str(contents?)
-			},
-		})
-	}
-
-	// TODO should this be a method on Project now that it needs access to one?
-	pub fn into_response<M: BuildModule>(self, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
-		use BuildResult::*;
-		match self {
-			File(file) => Self::response_of_file(file, project, post_build),
-			Target(file) => Self::response_of_file(Some(file), project, post_build),
-			Fileset(fileset) => Ok(InvokeResponse::StrVec(fileset)),
-			Env(env) => Ok(InvokeResponse::Str(env)),
-			Wasm(wasm) => Ok(InvokeResponse::Str(wasm)),
-			AlwaysDirty => Ok(InvokeResponse::Unit),
-			AlwaysClean => Ok(InvokeResponse::Unit),
-		}
-	}
 }
 
 // the in-memory struct to collect deps during the build of a target.

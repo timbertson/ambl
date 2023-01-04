@@ -122,7 +122,7 @@ impl<'a> TestModule<'a> {
 	}
 	
 	pub fn default_build_fn(&self) -> FunctionSpec {
-		dsl::build_fn(DEFAULT_BUILD_FN).module(&self.name)
+		dsl::function(DEFAULT_BUILD_FN).module(&self.name)
 	}
 
 	pub fn rule_fn(mut self, f: fn(&TestModule<'a>, &BaseCtx) -> Vec<Rule>) -> Self {
@@ -319,7 +319,7 @@ impl<'a> TestProject<'a> {
 	}
 	
 	fn next_module_name(&self) -> String {
-		format!("mod-{}", self.module_count.fetch_add(1, Ordering::Relaxed))
+		format!("mod-{}.wasm", self.module_count.fetch_add(1, Ordering::Relaxed))
 	}
 	
 	// all-in one: adds an anonymous module for this rule, and pushes a rule

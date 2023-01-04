@@ -23,7 +23,7 @@ use ambl_common::ffi::ResultFFI;
 use ambl_common::rule::*;
 use wasmtime::*;
 
-use crate::build::{BuildCache, BuildReason};
+use crate::build::{BuildCache, BuildReason, BuildResponse};
 use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency, PostBuild};
 use crate::{err::*, path_util, fileset};
 use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
@@ -231,7 +231,7 @@ impl<M: BuildModule> Project<M> {
 		let request = BuildRequest::FileDependency(path.clone());
 		let (mut project, module_built) = Self::build(project, &request, reason)?;
 		
-		project.register_dependency(reason.parent(), request, module_built)?;
+		project.register_dependency(reason.parent(), request, module_built.result)?;
 
 		let rules = result_block(|| Ok(serde_yaml::from_str(&fs::read_to_string(&path.0)?)?) )
 			.with_context(|| format!("loading rules YAML: {}", path))?;
@@ -458,10 +458,10 @@ impl<M: BuildModule> Project<M> {
 		project: ProjectMutex<'a, M>,
 		request: &BuildRequest,
 		reason: &BuildReason,
-	) -> Result<ProjectMutexPair<'a, M, BuildResult>> {
+	) -> Result<ProjectMutexPair<'a, M, BuildResponse>> {
 		debug!("build({:?})", request);
 		
-		let (mut project, result) = match request {
+		let (mut project, response) = match request {
 			BuildRequest::FileDependency(path) => {
 				let file_simple = path.0.clone().into_simple_or_self();
 				let get_target = |project| match file_simple {
@@ -587,23 +587,24 @@ impl<M: BuildModule> Project<M> {
 				// Note: executes are never cached. Since an exec depends implicitly on all files
 				// already depended upon by the parent, we'd have to track all of those states,
 				// which is unlikely to result in many cache hits if the target is being rebuilt anyway.
-				// (Also: executes aren't necessarly hemetic)
-				let project = Sandbox::run(project, cmd, reason)?;
-				Ok((project, BuildResult::AlwaysClean))
+				// (Also: executes aren't necessarly hermetic)
+				// It also means we don't need to persist execute output, we always just re-execute
+				let (project, response) = Sandbox::run(project, cmd, reason)?;
+				Ok((project, BuildResponse::full(BuildResult::AlwaysClean, response)))
 			},
 			BuildRequest::EnvVar(key) => {
 				BuildCache::build_simple(project, request, || {
 					Ok(BuildResult::Env(std::env::var(key)?))
 				})
 			},
-			BuildRequest::Universe => Ok((project, BuildResult::AlwaysDirty)),
+			BuildRequest::Universe => Ok((project, BuildResponse::new(BuildResult::AlwaysDirty))),
 		}?;
 
 		debug!("built {:?}, saving against parent {:?}", &request, reason.parent());
 
 		// always register dependency on parent, even if we short-circuited via the cache
-		project.register_dependency(reason.parent(), request.to_owned(), result.to_owned())?;
-		Ok((project, result))
+		project.register_dependency(reason.parent(), request.to_owned(), response.result.to_owned())?;
+		Ok((project, response))
 	}
 
 	fn collect_deps(&mut self, token: ActiveBuildToken) -> DepSet {

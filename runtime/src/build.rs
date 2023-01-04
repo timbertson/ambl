@@ -1,9 +1,13 @@
+use std::fs;
+
+use ambl_common::build::{InvokeResponse, FileDependencyType};
 use log::*;
 use anyhow::*;
 
-use crate::build_request::BuildRequest;
+use crate::build_request::{BuildRequest, PostBuild};
 use crate::module::BuildModule;
-use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached};
+use crate::path_util::{Scoped, Scope};
+use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile};
 use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken};
 use crate::sync::Mutexed;
 
@@ -35,7 +39,7 @@ impl BuildCache {
 		project: ProjectMutex<'a, M>,
 		key: &BuildRequest,
 		build_fn: Build
-	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
+	) -> Result<ProjectMutexPair<'a, M, BuildResponse>> where
 		Build: FnOnce() -> Result<BuildResult>
 	{
 		// TODO name better?
@@ -66,7 +70,7 @@ impl BuildCache {
 		key: &BuildRequest,
 		get_ctx: ComputeCtx,
 		build_fn: Build
-	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
+	) -> Result<ProjectMutexPair<'a, M, BuildResponse>> where
 		ComputeCtx: FnOnce(ProjectMutex<'a, M>) -> Result<ProjectMutexPair<'a, M, Ctx>>,
 		Build: FnOnce(ProjectMutex<'a, M>, &Ctx, ActiveBuildToken) -> Result<ProjectMutexPair<'a, M, BuildResultWithDeps>>
 	{
@@ -91,7 +95,7 @@ impl BuildCache {
 		get_ctx: ComputeCtx,
 		needs_rebuild: NeedsRebuild,
 		build_fn: Build
-	) -> Result<ProjectMutexPair<'a, M, BuildResult>> where
+	) -> Result<ProjectMutexPair<'a, M, BuildResponse>> where
 		ComputeCtx: FnOnce(ProjectMutex<'a, M>) -> Result<ProjectMutexPair<'a, M, Ctx>>,
 		NeedsRebuild: FnOnce(ProjectMutex<'a, M>, &Ctx, &BuildResultWithDeps) -> Result<ProjectMutexPair<'a, M, bool>>,
 		Build: FnOnce(ProjectMutex<'a, M>, Ctx) -> Result<ProjectMutexPair<'a, M, BuildResultWithDeps>>
@@ -133,7 +137,7 @@ impl BuildCache {
 				built.result
 			},
 		};
-		Ok((project, result))
+		Ok((project, BuildResponse::new(result)))
 	}
 
 	pub fn requires_build<'a, M: BuildModule>(
@@ -153,10 +157,10 @@ impl BuildCache {
 			project = project_ret;
 			
 			// if the result differs from what this target was based on, rebuild this target
-			if dep_latest.has_changed_since(dep_cached) {
+			if dep_latest.result.has_changed_since(dep_cached) {
 				debug!("Dependency {:?} state ({:?}) has changed since ({:?}); triggering rebuild of parent",
 					dep_key,
-					&dep_latest,
+					&dep_latest.result,
 					dep_cached,
 				);
 				needs_build = true;
@@ -171,4 +175,70 @@ impl BuildCache {
 enum CacheAware<Ctx> {
 	Fresh(BuildResult),
 	Stale(Ctx),
+}
+
+pub struct BuildResponse {
+	// the result, to be persisted
+	pub result: BuildResult,
+	override_response: Option<InvokeResponse>,
+}
+
+impl BuildResponse {
+	pub fn new(result: BuildResult) -> Self {
+		Self { result, override_response: None }
+	}
+
+	pub fn full(result: BuildResult, response: InvokeResponse) -> Self {
+		Self { result, override_response: Some(response) }
+	}
+	
+	pub fn into_response<M: BuildModule>(self, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
+		use BuildResult::*;
+		let Self { override_response, result } = self;
+		if let Some(response) = override_response {
+			Ok(response)
+		} else {
+			match result {
+				File(file) => Self::response_of_file(file, project, post_build),
+				Target(file) => Self::response_of_file(Some(file), project, post_build),
+				Fileset(fileset) => Ok(InvokeResponse::StrVec(fileset)),
+				Env(env) => Ok(InvokeResponse::Str(env)),
+				Wasm(wasm) => Ok(InvokeResponse::Str(wasm)),
+				AlwaysDirty => Ok(InvokeResponse::Unit),
+				AlwaysClean => Ok(InvokeResponse::Unit),
+			}
+		}
+	}
+
+	fn response_of_file<M: BuildModule>(file: Option<PersistFile>, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
+		let post_build = match post_build {
+			PostBuild::FileDependency(f) => f,
+			_ => panic!("file response with non-file request"),
+		};
+		let path = &post_build.path;
+
+		// Only allow a missing file if we are explicitly testing for existence
+		if file.is_none() && post_build.ret != FileDependencyType::Existence {
+			return Err(anyhow!("No such file or directory: {}", &path));
+		}
+
+		Ok(match post_build.ret {
+			FileDependencyType::Unit => InvokeResponse::Unit,
+			FileDependencyType::Existence => InvokeResponse::Bool(file.is_some()),
+			FileDependencyType::Contents => {
+				let file = file.ok_or_else(|| anyhow!("No file produced for target {}", &path))?;
+				let contents = if let Some(ref target) = file.target {
+					let full_path = project.dest_path(&Scoped::new(Scope::root(), target.to_owned()))?;
+					fs::read_to_string(full_path.as_ref()).with_context(||
+						format!("Can't read target {} (from {})", &path, &full_path)
+					)
+				} else {
+					fs::read_to_string(&path.0).with_context(||
+						format!("Can't read {}", &path)
+					)
+				};
+				InvokeResponse::Str(contents?)
+			},
+		})
+	}
 }

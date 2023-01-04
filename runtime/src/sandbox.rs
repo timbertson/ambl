@@ -1,13 +1,14 @@
 use log::*;
+use std::io::Read;
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use ambl_common::build::{self, FileDependency, GenCommand};
+use ambl_common::build::{self, FileDependency, GenCommand, InvokeResponse};
 
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
 use crate::persist::{DepSet, BuildResult};
-use crate::project::{Project};
+use crate::project::{Project, ProjectMutexPair};
 use crate::sync::{Mutexed, MutexHandle};
 use crate::path_util::{External, Absolute, Scope, Scoped, CPath, Simple, Unscoped};
 use crate::err::result_block;
@@ -82,7 +83,7 @@ impl Sandbox {
 	pub fn run<'a, M: BuildModule>(mut project: Mutexed<'a, Project<M>>,
 		command: &GenCommand<Unscoped>,
 		reason: &BuildReason,
-	) -> Result<Mutexed<'a, Project<M>>> {
+	) -> Result<ProjectMutexPair<'a, M, InvokeResponse>> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
 		let mut rel_paths = Default::default();
 		for (dep, state) in dep_set.deps.iter() {
@@ -97,7 +98,7 @@ impl Sandbox {
 		for k in env_inherit {
 			let request = BuildRequest::EnvVar(k.to_owned());
 			let (project_ret, value) = Project::<M>::build(project, &request, reason)?;
-			match value {
+			match value.result {
 				BuildResult::Env(value) => {
 					cmd.env(k, value);
 				},
@@ -109,7 +110,7 @@ impl Sandbox {
 			cmd.env(k, v);
 		}
 		
-		project.unlocked_block(|project_handle| {
+		let response = project.unlocked_block(|project_handle| {
 			let tmp = tempdir::TempDir::new("ambl")?;
 			debug!("created command sandbox {:?}", &tmp);
 			let roots = Roots {
@@ -126,7 +127,7 @@ impl Sandbox {
 			});
 
 			cmd.stdout(match output.stdout {
-				build::Stdout::String => todo!(),
+				build::Stdout::String => Stdio::piped(),
 				build::Stdout::Inherit => Stdio::inherit(),
 				build::Stdout::Ignore => Stdio::null(),
 				build::Stdout::WriteTo(_) => todo!(),
@@ -152,15 +153,24 @@ impl Sandbox {
 
 			info!("+ {:?}", &cmd);
 
+			let proc = cmd.spawn()?;
+			let response = match output.stdout {
+				build::Stdout::String => {
+					let mut s: String = String::new();
+					proc.stdout.expect("stdout pipe").read_to_string(&mut s)?;
+					InvokeResponse::Str(s.trim_end().to_owned())
+				},
+				_ => InvokeResponse::Unit,
+			};
 			let result = cmd.status()
 				.with_context(|| format!("Unable to launch command: {:?}", &cmd))?;
 			tmp.close()?;
 			if result.success() {
-				Ok(())
+				Ok(response)
 			} else {
 				Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result.code()))
 			}
 		})?;
-		Ok(project)
+		Ok((project, response))
 	}
 }

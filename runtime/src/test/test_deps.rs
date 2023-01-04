@@ -79,7 +79,7 @@ fn rule_change_causes_rebuild() -> Result<()> {
 
 		let rule_m = p.new_module().rule_fn(|m, ctx| {
 			m.project.record("get_rules");
-			vec!(target("a", build_fn("build").module("builder")))
+			vec!(target("a", function("build").module("builder")))
 		});
 		let m_name = rule_m.name.to_owned();
 		p.inject_rules_module(rule_m);
@@ -106,7 +106,7 @@ fn equivalent_rule_module_does_not_cause_rebuild() -> Result<()> {
 
 		let rule_m = p.new_module().rule_fn(|m, ctx| {
 			m.project.record("get_rules");
-			vec!(target("a", build_fn("build").module("builder")))
+			vec!(target("a", function("build").module("builder")))
 		});
 		let m_name = rule_m.name.to_owned();
 		p.inject_rules_module(rule_m);
