@@ -5,6 +5,6 @@ members = [ "common", "api", "builder", "runtime", "builtin/cargo" ]
 panic = "abort"
 lto = true # this is slow, but drops wasm sizes by ~80%
 
-[profile.release.package.trou-builtin-rust]
+[profile.release.package.trou-builtin-cargo]
 opt-level = "z" # Optimize for size.
 codegen-units = 1

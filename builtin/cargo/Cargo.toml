@@ -1,0 +1,15 @@
+[package]
+name = "trou-builtin-cargo"
+version = "0.1.0"
+edition = "2021"
+# forced-target = "wasm32-unknown-unknown"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+trou-api = { path = "../../api" }
+toml = "0.4"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1"

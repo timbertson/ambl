@@ -75,8 +75,8 @@ impl Include {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FunctionSpec {
-	#[serde(rename = "fn")]
-	pub fn_name: String, // TODO can we default this to `build` for modules?
+	#[serde(rename = "fn", default)]
+	pub fn_name: Option<String>,
 
 	#[serde(default)]
 	pub module: Option<String>,
@@ -171,9 +171,17 @@ pub mod dsl {
 		}
 	}
 
+	pub fn build_mod<S: Into<String>>(module: S) -> FunctionSpec {
+		FunctionSpec {
+			fn_name: None,
+			module: Some(module.into()),
+			config: Default::default()
+		}
+	}
+
 	pub fn build_fn<S: Into<String>>(fn_name: S) -> FunctionSpec {
 		FunctionSpec {
-			fn_name: fn_name.into(),
+			fn_name: Some(fn_name.into()),
 			module: None,
 			config: Default::default()
 		}
@@ -181,7 +189,7 @@ pub mod dsl {
 
 	pub fn build_via<S: Into<String>, S2: Into<String>>(module: S, fn_name: S2) -> FunctionSpec {
 		FunctionSpec {
-			fn_name: fn_name.into(),
+			fn_name: Some(fn_name.into()),
 			module: Some(module.into()),
 			config: Default::default()
 		}

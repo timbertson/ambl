@@ -1,4 +1,6 @@
+use std::path::{PathBuf, Path};
 use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult, Mutex}, env, collections::{HashMap, hash_map::Entry}};
+use lazy_static::lazy_static;
 use log::*;
 
 use anyhow::*;
@@ -211,13 +213,30 @@ pub struct Compiled {
 	path: Unscoped,
 }
 
+lazy_static!{
+	static ref BUILTINS_ROOT: PathBuf = {
+		PathBuf::from(match option_env!("PREFIX") {
+			Some(prefix) => format!("{}/share/builtins", prefix),
+			None => format!("{}/../target/wasm32-unknown-unknown/debug", env!("CARGO_MANIFEST_DIR")),
+		})
+	};
+}
+
 impl BuildModule for WasmModule {
 	type Compiled = Compiled;
 
 	fn compile(engine: &Engine, path: &Unscoped) -> Result<Compiled> {
-		debug!("Loading {}", path);
+		let mut raw_path: &Path = path.0.as_path();
+		let mut owned_path: PathBuf;
+		if let Some(builtin) = path.0.as_str().strip_prefix("builtin:") {
+			owned_path = BUILTINS_ROOT.to_owned();
+			owned_path.push(format!("trou_builtin_{}.wasm", builtin));
+			raw_path = &owned_path;
+		}
+		debug!("Loading {}", raw_path.display());
 		Ok(Compiled {
-			wasm: Module::from_file(&engine, path.0.as_path())?,
+			wasm: Module::from_file(&engine, raw_path)
+				.with_context(|| format!("Loading file {}", raw_path.display()))?,
 			path: path.clone(),
 		})
 	}

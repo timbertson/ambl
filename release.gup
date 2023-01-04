@@ -7,7 +7,7 @@ cargo build \
 	&& cargo build \
 	--release \
 	--color always \
-	--package trou-builtin-rust \
+	--package trou-builtin-cargo \
 	--target=wasm32-unknown-unknown \
 	&& cargo build \
 	--release \

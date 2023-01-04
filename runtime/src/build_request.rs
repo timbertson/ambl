@@ -34,7 +34,7 @@ impl BuildRequest {
 				(Self::FileDependency(path), PostBuild::FileDependency(ret))
 			},
 			DependencyRequest::WasmCall(v) => (
-				Self::WasmCall(ResolvedFnSpec::from(v, source_module, scope.to_owned())?),
+				Self::WasmCall(ResolvedFnSpec::from_explicit_fn_name(v, source_module, scope.to_owned())?),
 				PostBuild::Unit
 			),
 			DependencyRequest::EnvVar(v) => (Self::EnvVar(v), PostBuild::Unit),
@@ -87,9 +87,9 @@ pub struct ResolvedFnSpec {
 }
 
 impl ResolvedFnSpec {
-	pub fn from(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope) -> Result<Self> {
+	pub fn from_explicit_fn_name(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope) -> Result<Self> {
 		let FunctionSpec { fn_name, module, config } = f;
-
+		let fn_name = fn_name.ok_or_else(|| anyhow!("Function spec is missing a function name"))?;
 		let explicit_cpath = module.map(CPath::new);
 		let full_module = ResolveModule {
 			source_module,

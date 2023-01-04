@@ -276,7 +276,7 @@ impl<M: BuildModule> Project<M> {
 						rel_name,
 						build: ResolvedFnSpec {
 							scope,
-							fn_name: t.build.fn_name.clone(),
+							fn_name: t.build.fn_name.to_owned().unwrap_or_else(|| "build".to_owned()),
 							full_module,
 							config: t.build.config.clone(),
 					},
