@@ -8,7 +8,7 @@ use trou_common::{build::{DependencyRequest, InvokeResponse, FileDependency, Fil
 
 use crate::build_request::{ResolvedFnSpec, ResolvedFilesetDependency, BuildRequest, PostBuild};
 use crate::project::{ProjectRef, Project, ProjectHandle};
-use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
+use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule, self};
 use crate::module::BuildModule;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,13 +115,15 @@ pub struct DepStore {
 	cache: HashMap<BuildRequest, Cached>
 }
 
+const TROU_CACHE_PATH: &str = ".trou/cache.json";
+
 impl DepStore {
 	pub fn load() -> Self {
 		let cache: Result<Option<Self>> = (|| {
-			let contents = match fs::read_to_string(".trou.cache") {
+			let contents = match fs::read_to_string(TROU_CACHE_PATH) {
 				Result::Ok(s) => s,
 				Result::Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-				Result::Err(e) => return Err(e).context("loading .trou.cache"),
+				Result::Err(e) => return Err(e).with_context(|| format!("loading {}", TROU_CACHE_PATH)),
 			};
 			let cache : DepStorePersist = serde_json::from_str(&contents)?;
 			Ok(Some(cache.into()))
@@ -140,7 +142,9 @@ impl DepStore {
 		debug!("Writing cache: {:?}", &self);
 		let persist: DepStorePersist = self.cache.clone().into();
 		let str = serde_json::to_string(&persist).context("serializing build cache")?;
-		Ok(fs::write(".trou.cache", str).context("writing cache file")?)
+		let cache_path = PathBuf::from(TROU_CACHE_PATH);
+		fs::create_dir_all(cache_path.parent().unwrap())?;
+		Ok(fs::write(TROU_CACHE_PATH, str).context("writing cache file")?)
 	}
 
 	// Mark all Fresh entries as Cached
