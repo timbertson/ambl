@@ -20,7 +20,8 @@ use crate::err::result_block;
 use crate::path_util::{Scoped, Scope, CPath, Unscoped};
 use crate::invoke;
 
-type BuilderFn = Box<dyn Fn(&TestProject, &TargetCtx) -> Result<()> + Sync + Send>;
+type BuilderFn = fn(&TestProject, &TargetCtx) -> Result<()>;
+type CtxFn = fn(&TestProject, &BaseCtx) -> Result<()>;
 
 #[derive(Clone, Default)]
 pub struct Log(Arc<Mutex<Vec<String>>>);
@@ -72,6 +73,7 @@ pub struct TestModule<'a> {
 	_rules: Vec<Rule>,
 	rule_fn: Option<fn(&TestModule<'a>, &BaseCtx) -> Result<Vec<Rule>>>,
 	builders: Arc<HashMap<String, BuilderFn>>,
+	anon_fns: Arc<HashMap<String, CtxFn>>,
 }
 
 pub const DEFAULT_BUILD_FN: &'static str = "build";
@@ -88,13 +90,19 @@ impl<'a> TestModule<'a> {
 			scope: Default::default(),
 			_rules: Default::default(),
 			rule_fn: Default::default(),
-			builders: Default::default()
+			builders: Default::default(),
+			anon_fns: Default::default()
 		}.set_name(name)
 	}
 	
-	pub fn builder<F: Fn(&TestProject, &TargetCtx) -> Result<()> + 'static + Sync + Send>(mut self, f: F) -> Self
+	pub fn builder(mut self, f: BuilderFn) -> Self
 	{
-		Arc::get_mut(&mut self.builders).expect("builder()").insert(DEFAULT_BUILD_FN.to_string(), Box::new(f));
+		Arc::get_mut(&mut self.builders).expect("builders").insert(DEFAULT_BUILD_FN.to_string(), f);
+		self
+	}
+
+	pub fn wasm_fn<S: Into<String>>(mut self, s: S, f: CtxFn) -> Self {
+		Arc::get_mut(&mut self.anon_fns).expect("anon_fns").insert(s.into(), f);
 		self
 	}
 
@@ -143,27 +151,37 @@ impl<'a> BuildModule for TestModule<'a> {
 		Ok(module.to_owned())
 	}
 
-	fn call<Ctx: serde::Serialize>(&mut self, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+	fn call<Ctx: AsRef<BaseCtx> + Serialize>(&mut self, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
 		if f.fn_name == "get_rules" {
 			let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
 			TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
 				self.rules(ctx)
 			})
 		} else {
-			// go to and from JSON so I can have an owned version (and avoid unsafe casts)
-			let mut ctx: TargetCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
-
-			let path = ctx.target();
-			let token = ctx.token;
-			debug!("running builder for {} with token {:?}", path, token);
+			let serialized = serde_json::to_string(arg)?;
 			let fn_name = &f.fn_name;
-			let f_impl = self.builders.get(fn_name)
-				.ok_or_else(|| anyhow!("no such builder {:?} in {:?}", fn_name, &self.builders.keys()))?;
+			if let Some(f_impl) = self.builders.get(fn_name) {
+				// go to and from JSON so I can have an owned version (and avoid unsafe casts)
+				let mut ctx: TargetCtx = serde_json::from_slice(&serialized.as_bytes())
+					.with_context(|| format!("deserializing {:?}", &serialized))?;
 
-			TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
-				f_impl(self.project, &*ctx)
-			})?;
-			Ok(serde_json::to_vec(&())?)
+				let path = ctx.target();
+				let token = ctx.token;
+				debug!("running builder for {} with token {:?}", path, token);
+
+				TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
+					f_impl(self.project, &*ctx)
+				})
+			} else if let Some(f_impl) = self.anon_fns.get(fn_name) {
+				let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
+				TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
+					f_impl(self.project, &*ctx)
+				})
+			} else {
+				return Err(anyhow!("No builder / anon function defined: {}\nbuilders: {:?}, anons: {:?}",
+					fn_name, &self.builders.keys(), &self.anon_fns.keys()
+				));
+			}
 		}
 	}
 }
@@ -223,7 +241,9 @@ impl TestInvoker {
 			Some(old) => { map.insert(token, old); },
 			None => { map.remove(&token); },
 		}
-		Ok(ResultFFI::serialize(result)?.into_bytes())
+		let serialized = ResultFFI::serialize(result)?;
+		debug!("invoker::return( {} )", &serialized);
+		Ok(serialized.into_bytes())
 	}
 }
 impl Invoker for TestInvoker {
@@ -324,8 +344,8 @@ impl<'a> TestProject<'a> {
 	}
 	
 	// all-in one: adds an anonymous module for this rule, and pushes a rule
-	pub fn target_builder<S: ToString, F: Fn(&TestProject, &TargetCtx) -> Result<()> + 'static + Sync + Send>
-		(&'a self, target_name: S, f: F) -> &Self
+	pub fn target_builder<S: ToString>
+		(&'a self, target_name: S, f: BuilderFn) -> &Self
 	{
 		let target_name = target_name.to_string();
 		let m = self.new_module().builder(f);
@@ -390,17 +410,27 @@ impl<'a> TestProject<'a> {
 	}
 
 	pub fn build_file_as(&self, f: &str, ret: FileDependencyType) -> Result<InvokeResponse> {
-		let project = self.lock();
 		println!("\n=== start build_file({})", f);
 		let path = Unscoped::new(f.to_owned());
 		let req = BuildRequest::FileDependency(path.clone());
 		let post_build = PostBuild::FileDependency(PostBuildFile { path, ret });
-		let (project, result) = Project::build(project, &req, &BuildReason::Explicit)
-			.with_context(|| format!("Building {:?}", &req))?;
-
-		let response = result.into_response(&project, &post_build);
-		drop(project);
+		let response = self.build_full(&req, post_build)?;
 		println!("=== end build_file({})\n", f);
+		Ok(response)
+	}
+
+	pub fn build_dep(&self, req: &DependencyRequest) -> Result<InvokeResponse> {
+		let (build_request, post_build) = BuildRequest::from(req.to_owned(), None, &Scope::root())?;
+		self.build_full(&build_request, PostBuild::Unit)
+	}
+
+	fn build_full(&self, req: &BuildRequest, post: PostBuild) -> Result<InvokeResponse> {
+		let project = self.lock();
+		let (project, result) = Project::build(project, req, &BuildReason::Explicit)
+			.with_context(|| format!("Building {:?}", req))?;
+
+		let response = result.into_response(&project, &post);
+		drop(project);
 
 		// testcases run multiple builds, make sure we don't short-circuit between them
 		self.reset();

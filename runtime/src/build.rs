@@ -203,7 +203,7 @@ impl BuildResponse {
 				Target(file) => Self::response_of_file(Some(file), project, post_build),
 				Fileset(fileset) => Ok(InvokeResponse::StrVec(fileset)),
 				Env(env) => Ok(InvokeResponse::Str(env)),
-				Wasm(wasm) => Ok(InvokeResponse::Str(wasm)),
+				Wasm(wasm) => Ok(InvokeResponse::Str(serde_json::to_string(&wasm)?)),
 				AlwaysDirty => Ok(InvokeResponse::Unit),
 				AlwaysClean => Ok(InvokeResponse::Unit),
 			}

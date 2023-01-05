@@ -217,7 +217,7 @@ pub enum BuildResult {
 	Target(PersistFile), // TODO can we just use File() variant here?
 	Env(String),
 	Fileset(Vec<String>),
-	Wasm(String),
+	Wasm(serde_json::Value),
 	AlwaysClean,
 	AlwaysDirty,
 }

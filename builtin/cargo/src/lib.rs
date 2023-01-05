@@ -110,7 +110,8 @@ fn build_workspace_meta(c: TargetCtx) -> Result<()> {
 fn workspace_meta<C: AsRef<BaseCtx>>(c: C) -> Result<CargoMetaMinimal> {
 	let c = c.as_ref();
 	// TODO mark with checksum?
-	Ok(serde_json::from_str(&c.read_file("workspace-meta")?)?)
+	let contents = c.read_file("workspace-meta")?;
+	Ok(serde_json::from_str(&contents).with_context(|| contents.clone())?)
 }
 
 ffi!(build_lockfile);
@@ -134,7 +135,6 @@ pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
 		target("workspace-meta", function("build_workspace_meta")),
 		target("Cargo.lock", function("build_lockfile")),
 		include(this_module().function("module_rules")),
-		// TODO: include(module_rules)
 	))
 }
 

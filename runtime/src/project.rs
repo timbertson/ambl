@@ -376,8 +376,9 @@ impl<M: BuildModule> Project<M> {
 									Ok((project, persist_dep))
 								}).context("loading WASM")?;
 
-								let rules: Vec<Rule> = match persist_dep.into_response(&project_ret, &PostBuild::Unit)? {
-									InvokeResponse::Str(json) => ResultFFI::deserialize(json.as_bytes())?,
+								let rules: Vec<Rule> = match persist_dep.result {
+									BuildResult::Wasm(jvalue) => serde_json::from_value(jvalue.to_owned())
+										.with_context(|| format!("Deserializing JSON as a list of Rules:\n```\n{}\n```", &jvalue))?,
 									other => {
 										return Err(anyhow!("Unexpected wasm call response: {:?}", other));
 									},
@@ -501,9 +502,11 @@ impl<M: BuildModule> Project<M> {
 								// TODO can we have a FunctionSpec with references?
 								debug!("calling {:?}", found_target.build);
 								
-								let bytes = wasm_module.call(&found_target.build, &ctx, project_handle)
-									.with_context(|| format!("calling {:?}", found_target.build))?;
-								let _: () = serde_json::from_slice(&bytes)?;
+								result_block(|| {
+									let bytes = wasm_module.call(&found_target.build, &ctx, project_handle)?;
+									let _: () = ResultFFI::deserialize(&bytes)?;
+									Ok(())
+								}).with_context(|| format!("calling {:?}", found_target.build))?;
 								Ok(())
 							})?;
 						
@@ -560,10 +563,12 @@ impl<M: BuildModule> Project<M> {
 						&BuildReason::Dependency(build_token))?;
 					project = project_ret;
 
-					let result: String = project.unlocked_block(|project_handle| {
+					let result: serde_json::Value = project.unlocked_block(|project_handle| {
 						let ctx = BaseCtx::new(spec.config.value().to_owned(), build_token.raw());
 						let bytes = wasm_module.call(spec, &ctx, &project_handle)?;
-						Ok(String::from_utf8(bytes)?)
+						let result = ResultFFI::deserialize(&bytes)?;
+						debug!("jvalue from wasm call: {:?}", &result);
+						Ok(result)
 					})?;
 					
 					let persist = BuildResultWithDeps {
@@ -589,7 +594,8 @@ impl<M: BuildModule> Project<M> {
 				// which is unlikely to result in many cache hits if the target is being rebuilt anyway.
 				// (Also: executes aren't necessarly hermetic)
 				// It also means we don't need to persist execute output, we always just re-execute
-				let (project, response) = Sandbox::run(project, cmd, reason)?;
+				let (project, response) = Sandbox::run(project, cmd, reason)
+					.with_context(|| format!("running {:?}", cmd))?;
 				Ok((project, BuildResponse::full(BuildResult::AlwaysClean, response)))
 			},
 			BuildRequest::EnvVar(key) => {

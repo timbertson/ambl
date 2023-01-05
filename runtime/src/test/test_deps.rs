@@ -1,7 +1,10 @@
+use log::*;
 use std::{fs, sync::{Arc, Mutex}};
+use ambl_common::rule::dsl;
 use serial_test::serial;
 
 use anyhow::*;
+use crate::build_request::BuildRequest;
 use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::Project};
 use ambl_common::{rule::dsl::*, build::{DependencyRequest, FileDependency}};
 use super::util::*;
@@ -180,6 +183,58 @@ fn rebuild_on_fileset_change() -> Result<()> {
 		p.write_file("subdir/b.txt", "1")?;
 		eq!(p.build_file_contents("list")?, "./a.txt\n./subdir/b.txt");
 		
+		Ok(())
+	})
+}
+
+#[test]
+#[serial]
+fn test_does_not_cache_target_failures() -> Result<()> {
+	TestProject::in_tempdir(|p: &TestProject| {
+		p.target_builder("file", |p, c| {
+			if p.log().is_empty() {
+				p.record("fail");
+				Err(anyhow!("Initial failure"))
+			} else {
+				p.record("succeed");
+				Ok(())
+			}
+		});
+
+		eq!(p.build_file("file").is_err(), true);
+		eq!(p.log(), vec!("fail"));
+
+		p.build_file("file")?;
+		eq!(p.log(), vec!("fail", "succeed"));
+		Ok(())
+	})
+}
+
+#[test]
+#[serial]
+fn test_does_not_cache_wasm_call_failures() -> Result<()> {
+	TestProject::in_tempdir(|p: &TestProject| {
+		let module = p.new_module().wasm_fn("fn", |p, c| {
+			if p.log().is_empty() {
+				p.record("fail");
+				Err(anyhow!("Initial failure"))
+			} else {
+				p.record("succeed");
+				Ok(())
+			}
+		});
+		let req = DependencyRequest::WasmCall(dsl::function("fn").module(&module.name));
+
+		p.inject_module(module);
+
+		let initial_build = p.build_dep(&req);
+		debug!("initial build: {:?}", initial_build);
+		eq!(initial_build.is_err(), true);
+		eq!(p.log(), vec!("fail"));
+
+		p.build_dep(&req)?;
+		eq!(p.log(), vec!("fail", "succeed"));
+
 		Ok(())
 	})
 }

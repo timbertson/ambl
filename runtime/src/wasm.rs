@@ -276,7 +276,7 @@ impl BuildModule for WasmModule {
 					},
 				}
 			})();
-			debug!("ambl_invoke: returning {:?}", response);
+			debug!("ambl_invoke: returning {:?} to WASM module", response);
 			let result: Result<()> = (|| {
 				let response_str = ResultFFI::serialize(response)?;
 				state.return_string(caller, &response_str, WasmOffset::new(out_offset), WasmOffset::new(out_len_offset))
