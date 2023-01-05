@@ -1,3 +1,4 @@
+use ambl_common::ffi::ResultFFI;
 use log::*;
 use std::{ops::{Deref, DerefMut}, path::PathBuf};
 use serde::{de::DeserializeOwned, Serialize};
@@ -69,7 +70,7 @@ pub struct TestModule<'a> {
 	pub project: &'a TestProject<'a>,
 	module_path: Unscoped,
 	_rules: Vec<Rule>,
-	rule_fn: Option<fn(&TestModule<'a>, &BaseCtx) -> Vec<Rule>>,
+	rule_fn: Option<fn(&TestModule<'a>, &BaseCtx) -> Result<Vec<Rule>>>,
 	builders: Arc<HashMap<String, BuilderFn>>,
 }
 
@@ -113,11 +114,11 @@ impl<'a> TestModule<'a> {
 		self
 	}
 
-	pub fn rules(&self, ctx: &BaseCtx) -> Vec<Rule> {
+	pub fn rules(&self, ctx: &BaseCtx) -> Result<Vec<Rule>> {
 		if let Some(ref f) = self.rule_fn {
 			f(self, ctx)
 		} else {
-			self._rules.clone()
+			Ok(self._rules.clone())
 		}
 	}
 	
@@ -125,7 +126,7 @@ impl<'a> TestModule<'a> {
 		dsl::function(DEFAULT_BUILD_FN).module(&self.name)
 	}
 
-	pub fn rule_fn(mut self, f: fn(&TestModule<'a>, &BaseCtx) -> Vec<Rule>) -> Self {
+	pub fn rule_fn(mut self, f: fn(&TestModule<'a>, &BaseCtx) -> Result<Vec<Rule>>) -> Self {
 		self.rule_fn = Some(f);
 		self
 	}
@@ -146,7 +147,7 @@ impl<'a> BuildModule for TestModule<'a> {
 		if f.fn_name == "get_rules" {
 			let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
 			TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
-				Ok(self.rules(ctx))
+				self.rules(ctx)
 			})
 		} else {
 			// go to and from JSON so I can have an owned version (and avoid unsafe casts)
@@ -222,7 +223,7 @@ impl TestInvoker {
 			Some(old) => { map.insert(token, old); },
 			None => { map.remove(&token); },
 		}
-		Ok(serde_json::to_vec(&result?)?)
+		Ok(ResultFFI::serialize(result)?.into_bytes())
 	}
 }
 impl Invoker for TestInvoker {

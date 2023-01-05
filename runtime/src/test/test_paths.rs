@@ -36,7 +36,7 @@ fn test_paths_of_nested_module() -> Result<()> {
 
 		// define a target (which we'll scope under `subdir/`) which is built by nested-build
 		let nested_rule_m = p.new_module().rule_fn(|m, ctx| {
-			vec!(target("a", function("build").module("../nested-build")))
+			Ok(vec!(target("a", function("build").module("../nested-build"))))
 		});
 
 		p.inject_rule(include(module(&nested_rule_m.name).scope("subdir")));

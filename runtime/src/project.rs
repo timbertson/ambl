@@ -600,8 +600,6 @@ impl<M: BuildModule> Project<M> {
 			BuildRequest::Universe => Ok((project, BuildResponse::new(BuildResult::AlwaysDirty))),
 		}?;
 
-		debug!("built {:?}, saving against parent {:?}", &request, reason.parent());
-
 		// always register dependency on parent, even if we short-circuited via the cache
 		project.register_dependency(reason.parent(), request.to_owned(), response.result.to_owned())?;
 		Ok((project, response))
