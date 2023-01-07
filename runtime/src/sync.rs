@@ -79,13 +79,19 @@ pub struct MutexHandle<T>(Arc<Mutex<T>>);
 
 impl<T> MutexHandle<T> {
 	pub fn lock<'a>(&'a mut self, desc: &'static str) -> Result<Mutexed<'a, T>> {
-		let arc = Arc::clone(&self.0);
-		let guard: MutexGuard<T> = self.0.lock().map_err(|_| lock_failed(desc))?;
-		Ok(Mutexed { arc, guard: Some(guard) })
+		self._lock(desc)
 	}
 	
-	#[cfg(test)]
-	pub unsafe fn unsafe_lock<'a>(&'a self, desc: &'static str) -> Result<Mutexed<'a, T>> {
+	// unsafe in that it doesn't require mut, so it's easy to shoot yourself in the foot
+	pub unsafe fn unsafe_lock_shared<'a>(&'a self, desc: &'static str) -> Result<Mutexed<'a, T>> {
+		self._lock(desc)
+	}
+
+	pub unsafe fn unsafe_lock_with_lifetime<'a, 'b>(&'a self, desc: &'static str) -> Result<Mutexed<'b, T>> {
+		Ok(std::mem::transmute::<Mutexed<'a, T>, Mutexed<'b, T>>(self._lock(desc)?))
+	}
+
+	fn _lock<'a>(&'a self, desc: &'static str) -> Result<Mutexed<'a, T>> {
 		let arc = Arc::clone(&self.0);
 		let guard: MutexGuard<T> = self.0.lock().map_err(|_| lock_failed(desc))?;
 		Ok(Mutexed { arc, guard: Some(guard) })
@@ -104,6 +110,14 @@ impl<'a, T> Mutexed<'a, T> {
 	pub fn unlock(self) -> MutexHandle<T> {
 		// drops self.guard
 		MutexHandle(self.arc)
+	}
+
+	pub unsafe fn unsafe_cast_lifetime<'b>(self) -> Mutexed<'b, T> {
+		std::mem::transmute::<Mutexed<'a, T>, Mutexed<'b, T>>(self)
+	}
+
+	pub unsafe fn unsafe_clone(&self) -> MutexHandle<T> {
+		MutexHandle(Arc::clone(&self.arc))
 	}
 
 	// unlock this mutex for the duration of a block. This is needed because otherwise users run into

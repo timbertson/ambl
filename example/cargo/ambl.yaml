@@ -1,12 +1,13 @@
 - target:
     names: [default]
-    module: builder/build
+    module: ambl-builder/build
  
 - include:
     mode: WASM # TODO
     module: builtin:cargo
-    # scope: builder
+    scope: ambl-builder
     # config:
+    #   root: ../ambl-builder
     #   package: ambl-example-cargo-builder
 # - target:
 #     names: [ambl-builder/target/wasm32-unknown-unknown/debug/ambl_sample_builder.wasm]

@@ -5,6 +5,7 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::ffi::{ResultFFI, SizedPtr};
 use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, WriteFile, CopyFile, FilesetDependency};
+use crate::rule::EnvLookup;
 
 #[cfg(target_arch = "wasm32")]
 extern {
@@ -114,6 +115,14 @@ impl BaseCtx {
 
 	pub fn run(&self, cmd: Command) -> Result<InvokeResponse> {
 		self.invoke_dep(DependencyRequest::Execute(cmd))
+	}
+
+	pub fn lookup(&self, lookup: EnvLookup) -> Result<Option<String>> {
+		self.invoke_dep(DependencyRequest::EnvLookup(lookup))?.into_string_opt()
+	}
+
+	pub fn env<S: Into<String>>(&self, key: S) -> Result<String> {
+		self.invoke_dep(DependencyRequest::EnvVar(key.into()))?.into_string()
 	}
 
 	pub fn always_rebuild(&self) -> Result<()> {

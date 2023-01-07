@@ -110,6 +110,13 @@ impl FunctionSpec {
 	}
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct EnvLookup {
+	pub key: String,
+	pub find: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Alias {
@@ -230,6 +237,14 @@ pub mod dsl {
 			output: Default::default(),
 			input: Default::default(),
 		})
+	}
+
+	pub fn env_lookup<S: Into<String>, S2: Into<String>>(key: S, find: S2) -> EnvLookup {
+		EnvLookup { key: key.into(), find: find.into() }
+	}
+
+	pub fn exe_lookup<S: Into<String>>(find: S) -> EnvLookup {
+		EnvLookup { key: "PATH".into(), find: find.into() }
 	}
 
 	pub fn fileset<S: Into<String>>(root: S) -> FilesetDependency {

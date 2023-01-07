@@ -1,3 +1,4 @@
+use ambl_common::rule::EnvLookup;
 use log::*;
 use ambl_common::build::{FileSelection, FilesetDependency};
 use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
@@ -17,6 +18,7 @@ pub enum BuildRequest {
 	FileDependency(Unscoped),
 	WasmCall(ResolvedFnSpec),
 	EnvVar(String),
+	EnvLookup(EnvLookup),
 	Fileset(ResolvedFilesetDependency),
 	Execute(GenCommand<Unscoped>),
 	Universe,
@@ -38,6 +40,7 @@ impl BuildRequest {
 				PostBuild::Unit
 			),
 			DependencyRequest::EnvVar(v) => (Self::EnvVar(v), PostBuild::Unit),
+			DependencyRequest::EnvLookup(v) => (Self::EnvLookup(v), PostBuild::Unit),
 			DependencyRequest::Fileset(v) => {
 				let FilesetDependency { root, dirs, files } = v;
 				let root = Scoped::new(scope.clone(), CPath::new(root)).as_cpath();

@@ -62,6 +62,17 @@ macro_rules! ffi {
 // }
 
 #[derive(Deserialize, Serialize)]
+struct UserConfig {
+	root: String,
+}
+
+impl Default for UserConfig {
+	fn default() -> Self {
+		Self { root: "..".to_owned() }
+	}
+}
+
+#[derive(Deserialize, Serialize)]
 struct ModuleConfig {
 	name: String,
 	dep_names: Vec<String>,
@@ -93,15 +104,24 @@ struct CargoMetaDependency {
 	path: Option<String>,
 }
 
-fn cargo() -> Command {
-	// TODO normalize CWD against scope?
-	cmd("cargo")
+fn cargo(c: &BaseCtx) -> Result<Command> {
+	let exe = c.lookup(exe_lookup("cargo"))?.ok_or_else(|| anyhow!("cargo not on $PATH"))?;
+	c.build("Cargo.toml")?;
+	Ok(cmd(exe))
 }
 
 ffi!(build_workspace_meta);
 fn build_workspace_meta(c: TargetCtx) -> Result<()> {
-	let meta = c.run(cargo().args(vec!(
-		"metadata", "--no-deps"
+	// We need src/{lib,main} for cargo to evaluate.
+	// The contents don't actually matter, they could
+	// even be blank
+	if c.exists("src/lib.rs")? {
+		c.build("src/lib.rs")?;
+	} else {
+		c.build("src/main.rs")?;
+	}
+	let meta = c.run(cargo(&c)?.args(vec!(
+		"metadata", "--no-deps", "--format-version", "1"
 	)).stdout(Stdout::String))?.into_string()?;
 	c.write_dest(meta)?;
 	Ok(())
@@ -116,10 +136,10 @@ fn workspace_meta<C: AsRef<BaseCtx>>(c: C) -> Result<CargoMetaMinimal> {
 
 ffi!(build_lockfile);
 fn build_lockfile(c: TargetCtx) -> Result<()> {
-	c.run(cargo().args(vec!(
+	c.run(cargo(&c)?.args(vec!(
 		"--offline", "--update"
 	))).or_else(|_|
-		c.run(cargo().arg("generate-lockfile"))
+		c.run(cargo(&c)?.arg("generate-lockfile"))
 	)?;
 	
 	// TODO if there were a full sandbox, how would we reference the _current_ lockfile on disk?
@@ -167,6 +187,15 @@ pub fn module_rules(c: BaseCtx) -> Result<Vec<Rule>> {
 	Ok(result)
 }
 
+ffi!(build_all);
+pub fn build_all(c: BaseCtx) -> Result<()> {
+	let meta = workspace_meta(&c)?;
+	for pkg in meta.packages {
+		c.build(format!("module/{}", pkg.name))?;
+	}
+	Ok(())
+}
+
 ffi!(module_build);
 pub fn module_build(c: BaseCtx) -> Result<()> {
 	let conf: ModuleConfig = c.parse_config()?;
@@ -175,7 +204,7 @@ pub fn module_build(c: BaseCtx) -> Result<()> {
 		c.build(format!("build/{}", &name))?;
 	}
 	c.build(format!("sources/{}", &conf.name))?;
-	c.run(cargo()
+	c.run(cargo(&c)?
 		.args(vec!("build", "--target", "wasm32-unknown-unknown", "--package"))
 		.arg(&conf.name)
 	)?;
@@ -185,8 +214,12 @@ pub fn module_build(c: BaseCtx) -> Result<()> {
 }
 
 ffi!(module_sources);
-pub fn module_sources(_: BaseCtx) -> Result<()> {
-	// TODO depend on contents of all *.rs within dir recursively
-	// NOTE: other files too?
-	todo!()
+pub fn module_sources(c: BaseCtx) -> Result<()> {
+	// TODO: depend on non-rs files?
+	// TODO "." for scan includes the prefix, but then depending on the returned files includes it again!?
+	for source_file in c.list_fileset(fileset(".").include_files("*.rs"))? {
+		debug(&format!("BUILDY: {}", source_file));
+		c.build(format!("../{}", source_file))?;
+	}
+	Ok(())
 }

@@ -2,9 +2,9 @@
 cargo build \
 	--release \
 	--color always \
-	--package ambl-builtin-cargo \
-	--target=wasm32-unknown-unknown \
+	--package ambl-runtime \
 	&& cargo build \
 	--release \
 	--color always \
-	--package ambl-runtime
+	--target=wasm32-unknown-unknown \
+	--package ambl-builtin-cargo

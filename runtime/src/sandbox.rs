@@ -1,5 +1,6 @@
 use log::*;
-use std::io::Read;
+use std::ffi::{OsStr, OsString};
+use std::io::{Read, Stdin};
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
@@ -95,12 +96,20 @@ impl Sandbox {
 		let mut cmd = Command::new(&exe.0.as_path());
 
 		cmd.env_clear();
+		let mut env_inherit: HashSet<String> = HashSet::from_iter(env_inherit.into_iter().map(ToOwned::to_owned));
+		// Make sure we have minimal requisite environment, add these in if they're not already included:
+		// TODO scope to osx / linux / etc
+		for key in ["PATH", "HOME", "LD_DYLD_PATH", "LD_LIBRARY_PATH"] {
+			env_inherit.insert(key.to_owned());
+		}
 		for k in env_inherit {
 			let request = BuildRequest::EnvVar(k.to_owned());
 			let (project_ret, value) = Project::<M>::build(project, &request, reason)?;
 			match value.result {
 				BuildResult::Env(value) => {
-					cmd.env(k, value);
+					if let Some(v) = value {
+						cmd.env(k, v);
+					}
 				},
 				_ => panic!("impossible result from Envvar request"),
 			}
@@ -149,27 +158,44 @@ impl Sandbox {
 				// TODO warn if CWD is absolute?
 				full_cwd.push(&cwd.0);
 			}
-			cmd.current_dir(full_cwd);
+			cmd.current_dir(&full_cwd);
 
 			info!("+ {:?}", &cmd);
 
-			let proc = cmd.spawn()?;
-			let response = match output.stdout {
-				build::Stdout::String => {
-					let mut s: String = String::new();
-					proc.stdout.expect("stdout pipe").read_to_string(&mut s)?;
-					InvokeResponse::Str(s.trim_end().to_owned())
-				},
-				_ => InvokeResponse::Unit,
-			};
-			let result = cmd.status()
-				.with_context(|| format!("Unable to launch command: {:?}", &cmd))?;
-			tmp.close()?;
-			if result.success() {
-				Ok(response)
-			} else {
-				Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result.code()))
+			let response = result_block(|| {
+				std::fs::create_dir_all(&full_cwd)?;
+				let proc = cmd.spawn()?;
+				let response = match output.stdout {
+					build::Stdout::String => {
+						let mut s: String = String::new();
+						proc.stdout.expect("stdout pipe").read_to_string(&mut s)?;
+						InvokeResponse::Str(s.trim_end().to_owned())
+					},
+					_ => InvokeResponse::Unit,
+				};
+				let result = cmd.status()?;
+				if result.success() {
+					Ok(response)
+				} else {
+					Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result.code()))
+				}
+			}).with_context(|| format!("running {:?} in {}", &cmd, &full_cwd.display()));
+
+			if let Err(ref e) = response {
+				if std::env::var_os("AMBL_SANDBOX_DEBUG") == Some(OsString::from("1")) {
+					// TODO opt-in via config flag
+					error!("{:?}", &e);
+					warn!("Starting a debug shell; press ctrl^d to continue");
+					let mut shell = Command::new("bash");
+					shell.arg("-i");
+					shell.current_dir(&full_cwd);
+					debug!("Spawning: {:?}", &shell);
+					let result = shell.status();
+					info!("Interactive shell result: {:?}", result);
+				}
 			}
+			tmp.close()?;
+			response
 		})?;
 		Ok((project, response))
 	}

@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, ops::{DerefMut, Deref}};
 
 use serde::{Serialize, Deserialize};
 
-use crate::rule::FunctionSpec;
+use crate::rule::{FunctionSpec, EnvLookup};
 
 // Top level argument to ambl_invoke. May be a dependency or an action
 // (e.g write to output file)
@@ -24,6 +24,7 @@ pub enum DependencyRequest {
 	WasmCall(FunctionSpec),
 
 	EnvVar(String),
+	EnvLookup(EnvLookup),
 	Fileset(FilesetDependency),
 	Execute(Command),
 	Universe,
@@ -43,12 +44,14 @@ pub enum InvokeResponse {
 	Unit,
 	Bool(bool),
 	Str(String),
+	StrOpt(Option<String>),
 	StrVec(Vec<String>),
 	FileSet(String),
 }
 
 impl InvokeResponse {
 	pub fn into_string(self) -> Result<String> { self.try_into() }
+	pub fn into_string_opt(self) -> Result<Option<String>> { self.try_into() }
 	pub fn into_string_vec(self) -> Result<Vec<String>> { self.try_into() }
 	pub fn into_bool(self) -> Result<bool> { self.try_into() }
 }
@@ -59,7 +62,19 @@ impl TryInto<String> for InvokeResponse {
 	fn try_into(self) -> Result<String> {
 		match self {
 			Self::Str(s) => Ok(s),
+			Self::StrOpt(Some(s)) => Ok(s),
 			other => Err(anyhow!("Expected string, got {:?}", other)),
+		}
+	}
+}
+
+impl TryInto<Option<String>> for InvokeResponse {
+	type Error = anyhow::Error;
+
+	fn try_into(self) -> Result<Option<String>> {
+		match self {
+			Self::StrOpt(s) => Ok(s),
+			other => Err(anyhow!("Expected string option, got {:?}", other)),
 		}
 	}
 }

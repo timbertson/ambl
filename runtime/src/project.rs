@@ -369,12 +369,9 @@ impl<M: BuildModule> Project<M> {
 								});
 								wasm_module_path = Some(module_path);
 
-								let (project_ret, persist_dep) = result_block(|| {
-									let (project, persist_dep) = Project::build(project,
-										&request,
-										&BuildReason::Import)?;
-									Ok((project, persist_dep))
-								}).context("loading WASM")?;
+								let (project_ret, persist_dep) = Project::build(project,
+									&request,
+									&BuildReason::Import)?;
 
 								let rules: Vec<Rule> = match persist_dep.result {
 									BuildResult::Wasm(jvalue) => serde_json::from_value(jvalue.to_owned())
@@ -600,7 +597,35 @@ impl<M: BuildModule> Project<M> {
 			},
 			BuildRequest::EnvVar(key) => {
 				BuildCache::build_simple(project, request, || {
-					Ok(BuildResult::Env(std::env::var(key)?))
+					let value = match std::env::var_os(key) {
+						Some(os) => Some(os.into_string().map_err(|_| anyhow!("${} is not valid unicode", key))?),
+						None => None,
+					};
+					Ok(BuildResult::Env(value))
+				})
+			},
+			BuildRequest::EnvLookup(lookup) => {
+				// More efficient than doing it client-side, since we only invlidate if the
+				// result changes, not the envvar
+				BuildCache::build_simple(project, request, || {
+					let value = match std::env::var_os(&lookup.key) {
+						Some(os) => Some(os.into_string().map_err(|_| anyhow!("${} is not valid unicode", &lookup.key))?),
+						None => None,
+					};
+					if let Some(value) = value {
+						for prefix in value.split(':') {
+							let mut candidate = PathBuf::from(prefix);
+							candidate.push(&lookup.find);
+							if candidate.exists() {
+								debug!("Found {:?} at {}", lookup, candidate.display());
+								return Ok(BuildResult::Env(Some(path_util::string_of_pathbuf(candidate))))
+							}
+						}
+						debug!("{} not found in ${} [{}]", &lookup.find, &lookup.key, &value);
+					} else {
+						debug!("{} not found in ${} (it's unset)", &lookup.find, &lookup.key);
+					}
+					Ok(BuildResult::Env(None))
 				})
 			},
 			BuildRequest::Universe => Ok((project, BuildResponse::new(BuildResult::AlwaysDirty))),
@@ -623,6 +648,13 @@ impl<M: BuildModule> Project<M> {
 
 	// we just built something as requested, register it as a dependency on the parent target
 	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: BuildResult) -> Result<()> {
+		match key {
+			BuildRequest::Execute(_) => {
+				debug!("Skipping registration of execute dependency");
+				return Ok(())
+			},
+			_ => (),
+		}
 		if let Some(parent) = parent {
 			debug!("registering dependency {:?} against build {:?} (result: {:?}", &key, parent, &result);
 

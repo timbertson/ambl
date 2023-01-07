@@ -9,7 +9,7 @@ use crate::module::BuildModule;
 use crate::path_util::{Scoped, Scope};
 use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile};
 use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken};
-use crate::sync::Mutexed;
+use crate::sync::{Mutexed, MutexRef};
 
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -152,8 +152,21 @@ impl BuildCache {
 		for (dep_key, dep_cached) in cached.iter() {
 			debug!("requires_build() recursing over dependency {:?}", dep_key);
 			
+			// TODO: if we returned the project in the error case from Project::build, this wouldn't be necessary
+			let mut project_err_handle = unsafe { project.unsafe_clone() };
+			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
-			let (project_ret, dep_latest) = Project::build(project, dep_key, &reason)?;
+			// TODO handle failure
+			let (project_ret, dep_latest) = match Project::build(project, dep_key, &reason) {
+				Result::Ok(pair) => pair,
+				Result::Err(e) => {
+					warn!("Speculative build failed for {:?}; assuming dirty", dep_key);
+					let project = project_err_handle.lock("speculative build failure")?;
+					let project = unsafe { project.unsafe_cast_lifetime::<'a>() };
+					// the build failed, so it's definitely not clean
+					return Ok((project, true));
+				},
+			};
 			project = project_ret;
 			
 			// if the result differs from what this target was based on, rebuild this target
@@ -202,7 +215,7 @@ impl BuildResponse {
 				File(file) => Self::response_of_file(file, project, post_build),
 				Target(file) => Self::response_of_file(Some(file), project, post_build),
 				Fileset(fileset) => Ok(InvokeResponse::StrVec(fileset)),
-				Env(env) => Ok(InvokeResponse::Str(env)),
+				Env(env) => Ok(InvokeResponse::StrOpt(env)),
 				Wasm(wasm) => Ok(InvokeResponse::Str(serde_json::to_string(&wasm)?)),
 				AlwaysDirty => Ok(InvokeResponse::Unit),
 				AlwaysClean => Ok(InvokeResponse::Unit),

@@ -215,7 +215,7 @@ and is stored in the cache (in BuildResultWithDeps).
 pub enum BuildResult {
 	File(Option<PersistFile>),
 	Target(PersistFile), // TODO can we just use File() variant here?
-	Env(String),
+	Env(Option<String>),
 	Fileset(Vec<String>),
 	Wasm(serde_json::Value),
 	AlwaysClean,
