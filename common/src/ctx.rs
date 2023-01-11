@@ -4,7 +4,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::ffi::{ResultFFI, SizedPtr};
-use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, WriteFile, CopyFile, FilesetDependency};
+use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, WriteFile, FilesetDependency, CopyFile};
 use crate::rule::EnvLookup;
 
 #[cfg(target_arch = "wasm32")]
@@ -69,7 +69,7 @@ impl BaseCtx {
 		self.invoke(Invoke::Dependency(dep))
 	}
 
-	fn invoke_action(&self, act: InvokeAction) -> Result<InvokeResponse> {
+	fn invoke_action(&self, act: InvokeAction<String>) -> Result<InvokeResponse> {
 		self.invoke(Invoke::Action(act))
 	}
 	
@@ -176,11 +176,15 @@ impl TargetCtx {
 		})))
 	}
 
-	pub fn copy_to_dest<S: Into<String>>(&self, path: S) -> Result<()> {
+	pub fn copy_file<S: Into<String>, S2: Into<String>>(&self, src: S, dest: S2) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::CopyFile(CopyFile {
-			src: path.into(),
-			dest: self.dest.to_str().unwrap().to_owned(),
+			src: src.into(),
+			dest: dest.into(),
 		})))
+	}
+
+	pub fn copy_to_dest<S: Into<String>>(&self, path: S) -> Result<()> {
+		self.copy_file(path, self.dest.to_str().unwrap().to_owned())
 	}
 }
 

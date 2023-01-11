@@ -134,20 +134,20 @@ fn workspace_meta<C: AsRef<BaseCtx>>(c: C) -> Result<CargoMetaMinimal> {
 	Ok(serde_json::from_str(&contents).with_context(|| contents.clone())?)
 }
 
-ffi!(build_lockfile);
-fn build_lockfile(c: TargetCtx) -> Result<()> {
-	c.run(cargo(&c)?.args(vec!(
-		"--offline", "--update"
-	))).or_else(|_|
-		c.run(cargo(&c)?.arg("generate-lockfile"))
-	)?;
+// ffi!(build_lockfile);
+// fn build_lockfile(c: TargetCtx) -> Result<()> {
+// 	c.run(cargo(&c)?.args(vec!(
+// 		"--offline", "--update"
+// 	))).or_else(|_|
+// 		c.run(cargo(&c)?.arg("generate-lockfile"))
+// 	)?;
 	
-	// TODO if there were a full sandbox, how would we reference the _current_ lockfile on disk?
-	// Perhaps there's a persistent_build_ctx or something which copies files if they exist?
-	// Maybe it doesn't matter that we need the un-target version, we just want to copy <previous-version-of-my-target> if present...
-	c.copy_to_dest(c.target())?;
-	Ok(())
-}
+// 	// TODO if there were a full sandbox, how would we reference the _current_ lockfile on disk?
+// 	// Perhaps there's a persistent_build_ctx or something which copies files if they exist?
+// 	// Maybe it doesn't matter that we need the un-target version, we just want to copy <previous-version-of-my-target> if present...
+// 	c.copy_to_dest(c.target())?;
+// 	Ok(())
+// }
 
 ffi!(get_rules);
 pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
@@ -197,19 +197,22 @@ pub fn build_all(c: BaseCtx) -> Result<()> {
 }
 
 ffi!(module_build);
-pub fn module_build(c: BaseCtx) -> Result<()> {
+pub fn module_build(c: TargetCtx) -> Result<()> {
 	let conf: ModuleConfig = c.parse_config()?;
 	for name in conf.dep_names {
 		// TODO parallel?
 		c.build(format!("build/{}", &name))?;
 	}
 	c.build(format!("sources/{}", &conf.name))?;
-	c.run(cargo(&c)?
+	let tmp = c.run(cargo(&c)?
+		// TODO run this with lock, but update the lock explicitly
 		.args(vec!("build", "--target", "wasm32-unknown-unknown", "--package"))
 		.arg(&conf.name)
-	)?;
-	// TODO promote actual target somewhere
-	// TODO store intermediate build products
+		.impure_share_dir("target")
+	)?.into_string()?;
+
+	// TODO full cargo substitution logic
+	c.copy_to_dest(format!("{}/target/wasm32-unknown-unknown/debug/{}.wasm", tmp, conf.name.replace("-", "_")))?;
 	Ok(())
 }
 
@@ -217,7 +220,7 @@ ffi!(module_sources);
 pub fn module_sources(c: BaseCtx) -> Result<()> {
 	// TODO: depend on non-rs files?
 	// TODO "." for scan includes the prefix, but then depending on the returned files includes it again!?
-	for source_file in c.list_fileset(fileset(".").include_files("*.rs"))? {
+	for source_file in c.list_fileset(fileset("src").include_files("*.rs"))? {
 		debug(&format!("BUILDY: {}", source_file));
 		c.build(format!("../{}", source_file))?;
 	}

@@ -157,7 +157,7 @@ pub struct Project<M: BuildModule> {
 	root: Absolute,
 	module_cache: ModuleCache<M::Compiled>,
 	pub build_cache: DepStore,
-	active_tasks: HashMap<ActiveBuildToken, DepSet>,
+	active_tasks: HashMap<ActiveBuildToken, ActiveBuildState>,
 	root_rule: Arc<ProjectRule>,
 	self_ref: Option<ProjectRef<M>>,
 }
@@ -515,7 +515,7 @@ impl<M: BuildModule> Project<M> {
 									fs::rename(&tmp_path, &dest_path)?;
 								},
 								None => {
-									debug!("Builder for {:?} didn't produce an output file; writing an empty one", &name_scoped);
+									info!("Builder for {:?} didn't produce an output file; writing an empty one", &name_scoped);
 									fs::write(&dest_path, "")?;
 								},
 							}
@@ -523,7 +523,7 @@ impl<M: BuildModule> Project<M> {
 
 							BuildResultWithDeps {
 								result: BuildResult::Target(PersistFile::from_stat(stat, Some(name_scoped.flatten()))?),
-								deps: Some(project.collect_deps(build_token)),
+								deps: Some(project.collect_deps(build_token)?),
 							}
 						} else {
 							debug!("Treating dependency as a plain file: {:?}", &request);
@@ -569,7 +569,7 @@ impl<M: BuildModule> Project<M> {
 					})?;
 					
 					let persist = BuildResultWithDeps {
-						deps: Some(project.collect_deps(build_token)),
+						deps: Some(project.collect_deps(build_token)?),
 						result: BuildResult::Wasm(result),
 					};
 					Ok((project, persist))
@@ -591,8 +591,22 @@ impl<M: BuildModule> Project<M> {
 				// which is unlikely to result in many cache hits if the target is being rebuilt anyway.
 				// (Also: executes aren't necessarly hermetic)
 				// It also means we don't need to persist execute output, we always just re-execute
-				let (project, response) = Sandbox::run(project, cmd, reason)
+				let (mut project, tempdir, response) = Sandbox::run(project, cmd, reason)
 					.with_context(|| format!("running {:?}", cmd))?;
+				
+				let response = match response {
+					InvokeResponse::Unit => {
+						// if there's no explicit response, keep the tempdir around and return its path
+						let path = path_util::str_of_path(tempdir.path()).to_owned();
+						project.keep_tempdir(reason.parent(), tempdir)?;
+						InvokeResponse::Str(path)
+					},
+					other => {
+						tempdir.close()?;
+						other
+					}
+				};
+
 				Ok((project, BuildResponse::full(BuildResult::AlwaysClean, response)))
 			},
 			BuildRequest::EnvVar(key) => {
@@ -636,14 +650,15 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, response))
 	}
 
-	fn collect_deps(&mut self, token: ActiveBuildToken) -> DepSet {
+	fn collect_deps(&mut self, token: ActiveBuildToken) -> Result<DepSet> {
 		let collected = self.active_tasks.remove(&token).unwrap_or_else(Default::default);
-		debug!("Collected {:?} deps for token {:?}: {:?}", collected.len(), token, &collected);
-		collected
+		let deps = collected.cleanup()?;
+		debug!("Collected {:?} deps for token {:?}: {:?}", deps.len(), token, &deps);
+		Ok(deps)
 	}
 
 	pub fn get_deps(&self, token: ActiveBuildToken) -> Option<&DepSet> {
-		self.active_tasks.get(&token)
+		self.active_tasks.get(&token).map(|x| x.deps())
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
@@ -664,6 +679,12 @@ impl<M: BuildModule> Project<M> {
 		Ok(())
 	}
 	
+	fn keep_tempdir(&mut self, parent: Option<ActiveBuildToken>, tmp: tempdir::TempDir) -> Result<()> {
+		let parent = parent.ok_or_else(|| anyhow!("Can't collect tempdir; no parent token"))?;
+		let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(Default::default);
+		parent_dep_set.keep_tempdir(tmp);
+		Ok(())
+	}
 	
 	pub fn lookup(&self, key: &BuildRequest) -> Result<Option<&Cached>> {
 		self.build_cache.lookup(key)
@@ -680,7 +701,7 @@ impl<M: BuildModule> Project<M> {
 	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<Simple> {
 		let mut ret: PathBuf = PathBuf::from(".ambl");
 		ret.push(base);
-		ret.push::<&CPath>(&name.as_cpath().0);
+		ret.push(Unscoped::from_scoped(name).0);
 		CPath::try_from(ret)?.into_simple()
 	}
 

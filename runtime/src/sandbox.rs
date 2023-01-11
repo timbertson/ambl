@@ -1,4 +1,5 @@
 use log::*;
+use tempdir::TempDir;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Stdin};
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
@@ -11,7 +12,7 @@ use crate::build_request::BuildRequest;
 use crate::persist::{DepSet, BuildResult};
 use crate::project::{Project, ProjectMutexPair};
 use crate::sync::{Mutexed, MutexHandle};
-use crate::path_util::{External, Absolute, Scope, Scoped, CPath, Simple, Unscoped};
+use crate::path_util::{External, Absolute, Scope, Scoped, CPath, Simple, Unscoped, lexists};
 use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::DependencyRequest;
@@ -29,17 +30,32 @@ impl Sandbox {
 		result_block(|| {
 			let link = roots.tmp.join(rel);
 			let target = roots.project.join(rel);
-			let link: PathBuf = link.into();
-			let target: PathBuf = target.into();
-			debug!("Linking {:?} -> {:?}", &link, &target);
-			let parent = link.parent().expect("link.parent()");
-			debug!("Creating parent directory {:?}", &parent);
-			fs::create_dir_all(&parent)?;
-			symlink(&target, &link)?;
-			Ok(())
+			Self::_link(roots, link, target)
 		}).with_context(|| format!("Installing symlink {:?} (in root {:?})", rel, roots.tmp))
 	}
+
+	fn share_dir(roots: &Roots, source: &Unscoped) -> Result<()> {
+		result_block(|| {
+			let target: Absolute = roots.project.join(&source.0);
+			if !lexists(target.as_path())? {
+				fs::create_dir_all(target.as_path())?;
+			}
+			let link = roots.tmp.join(&source.0);
+			Self::_link(roots, link, target)
+		}).with_context(|| format!("Linking shared dir {:?} (in root {:?})", source, roots.tmp))
+	}
 	
+	fn _link(roots: &Roots, link: Absolute, target: Absolute) -> Result<()> {
+		debug!("Linking {:?} -> {:?}", &link, &target);
+		let link: PathBuf = link.into();
+		let parent = link.parent().expect("link.parent()");
+		debug!("Creating parent directory {:?}", &parent);
+		fs::create_dir_all(&parent)?;
+		symlink(target.as_path(), &link)
+			.with_context(|| format!("fs::symlink({:?}, {:?})", target.as_path(), &link))?;
+		Ok(())
+	}
+
 	fn collect_paths<'a, 'b, M: BuildModule>(
 		project: &'a Project<M>,
 		dest: &mut HashSet<Simple>,
@@ -84,7 +100,7 @@ impl Sandbox {
 	pub fn run<'a, M: BuildModule>(mut project: Mutexed<'a, Project<M>>,
 		command: &GenCommand<Unscoped>,
 		reason: &BuildReason,
-	) -> Result<ProjectMutexPair<'a, M, InvokeResponse>> {
+	) -> Result<(Mutexed<'a, Project<M>>, TempDir, InvokeResponse)> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
 		let mut rel_paths = Default::default();
 		for (dep, state) in dep_set.deps.iter() {
@@ -92,7 +108,7 @@ impl Sandbox {
 				.context("initializing command sandbox")?;
 		}
 		
-		let GenCommand { exe, args, cwd, env, env_inherit, output, input } = command;
+		let GenCommand { exe, args, cwd, env, env_inherit, output, input, impure_share_dirs } = command;
 		let mut cmd = Command::new(&exe.0.as_path());
 
 		cmd.env_clear();
@@ -119,7 +135,7 @@ impl Sandbox {
 			cmd.env(k, v);
 		}
 		
-		let response = project.unlocked_block(|project_handle| {
+		let (tmp, response) = project.unlocked_block(|project_handle| {
 			let tmp = tempdir::TempDir::new("ambl")?;
 			debug!("created command sandbox {:?}", &tmp);
 			let roots = Roots {
@@ -152,6 +168,11 @@ impl Sandbox {
 				Self::install_symlink(&roots, &rel.to_owned().into())?;
 			}
 
+			debug!("Installing {} symlinks to impure_shared_dirs", impure_share_dirs.len());
+			for dir in impure_share_dirs {
+				Self::share_dir(&roots, dir)?;
+			}
+
 			// build up actual CWD from temp + scope + explicit CWD
 			let mut full_cwd: PathBuf = roots.tmp.to_owned().into();
 			if let Some(cwd) = cwd {
@@ -181,22 +202,9 @@ impl Sandbox {
 				}
 			}).with_context(|| format!("running {:?} in {}", &cmd, &full_cwd.display()));
 
-			if let Err(ref e) = response {
-				if std::env::var_os("AMBL_SANDBOX_DEBUG") == Some(OsString::from("1")) {
-					// TODO opt-in via config flag
-					error!("{:?}", &e);
-					warn!("Starting a debug shell; press ctrl^d to continue");
-					let mut shell = Command::new("bash");
-					shell.arg("-i");
-					shell.current_dir(&full_cwd);
-					debug!("Spawning: {:?}", &shell);
-					let result = shell.status();
-					info!("Interactive shell result: {:?}", result);
-				}
-			}
-			tmp.close()?;
-			response
+			let response = crate::debug::shell_on_failure(response)?;
+			Ok((tmp, response))
 		})?;
-		Ok((project, response))
+		Ok((project, tmp, response))
 	}
 }

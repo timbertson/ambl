@@ -1,4 +1,5 @@
 use anyhow::*;
+use std::path::Path;
 use std::{collections::BTreeMap, ops::{DerefMut, Deref}};
 
 use serde::{Serialize, Deserialize};
@@ -10,7 +11,7 @@ use crate::rule::{FunctionSpec, EnvLookup};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Invoke {
 	Dependency(DependencyRequest),
-	Action(InvokeAction),
+	Action(InvokeAction<String>),
 }
 
 // A request, which can be turned into a Dependency by resolving
@@ -171,6 +172,7 @@ pub struct GenCommand<Path> {
 	pub cwd: Option<Path>,
 	pub env: BTreeMap<String, String>,
 	pub env_inherit: Vec<String>,
+	pub impure_share_dirs: Vec<Path>,
 	pub output: Stdio,
 	pub input: Stdin,
 	// TODO add hermeticity by default, with an opt-out. Biggest challenge is being able to declare (transitive) available files,
@@ -187,13 +189,15 @@ pub struct GenCommand<Path> {
 
 impl<T> GenCommand<T> {
 	pub fn convert<R, F: Fn(T) -> R>(self, f: F) -> GenCommand<R> {
-		let Self { exe, args, cwd, env, env_inherit, output, input } = self;
+		let Self { exe, args, cwd, env, env_inherit, impure_share_dirs, output, input } = self;
+		let impure_share_dirs : Vec<R> = impure_share_dirs.into_iter().map(&f).collect();
 		GenCommand {
 			exe: f(exe),
 			args,
 			cwd: cwd.map(f),
 			env,
 			env_inherit,
+			impure_share_dirs,
 			output,
 			input,
 		}
@@ -239,6 +243,16 @@ impl Command {
 
 	pub fn env_inherit<S: Into<String>, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
 		self.env_inherit.extend(v.into_iter().map(|s| s.into()));
+		self
+	}
+	
+	pub fn impure_share_dir<S: Into<String>>(mut self, v: S) -> Self {
+		self.impure_share_dirs.push(v.into());
+		self
+	}
+	
+	pub fn impure_share_dirs<S: Into<String>, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
+		self.impure_share_dirs.extend(v.into_iter().map(|s| s.into()));
 		self
 	}
 	
@@ -314,19 +328,65 @@ impl Default for Stdin {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum InvokeAction {
-	WriteFile(WriteFile),
-	CopyFile(CopyFile),
+pub enum InvokeAction<P> {
+	WriteFile(WriteFile<P>),
+	CopyFile(CopyFile<P>),
+}
+
+impl<P> InvokeAction<P> {
+	pub fn map<P2, F: Fn(P) -> P2>(self, f: F) -> InvokeAction<P2> {
+		use InvokeAction::*;
+		match self {
+			WriteFile(x) => WriteFile(x.map(f)),
+			CopyFile(x) => CopyFile(x.map(f)),
+		}
+	}
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WriteFile {
-	pub path: String,
+pub struct WriteFile<P> {
+	pub path: P,
 	pub contents: Vec<u8>,
 }
 
+impl<P> WriteFile<P> {
+	pub fn map<P2, F: Fn(P) -> P2>(self, f: F) -> WriteFile<P2> {
+		let Self { path, contents } = self;
+		WriteFile {
+			path: f(path),
+			contents
+		}
+	}
+}
+
+impl<P: AsRef<Path>> WriteFile<P> {
+	pub fn as_path(&self) -> &Path {
+		self.path.as_ref()
+	}
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CopyFile {
-	pub src: String,
-	pub dest: String,
+pub struct CopyFile<P> {
+	pub src: P,
+	pub dest: P,
+}
+
+impl<P> CopyFile<P> {
+	pub fn map<P2, F: Fn(P) -> P2>(self, f: F) -> CopyFile<P2> {
+		let Self { src, dest } = self;
+		CopyFile {
+			src: f(src),
+			dest: f(dest),
+		}
+	}
+}
+
+impl<P: AsRef<Path>> CopyFile<P> {
+	pub fn src_path(&self) -> &Path {
+		self.src.as_ref()
+	}
+
+	pub fn dest_path(&self) -> &Path {
+		self.dest.as_ref()
+	}
 }

@@ -29,9 +29,7 @@ impl BuildRequest {
 		Ok(match req {
 			DependencyRequest::FileDependency(v) => {
 				let FileDependency { path, ret } = v;
-				// TODO seems silly to go via a clone, would be good to have a simple (scope, str) -> Unscoped function
-				let path = Scoped::new(scope.clone(), CPath::new(path)).as_cpath();
-
+				let path = Unscoped::from_string(path, scope);
 				let ret = PostBuildFile { path: path.clone(), ret };
 				(Self::FileDependency(path), PostBuild::FileDependency(ret))
 			},
@@ -43,13 +41,13 @@ impl BuildRequest {
 			DependencyRequest::EnvLookup(v) => (Self::EnvLookup(v), PostBuild::Unit),
 			DependencyRequest::Fileset(v) => {
 				let FilesetDependency { root, dirs, files } = v;
-				let root = Scoped::new(scope.clone(), CPath::new(root)).as_cpath();
+				let root = Unscoped::from_string(root, scope);
 				(Self::Fileset(ResolvedFilesetDependency{ root, dirs, files }), PostBuild::Unit)
 			},
 			DependencyRequest::Execute(v) => {
 				let gen_str : GenCommand<String> = v.into();
 				let mut gen = gen_str.convert(|s| {
-					Scoped::new(scope.clone(), CPath::new(s)).as_cpath()
+					Unscoped::from_string(s, scope)
 				});
 				// If there is a scope, make sure it's used for the default CWD
 				let override_cwd = match (scope.into_simple(), &gen.cwd) {

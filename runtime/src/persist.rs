@@ -297,3 +297,37 @@ impl Default for DepSet {
 		Self { deps: Default::default() }
 	}
 }
+
+pub struct ActiveBuildState {
+	deps: DepSet,
+	tempdirs: Vec<tempdir::TempDir>,
+}
+
+impl ActiveBuildState {
+	pub fn cleanup(self) -> Result<DepSet> {
+		let Self { deps, tempdirs } = self;
+		for tmp in tempdirs {
+			debug!("Removing tempdir: {:?}", tmp.path());
+			tmp.close()?;
+		}
+		Ok(deps)
+	}
+
+	pub fn deps(&self) -> &DepSet {
+		&self.deps
+	}
+	
+	pub fn add(&mut self, request: BuildRequest, result: BuildResult) {
+		self.deps.add(request, result)
+	}
+
+	pub fn keep_tempdir(&mut self, tmp: tempdir::TempDir) {
+		self.tempdirs.push(tmp)
+	}
+}
+
+impl Default for ActiveBuildState {
+	fn default() -> Self {
+		Self { deps: Default::default(), tempdirs: Default::default() }
+	}
+}

@@ -88,6 +88,9 @@ pub fn lstat_opt<P: AsRef<Path>>(p: P) -> Result<Option<fs::Metadata>> {
 	}
 }
 
+pub fn lexists<P: AsRef<Path>>(p: P) -> Result<bool> {
+	Ok(lstat_opt(p)?.is_some())
+}
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(into = "Option<Simple>", from = "Option<Simple>")]
@@ -193,16 +196,6 @@ impl<T: Display> Display for Scoped<T> {
 	}
 }
 
-impl<P: AsRef<CPath>> Scoped<P> {
-	// embeds the scope into the path
-	pub fn as_cpath(&self) -> Unscoped {
-		Unscoped(match self.scope.0 {
-			None => self.value.as_ref().to_owned(),
-			Some(ref scope) => scope.0.join(self.value.as_ref()),
-		})
-	}
-}
-
 impl Scoped<Simple> {
 	// flatten a scoped simple into a single simple
 	pub fn flatten(&self) -> Simple {
@@ -232,8 +225,23 @@ lazy_static::lazy_static! {
 	static ref CWD_PATH: PathBuf = PathBuf::from(".");
 }
 
+lazy_static::lazy_static!{
+	static ref BUILTINS_ROOT: PathBuf = {
+		PathBuf::from(match option_env!("PREFIX") {
+			Some(prefix) => format!("{}/share/builtins", prefix),
+			None => format!("{}/../target/wasm32-unknown-unknown/debug", env!("CARGO_MANIFEST_DIR")),
+		})
+	};
+}
+
 impl CPath {
-	pub fn new(s: String) -> Self {
+	pub fn new(mut s: String) -> Self {
+		if let Some(builtin) = s.strip_prefix("builtin:") {
+			let mut owned_path = BUILTINS_ROOT.to_owned();
+			owned_path.push(format!("ambl_builtin_{}.wasm", builtin));
+			s = string_of_pathbuf(owned_path)
+		}
+
 		Self::canonicalize(PathBuf::from(s))
 	}
 
@@ -433,9 +441,40 @@ impl Unscoped {
 	}
 }
 
+impl Unscoped {
+	// merge a scope and a CPath into a single path
+	pub fn from(path: CPath, scope: &Scope) -> Unscoped {
+		Unscoped(match scope.0 {
+			None => path,
+			Some(ref scope) => scope.0.join(path.as_ref()),
+		})
+	}
+
+	pub fn from_ref(path: &CPath, scope: &Scope) -> Unscoped {
+		Unscoped(match scope.0 {
+			None => path.to_owned(),
+			Some(ref scope) => scope.0.join(path),
+		})
+	}
+
+	pub fn from_scoped<P: AsRef<CPath>>(path: &Scoped<P>) -> Unscoped {
+		Self::from_ref(&path.value.as_ref(), &path.scope)
+	}
+
+	pub fn from_string(path: String, scope: &Scope) -> Unscoped {
+		Self::from(CPath::new(path), scope)
+	}
+}
+
 impl Display for Unscoped {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		Display::fmt(&self.0, f)
+	}
+}
+
+impl AsRef<Path> for Unscoped {
+	fn as_ref(&self) -> &Path {
+		self.0.as_path()
 	}
 }
 
@@ -534,7 +573,8 @@ pub struct ResolveModule<'a> {
 impl<'a> ResolveModule<'a> {
 	pub fn resolve(self) -> Result<Unscoped> {
 		self.explicit_path
-			.map(|scoped| scoped.as_cpath())
+			.as_ref()
+			.map(Unscoped::from_scoped)
 			.or_else(|| self.source_module.map(|p| p.to_owned()))
 			.ok_or_else(||anyhow!("Received a WasmCall without a populated module"))
 	}

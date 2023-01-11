@@ -1,6 +1,5 @@
 use std::path::{PathBuf, Path};
 use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult, Mutex}, env, collections::{HashMap, hash_map::Entry}};
-use lazy_static::lazy_static;
 use log::*;
 
 use anyhow::*;
@@ -213,30 +212,15 @@ pub struct Compiled {
 	path: Unscoped,
 }
 
-lazy_static!{
-	static ref BUILTINS_ROOT: PathBuf = {
-		PathBuf::from(match option_env!("PREFIX") {
-			Some(prefix) => format!("{}/share/builtins", prefix),
-			None => format!("{}/../target/wasm32-unknown-unknown/debug", env!("CARGO_MANIFEST_DIR")),
-		})
-	};
-}
-
 impl BuildModule for WasmModule {
 	type Compiled = Compiled;
 
 	fn compile(engine: &Engine, path: &Unscoped) -> Result<Compiled> {
-		let mut raw_path: &Path = path.0.as_path();
-		let mut owned_path: PathBuf;
-		if let Some(builtin) = path.0.as_str().strip_prefix("builtin:") {
-			owned_path = BUILTINS_ROOT.to_owned();
-			owned_path.push(format!("ambl_builtin_{}.wasm", builtin));
-			raw_path = &owned_path;
-		}
-		debug!("Loading {}", raw_path.display());
+		let raw_path = &path.0;
+		debug!("Loading {}", raw_path);
 		Ok(Compiled {
 			wasm: Module::from_file(&engine, raw_path)
-				.with_context(|| format!("Loading file {}", raw_path.display()))?,
+				.with_context(|| format!("Loading file {}", raw_path))?,
 			path: path.clone(),
 		})
 	}
@@ -257,24 +241,13 @@ impl BuildModule for WasmModule {
 				debug!("Got string from wasm: {}", &s);
 				let request: TaggedInvoke = serde_json::from_str(&s)?;
 				debug!("Got dep request: {:?} from WebAssembly", &request);
-				let mut project_handle = project.handle();
+				let project_handle = project.handle();
 				let TaggedInvoke { token, request } = request;
 				let token = ActiveBuildToken::from_raw(token);
 				let scope_map = caller.data_mut();
 				let scope = scope_map.get(&token)
 					.ok_or_else(|| anyhow!("invoke called without an active scope; this should be impossible"))?;
-
-				match request {
-					Invoke::Action(action) => {
-						invoke::perform(action)
-					},
-					Invoke::Dependency(request) => {
-						let (build_request, post_build) = BuildRequest::from(request, Some(&module_arc), scope)?;
-						let project = project_handle.lock("ambl_invoke")?;
-						let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
-						persist.into_response(&project, &post_build)
-					},
-				}
+				invoke::perform2(request, token, &module_arc, scope, project_handle)
 			})();
 			debug!("ambl_invoke: returning {:?} to WASM module", response);
 			let result: Result<()> = (|| {
