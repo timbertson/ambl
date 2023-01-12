@@ -4,7 +4,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::ffi::{ResultFFI, SizedPtr};
-use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, WriteFile, FilesetDependency, CopyFile};
+use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, FilesetDependency, CopyFile, WriteDest};
 use crate::rule::EnvLookup;
 
 #[cfg(target_arch = "wasm32")]
@@ -170,8 +170,8 @@ impl TargetCtx {
 	pub fn dest(&self) -> &Path { self.dest.as_path() }
 
 	pub fn write_dest<C: Into<Vec<u8>>>(&self, contents: C) -> Result<()> {
-		ignore_result(self.invoke_action(InvokeAction::WriteFile(WriteFile {
-			path: self.dest.to_str().unwrap().to_owned(),
+		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
+			target: self.target.clone(),
 			contents: contents.into(),
 		})))
 	}

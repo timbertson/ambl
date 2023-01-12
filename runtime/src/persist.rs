@@ -8,7 +8,7 @@ use ambl_common::{build::{DependencyRequest, InvokeResponse, FileDependency, Fil
 
 use crate::build_request::{ResolvedFnSpec, ResolvedFilesetDependency, BuildRequest, PostBuild};
 use crate::project::{ProjectRef, Project, ProjectHandle};
-use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule, self};
+use crate::path_util::{Simple, Scoped, CPath, Unscoped, ResolveModule, self};
 use crate::module::BuildModule;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,7 +44,7 @@ pub struct PersistWasmCall {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistWasmDependency {
-	pub spec: ResolvedFnSpec,
+	pub spec: ResolvedFnSpec<'static>,
 	pub result: String,
 }
 
@@ -106,12 +106,6 @@ impl Cached {
 
 #[derive(Debug)]
 pub struct DepStore {
-	// TODO this assumes strings are reliable keys, but deps can be relative?
-	// Maybe all keys are normalized to project root?
-	// file_cache: HashMap<String, Cached<PersistFile>>,
-	// wasm_cache: HashMap<FunctionSpec, Cached<PersistWasmCall>>,
-	// env_cache: HashMap<String, Cached<String>>,
-	
 	cache: HashMap<BuildRequest, Cached>
 }
 
@@ -170,7 +164,7 @@ impl DepStore {
 		Ok(())
 	}
 
-	pub fn lookup(&self, key: &BuildRequest) -> Result<Option<&Cached>> {
+	pub fn lookup<'a>(&'a self, key: &'a BuildRequest) -> Result<Option<&'a Cached>> {
 		Ok(self.cache.get(key))
 	}
 }
@@ -190,8 +184,8 @@ pub struct BuildResultWithDeps {
 }
 
 impl BuildResultWithDeps {
-	pub fn simple(result: BuildResult) -> Self {
-		Self { result, deps: None }
+	pub fn simple(result: BuildResult) -> BuildResultWithDeps {
+		BuildResultWithDeps { result, deps: None }
 	}
 	
 	pub fn require_deps(&self) -> Result<&DepSet> {

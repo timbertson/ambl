@@ -4,17 +4,17 @@ use std::sync::Arc;
 
 use anyhow::*;
 use log::*;
-use ambl_common::build::{InvokeResponse, InvokeAction, Invoke};
+use ambl_common::build::{InvokeResponse, InvokeAction, Invoke, WriteDest};
 
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
 use crate::err::result_block;
 use crate::module::BuildModule;
-use crate::path_util::{lexists, Unscoped, Scope, Scoped, CPath};
+use crate::path_util::{lexists, Unscoped, CPath, Scope, Simple, Scoped};
 use crate::project::{Project, ActiveBuildToken};
 use crate::sync::MutexHandle;
 
-pub fn perform2<M: BuildModule>(
+pub fn perform2<'a, M: BuildModule>(
 	request: Invoke,
 	token: ActiveBuildToken,
 	module_arc: &Arc<Unscoped>,
@@ -23,10 +23,8 @@ pub fn perform2<M: BuildModule>(
 ) -> Result<InvokeResponse> {
 	match request {
 		Invoke::Action(action) => {
-			let expanded = action.map(|p: String| {
-				Unscoped::from_string(p, &scope)
-			});
-			crate::debug::shell_on_failure(perform(&expanded))
+			let expanded = action.map(|p: String| Unscoped::from_string(p, scope));
+			perform(&expanded, scope, project_handle)
 		},
 		Invoke::Dependency(request) => {
 			let (build_request, post_build) = BuildRequest::from(request, Some(module_arc), scope)?;
@@ -37,17 +35,24 @@ pub fn perform2<M: BuildModule>(
 	}
 }
 
-fn perform(action: &InvokeAction<Unscoped>) -> Result<InvokeResponse> {
+fn perform<M: BuildModule>(
+	action: &InvokeAction<Unscoped>,
+	scope: &Scope,
+	mut project_handle: MutexHandle<Project<M>>
+) -> Result<InvokeResponse> {
 	result_block(|| {
 		match action {
-			InvokeAction::WriteFile(f) => {
-				debug!("Writing file {}", &f.path);
-				let dest_pb = PathBuf::from(f.as_path());
+			InvokeAction::WriteDest(f) => {
+				let target = Scoped::new(scope.copy(), Simple::try_from(f.target.to_owned())?);
+				let project = project_handle.lock("ambl_invoke")?;
+				let path = Project::dest_path(&project, &target)?;
+				debug!("Writing file {}", &path);
+				let dest_pb = PathBuf::from(path.as_path());
 				if let Some(parent) = dest_pb.parent() {
 					fs::create_dir_all(parent)?;
 				}
-				fs::write(f.as_path(), &f.contents)
-					.with_context(|| format!("Writing file {}", &f.path))?;
+				fs::write(path.as_path(), &f.contents)
+					.with_context(|| format!("Writing file {}", &path))?;
 			},
 			InvokeAction::CopyFile(f) => {
 				debug!("Copying file {} -> {}", &f.src, &f.dest);

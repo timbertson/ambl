@@ -92,25 +92,41 @@ pub fn lexists<P: AsRef<Path>>(p: P) -> Result<bool> {
 	Ok(lstat_opt(p)?.is_some())
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
-#[serde(into = "Option<Simple>", from = "Option<Simple>")]
-pub struct Scope(Option<Arc<Simple>>);
+lazy_static::lazy_static! {
+	static ref ROOT_SCOPE: Scope<'static> = Scope(None);
+}
 
-impl Scope {
-	pub fn root() -> Self {
-		Scope(None)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct Scope<'a>(Option<Cow<'a, Simple>>);
+
+impl<'a> Scope<'a> {
+	pub fn root() -> Scope<'static> {
+		ROOT_SCOPE.clone()
 	}
 
-	pub fn new(n: Simple) -> Self {
-		Scope(Some(Arc::new(n)))
+	pub fn static_root() -> &'static Scope<'static> {
+		&ROOT_SCOPE
 	}
 
-	pub fn from_normalized(n: Option<Simple>) -> Self {
-		Scope(n.map(Arc::new))
+	pub fn owned(n: Simple) -> Scope<'static> {
+		Scope(Some(Cow::Owned(n)))
 	}
-	
-	// TODO rename as_simple
-	pub fn into_simple(&self) -> Option<&Simple> {
+
+	pub fn borrowed(n: &'a Simple) -> Self {
+		Scope(Some(Cow::Borrowed(n)))
+	}
+
+	// Always expensive, removes all lifetime limits
+	pub fn clone(&self) -> Scope<'static> {
+		Scope(self.0.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())))
+	}
+
+	// always cheap, but can't outlive the pointer it came from
+	pub fn copy(&'a self) -> Self {
+		Self(self.0.as_ref().map(|r| Cow::Borrowed((*r).deref())))
+	}
+
+	pub fn as_simple(&self) -> Option<&Simple> {
 		self.0.as_ref().map(|x| x.deref())
 	}
 	
@@ -129,66 +145,48 @@ impl Scope {
 	}
 }
 
-impl Clone for Scope {
-	fn clone(&self) -> Self {
-		Self(self.0.as_ref().map(Arc::clone))
-	}
-}
-
-impl Into<Option<Simple>> for Scope {
-	fn into(self) -> Option<Simple> {
-		self.0.as_deref().cloned()
-	}
-}
-
-impl From<Option<Simple>> for Scope {
-	fn from(n: Option<Simple>) -> Self {
-		Self(n.map(Arc::new))
-	}
-}
-
 #[derive(Debug)]
-pub struct Scoped<T> {
-	pub scope: Scope,
+pub struct Scoped<'a, T> {
+	pub scope: Scope<'a>,
 	pub value: T,
 }
 
-impl<T> Scoped<T> {
-	pub fn new(scope: Scope, value: T) -> Self {
-		Self { scope, value }
+impl<'a, T> Scoped<'a, T> {
+	pub fn new(scope: Scope<'a>, value: T) -> Self {
+		Self { scope: scope.clone(), value }
 	}
 
 	pub fn root(value: T) -> Self {
 		Self { scope: Scope::root(), value }
 	}
-	
-	pub fn replace_value<R>(self, value: R) -> Scoped<R> {
+
+	pub fn replace_value<R>(self, value: R) -> Scoped<'a, R> {
 		Scoped { scope: self.scope, value }
 	}
 	
-	pub fn with_value<R>(&self, value: R) -> Scoped<R> {
+	pub fn with_value<R>(&'a self, value: R) -> Scoped<'a, R> {
 		let Scoped { scope, value: _ } = self;
 		Scoped::new(scope.clone(), value)
 	}
 	
-	pub fn map<R, F: FnOnce(T) -> R>(self, f: F) -> Scoped<R> {
+	pub fn map<R, F: FnOnce(T) -> R>(self, f: F) -> Scoped<'a, R> {
 		let Scoped { scope, value } = self;
 		Scoped { scope, value: f(value) }
 	}
 
-	pub fn map_ref<R, F: FnOnce(&T) -> R>(&self, f: F) -> Scoped<R> {
+	pub fn map_ref<R, F: FnOnce(&T) -> R>(&'a self, f: F) -> Scoped<'a, R> {
 		let Scoped { scope, value } = self;
 		Scoped { scope: scope.clone(), value: f(&value) }
 	}
 
-	pub fn as_ref(&self) -> Scoped<&T> {
+	pub fn as_ref(&'a self) -> Scoped<'a, &T> {
 		Scoped { scope: self.scope.clone(), value: &self.value }
 	}
 }
 
-impl<T: Display> Display for Scoped<T> {
+impl<'a, T: Display> Display for Scoped<'a, T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		if let Some(scope) = self.scope.into_simple() {
+		if let Some(scope) = self.scope.as_simple() {
 			Display::fmt(&scope, f)?;
 			write!(f, "/")?;
 		}
@@ -196,7 +194,7 @@ impl<T: Display> Display for Scoped<T> {
 	}
 }
 
-impl Scoped<Simple> {
+impl<'a> Scoped<'a, Simple> {
 	// flatten a scoped simple into a single simple
 	pub fn flatten(&self) -> Simple {
 		match self.scope.0 {
@@ -206,7 +204,7 @@ impl Scoped<Simple> {
 	}
 }
 
-impl <C: Clone> Clone for Scoped<C> {
+impl <'a, C: Clone> Clone for Scoped<'a, C> {
 	fn clone(&self) -> Self {
 		Self { scope: self.scope.clone(), value: self.value.clone() }
 	}
@@ -446,24 +444,25 @@ impl Unscoped {
 	pub fn from(path: CPath, scope: &Scope) -> Unscoped {
 		Unscoped(match scope.0 {
 			None => path,
-			Some(ref scope) => scope.0.join(path.as_ref()),
+			Some(ref scope) => scope.join(path.as_ref()),
 		})
 	}
 
 	pub fn from_ref(path: &CPath, scope: &Scope) -> Unscoped {
 		Unscoped(match scope.0 {
 			None => path.to_owned(),
-			Some(ref scope) => scope.0.join(path),
+			Some(ref scope) => scope.join(path),
 		})
+	}
+
+	pub fn from_string(path: String, scope: &Scope) -> Unscoped {
+		Self::from(CPath::new(path), scope)
 	}
 
 	pub fn from_scoped<P: AsRef<CPath>>(path: &Scoped<P>) -> Unscoped {
 		Self::from_ref(&path.value.as_ref(), &path.scope)
 	}
 
-	pub fn from_string(path: String, scope: &Scope) -> Unscoped {
-		Self::from(CPath::new(path), scope)
-	}
 }
 
 impl Display for Unscoped {
@@ -568,7 +567,7 @@ pub enum Kind {
 
 pub struct ResolveModule<'a> {
 	pub source_module: Option<&'a Unscoped>,
-	pub explicit_path: Option<Scoped<&'a CPath>>,
+	pub explicit_path: Option<Scoped<'a, &'a CPath>>,
 }
 impl<'a> ResolveModule<'a> {
 	pub fn resolve(self) -> Result<Unscoped> {

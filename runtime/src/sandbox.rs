@@ -12,7 +12,7 @@ use crate::build_request::BuildRequest;
 use crate::persist::{DepSet, BuildResult};
 use crate::project::{Project, ProjectMutexPair};
 use crate::sync::{Mutexed, MutexHandle};
-use crate::path_util::{External, Absolute, Scope, Scoped, CPath, Simple, Unscoped, lexists};
+use crate::path_util::{External, Absolute, Scoped, CPath, Simple, Unscoped, lexists};
 use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::DependencyRequest;

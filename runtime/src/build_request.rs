@@ -16,7 +16,7 @@ use crate::module::BuildModule;
 // (i.e. relative to project root, not to whatever scope the request came from)
 pub enum BuildRequest {
 	FileDependency(Unscoped),
-	WasmCall(ResolvedFnSpec),
+	WasmCall(ResolvedFnSpec<'static>),
 	EnvVar(String),
 	EnvLookup(EnvLookup),
 	Fileset(ResolvedFilesetDependency),
@@ -25,7 +25,7 @@ pub enum BuildRequest {
 }
 
 impl BuildRequest {
-	pub fn from(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &Scope) -> Result<(Self, PostBuild)> {
+	pub fn from<'a>(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &'a Scope<'a>) -> Result<(Self, PostBuild)> {
 		Ok(match req {
 			DependencyRequest::FileDependency(v) => {
 				let FileDependency { path, ret } = v;
@@ -34,7 +34,7 @@ impl BuildRequest {
 				(Self::FileDependency(path), PostBuild::FileDependency(ret))
 			},
 			DependencyRequest::WasmCall(v) => (
-				Self::WasmCall(ResolvedFnSpec::from_explicit_fn_name(v, source_module, scope.to_owned())?),
+				Self::WasmCall(ResolvedFnSpec::from_explicit_fn_name(v, source_module, scope.clone())?),
 				PostBuild::Unit
 			),
 			DependencyRequest::EnvVar(v) => (Self::EnvVar(v), PostBuild::Unit),
@@ -50,7 +50,7 @@ impl BuildRequest {
 					Unscoped::from_string(s, scope)
 				});
 				// If there is a scope, make sure it's used for the default CWD
-				let override_cwd = match (scope.into_simple(), &gen.cwd) {
+				let override_cwd = match (scope.as_simple(), &gen.cwd) {
 					(Some(scope), None) => {
 						gen.cwd = Some(scope.clone().into());
 					},
@@ -76,25 +76,24 @@ pub struct PostBuildFile {
 
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-// TODO: rename ResolvedFunctionSpec?
-pub struct ResolvedFnSpec {
+pub struct ResolvedFnSpec<'a> {
 	pub fn_name: String,
 	// we track the full path from the project, since that's how modules are keyed
 	pub full_module: Unscoped,
 	// but we also track the scope of this call, since that affects
 	// the results
-	pub scope: Scope,
+	pub scope: Scope<'a>,
 	pub config: Config,
 }
 
-impl ResolvedFnSpec {
-	pub fn from_explicit_fn_name(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope) -> Result<Self> {
+impl<'a> ResolvedFnSpec<'a> {
+	pub fn from_explicit_fn_name(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope<'a>) -> Result<Self> {
 		let FunctionSpec { fn_name, module, config } = f;
 		let fn_name = fn_name.ok_or_else(|| anyhow!("Function spec is missing a function name"))?;
 		let explicit_cpath = module.map(CPath::new);
 		let full_module = ResolveModule {
 			source_module,
-			explicit_path: explicit_cpath.as_ref().map(|p| Scoped::new(scope.clone(), p)),
+			explicit_path: explicit_cpath.as_ref().map(|p| Scoped::new(scope.copy(), p)),
 		}.resolve()?;
 		Ok(Self {
 			scope,

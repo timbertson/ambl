@@ -13,7 +13,8 @@ use wasmtime::*;
 
 use crate::build::BuildReason;
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, ProjectHandle, ActiveBuildToken}, persist::{PersistFile}, module::{BuildModule}, path_util::{Scoped, CPath, Scope, Unscoped}, err::result_block, invoke};
+use crate::path_util::Scope;
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, ProjectHandle, ActiveBuildToken}, persist::{PersistFile}, module::{BuildModule}, path_util::{Scoped, CPath, Unscoped}, err::result_block, invoke};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
 
@@ -179,7 +180,7 @@ impl StateRef {
 		let inserted = match scope_map.entry(token) {
 			Entry::Occupied(_) => false,
 			Entry::Vacant(entry) => {
-				entry.insert(f.scope.to_owned());
+				entry.insert(f.scope.clone());
 				true
 			}
 		};
@@ -199,7 +200,7 @@ impl StateRef {
 	}
 }
 
-type StoreInner = HashMap<ActiveBuildToken, Scope>;
+type StoreInner = HashMap<ActiveBuildToken, Scope<'static>>;
 
 pub struct WasmModule {
 	state: StateRef,

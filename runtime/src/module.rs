@@ -6,7 +6,7 @@ use ambl_common::{rule::{Target, Rule, FunctionSpec, Config}, ctx::BaseCtx};
 use wasmtime::Engine;
 
 use crate::build_request::ResolvedFnSpec;
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef}, persist::{PersistFile}, path_util::{CPath, Scope, Unscoped}};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef}, persist::{PersistFile}, path_util::{CPath, Unscoped}};
 
 pub trait BuildModule : Sized {
 	type Compiled: ToOwned;

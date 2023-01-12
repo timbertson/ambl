@@ -59,7 +59,7 @@ impl ActiveBuildToken {
 pub struct Nested {
 	rules: Vec<ProjectRule>,
 	relative_scope: Option<Simple>,
-	absolute_scope: Scope,
+	absolute_scope: Scope<'static>,
 	module_path: Option<Unscoped>,
 }
 impl Nested {
@@ -67,15 +67,28 @@ impl Nested {
 		match self.relative_scope.as_ref() {
 			Some(sub) => {
 				sub.project(name).map(|new_name| {
-					Scoped::new(self.absolute_scope.clone(), new_name)
+					Scoped::new(self.absolute_scope.copy(), new_name)
 				})
 			},
 			
 			// If there's no scope, any name could be found within
 			None => Some(Scoped {
-				scope: self.absolute_scope.clone(),
+				scope: self.absolute_scope.copy(),
 				value: name
 			}),
+		}
+	}
+
+	fn projection2<'a>(&'a self, name: &'a str) -> Option<(&'a Scope<'static>, &'a str)> {
+		match self.relative_scope.as_ref() {
+			Some(sub) => {
+				sub.project(name).map(|new_name| {
+					(&self.absolute_scope, new_name)
+				})
+			},
+			
+			// If there's no scope, any name could be found within
+			None => Some((&self.absolute_scope, name)),
 		}
 	}
 }
@@ -124,7 +137,7 @@ impl ProjectRule {
 			Rule::Include(spec) => {
 				let relative_scope = match spec.get_scope() {
 					None => None,
-					Some(scope) => Some(Simple::try_from(scope.to_owned())?),
+					Some(rel) => Some(Simple::try_from(rel.to_owned())?),
 				};
 				let include = ScopedInclude {
 					module: spec.get_module().to_owned().map(CPath::new),
@@ -167,14 +180,13 @@ pub type ProjectMutexPair<'a, M, T> = (Mutexed<'a, Project<M>>, T);
 
 impl<M: BuildModule> Project<M> {
 	pub fn new(root: Absolute) -> Result<ProjectRef<M>> {
-		let root_scope = Scope::root();
 		let project = MutexRef::new(Project {
 			root,
 			build_cache: DepStore::load(),
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
 			self_ref: None,
-			root_rule: Arc::new(ProjectRule::from_rule(dsl::include(dsl::yaml("ambl.yaml")), &root_scope)?),
+			root_rule: Arc::new(ProjectRule::from_rule(dsl::include(dsl::yaml("ambl.yaml")), Scope::static_root())?),
 		});
 
 		// lock the project to populate self_ref
@@ -256,29 +268,29 @@ impl<M: BuildModule> Project<M> {
 
 	Note: name is guaranteed to be a valid Simple, but we use a str for efficient slicing
 	*/
-	fn expand_and_filter_rule<'a, 'b, 'c>(
+	fn expand_and_filter_rule<'a, 'b>(
 		project: ProjectMutex<'a, M>,
 		rule: &'b ProjectRule,
-		name: &Scoped<&'c str>,
+		scope: &'b Scope<'b>,
+		name: &'b str,
 		source_module: Option<&Unscoped>,
-	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
+	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget<'b>>>> {
 		match rule {
 			ProjectRule::Target(t) => {
-				if t.names.iter().any(|n| n == name.value) {
+				if t.names.iter().any(|n| n == name) {
 					result_block(|| {
-						let scope = name.scope.clone();
-						let rel_name = CPath::new(name.value.to_owned()).into_simple()?;
+						let rel_name = CPath::new(name.to_owned()).into_simple()?;
 						let module_cpath = t.build.module.as_ref().map(|m| {
 							CPath::new(m.to_owned())
 						});
 						let full_module = ResolveModule {
 							source_module,
-							explicit_path: module_cpath.as_ref().map(|p| name.with_value(p)),
+							explicit_path: module_cpath.as_ref().map(|p| Scoped::new(scope.copy(), p)),
 						}.resolve()?;
 						Ok((project, Some(FoundTarget {
 							rel_name,
 							build: ResolvedFnSpec {
-								scope,
+								scope: scope.copy(),
 								fn_name: t.build.fn_name.to_owned().unwrap_or_else(|| "build".to_owned()),
 								full_module,
 								config: t.build.config.clone(),
@@ -290,17 +302,18 @@ impl<M: BuildModule> Project<M> {
 				}
 			},
 			ProjectRule::Mutable(rule_ref) => {
-				return Self::handle_importable_rule(project, rule_ref, name, source_module);
+				return Self::handle_importable_rule(project, rule_ref, scope, name, source_module);
 			},
 		}
 	}
 
 	fn handle_importable_rule<'a, 'b>(
 		mut project: ProjectMutex<'a, M>,
-		rule_ref: &RwRef< MutableRule>,
-		name: &Scoped<&'b str>,
+		rule_ref: &'b RwRef< MutableRule>,
+		scope: &'b Scope<'b>,
+		name: &'b str,
 		source_module: Option<&Unscoped>,
-	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
+	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget<'b>>>> {
 		let mut handle = rule_ref.handle();
 		let readable = handle.read()?;
 		match readable.deref() {
@@ -311,9 +324,13 @@ impl<M: BuildModule> Project<M> {
 			},
 
 			MutableRule::Nested(ref nested) => {
-				if let Some(name) = nested.projection(name.value) {
+				// NOTE: Nested is effectively immutable, it will never change from this state despite being behind a RwRef.
+				// So we can unsafely cast it to a plain reference with the same lifetime as rule_ref
+				let nested = unsafe { std::mem::transmute::<&'_ Nested, &'b Nested>(nested) };
+
+				if let Some((scope, name)) = nested.projection2(name) {
 					for rule in nested.rules.iter() {
-						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, &name, nested.module_path.as_ref())?;
+						let (project_ret, target) = Self::expand_and_filter_rule(project, rule, scope, name, nested.module_path.as_ref())?;
 						project = project_ret;
 						if target.is_some() {
 							return Ok((project, target));
@@ -324,9 +341,10 @@ impl<M: BuildModule> Project<M> {
 			},
 
 			MutableRule::Include(include) => {
-				if include.contains_path(name.value) {
+				if include.contains_path(name) {
 					// release borrow of rule
 					let include = include.to_owned();
+					// let name = Scoped::new(scope.copy(), name);
 					debug!("Loading include {:?}", &include);
 					let mut handle = readable.unlock();
 
@@ -337,12 +355,12 @@ impl<M: BuildModule> Project<M> {
 						})?;
 
 						// Compute the the full scope which will be used inside the loaded module.
-						let absolute_scope = include.relative_scope.as_ref()
-							.map(|rel| Scope::new(name.scope.join_simple(rel.to_owned())))
-							.unwrap_or_else(|| name.scope.to_owned());
+						let absolute_scope: Scope<'static> = include.relative_scope.as_ref()
+							.map(|rel| Scope::owned(scope.join_simple(rel.to_owned())))
+							.unwrap_or_else(|| scope.clone());
 						
 						let explicit_path = include.module.as_ref()
-							.map(|cpath| Scoped::new(name.scope.clone(), cpath));
+							.map(|cpath| Scoped::new(scope.copy(), cpath));
 						let module_path = ResolveModule {
 							explicit_path,
 							source_module,
@@ -389,7 +407,7 @@ impl<M: BuildModule> Project<M> {
 							let nested = MutableRule::Nested(Nested {
 								module_path: wasm_module_path,
 								rules: rules.into_iter()
-									.map(|rule| ProjectRule::from_rule(rule, &name.scope))
+									.map(|rule| ProjectRule::from_rule(rule, scope))
 									.collect::<Result<Vec<ProjectRule>>>()?,
 								relative_scope: include.relative_scope.clone(),
 								absolute_scope,
@@ -400,7 +418,7 @@ impl<M: BuildModule> Project<M> {
 						})?;
 
 						// reevaluate after replacing, this will drop into the Rule::Nested branch
-						Self::handle_importable_rule(project, rule_ref, name, source_module)
+						Self::handle_importable_rule(project, rule_ref, scope, name, source_module)
 					}).with_context(|| format!("loading include {:?}", &include))
 				} else {
 					debug!("Skipping irrelevant include: {:?}", &include);
@@ -410,15 +428,16 @@ impl<M: BuildModule> Project<M> {
 		}
 	}
 
-	pub fn target<'a>(
+	pub fn target<'a, 'b>(
 		project: ProjectMutex<'a, M>,
-		name: &Simple,
-	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget>>> {
-		let root_rule = Arc::clone(&project.root_rule);
+		root_rule: &'b ProjectRule,
+		name: &'b Simple,
+	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget<'b>>>> {
 		let (project, target) = Self::expand_and_filter_rule(
 			project,
-			&root_rule,
-			&Scoped::root(name.as_str()),
+			root_rule,
+			Scope::static_root(),
+			name.as_str(),
 			None)?;
 		debug!("target for {}: {:?}", &name, target);
 		Ok((project, target))
@@ -461,9 +480,10 @@ impl<M: BuildModule> Project<M> {
 		
 		let (mut project, response) = match request {
 			BuildRequest::FileDependency(path) => {
+				let root_rule = Arc::clone(&project.root_rule);
 				let file_simple = path.0.clone().into_simple_or_self();
 				let get_target = |project| match file_simple {
-					Result::Ok(ref simple) => Project::target(project, simple),
+					Result::Ok(ref simple) => Project::target(project, &root_rule, simple),
 					Result::Err(_) => Ok((project, None)),
 				};
 				let cpath_ref = match file_simple {
@@ -476,7 +496,7 @@ impl<M: BuildModule> Project<M> {
 					// I need a type annotation, but I don't want to specify the lifetimes x_x
 						let mut project: Mutexed<Project<M>> = project;
 						let persist = if let Some(found_target) = &found_target {
-							let name_scoped = Scoped::new(found_target.build.scope.clone(), found_target.rel_name.to_owned());
+							let name_scoped = Scoped::new(found_target.build.scope.copy(), found_target.rel_name.to_owned());
 							println!("# {}", &name_scoped);
 							let child_reason = BuildReason::Dependency(build_token);
 
@@ -686,7 +706,7 @@ impl<M: BuildModule> Project<M> {
 		Ok(())
 	}
 	
-	pub fn lookup(&self, key: &BuildRequest) -> Result<Option<&Cached>> {
+	pub fn lookup<'a>(&'a self, key: &'a BuildRequest) -> Result<Option<&'a Cached>> {
 		self.build_cache.lookup(key)
 	}
 
@@ -748,9 +768,8 @@ impl<M: BuildModule> Project<M> {
 	}
 }
 
-// TODO more references instead of owned?
 #[derive(Debug)]
-pub struct FoundTarget {
+pub struct FoundTarget<'a> {
 	rel_name: Simple, // the name relative to the build's scope
-	build: ResolvedFnSpec,
+	build: ResolvedFnSpec<'a>,
 }

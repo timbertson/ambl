@@ -329,7 +329,7 @@ impl Default for Stdin {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum InvokeAction<P> {
-	WriteFile(WriteFile<P>),
+	WriteDest(WriteDest),
 	CopyFile(CopyFile<P>),
 }
 
@@ -337,32 +337,16 @@ impl<P> InvokeAction<P> {
 	pub fn map<P2, F: Fn(P) -> P2>(self, f: F) -> InvokeAction<P2> {
 		use InvokeAction::*;
 		match self {
-			WriteFile(x) => WriteFile(x.map(f)),
+			WriteDest(x) => WriteDest(x),
 			CopyFile(x) => CopyFile(x.map(f)),
 		}
 	}
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WriteFile<P> {
-	pub path: P,
+pub struct WriteDest {
+	pub target: String,
 	pub contents: Vec<u8>,
-}
-
-impl<P> WriteFile<P> {
-	pub fn map<P2, F: Fn(P) -> P2>(self, f: F) -> WriteFile<P2> {
-		let Self { path, contents } = self;
-		WriteFile {
-			path: f(path),
-			contents
-		}
-	}
-}
-
-impl<P: AsRef<Path>> WriteFile<P> {
-	pub fn as_path(&self) -> &Path {
-		self.path.as_ref()
-	}
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

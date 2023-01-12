@@ -21,7 +21,7 @@ use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{A
 use log::*;
 
 use anyhow::*;
-use path_util::{Scope, Scoped, CPath, Unscoped};
+use path_util::{CPath, Unscoped};
 use build_request::BuildRequest;
 use project::{Project, ModuleCache};
 use build::BuildReason;
