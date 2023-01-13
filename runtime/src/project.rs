@@ -18,7 +18,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
 use ambl_common::build::{DependencyRequest, InvokeResponse, self, FileDependency, FileDependencyType, GenCommand, FilesetDependency};
-use ambl_common::ctx::{BaseCtx, TargetCtx};
+use ambl_common::ctx::{BaseCtx, TargetCtx, Tempdir};
 use ambl_common::ffi::ResultFFI;
 use ambl_common::rule::*;
 use wasmtime::*;
@@ -535,8 +535,9 @@ impl<M: BuildModule> Project<M> {
 									fs::rename(&tmp_path, &dest_path)?;
 								},
 								None => {
-									info!("Builder for {:?} didn't produce an output file; writing an empty one", &name_scoped);
-									fs::write(&dest_path, "")?;
+									return Err(anyhow!("Builder for {:?} didn't produce an output file. Use `` if this is intentional", &name_scoped))?;
+									// info!("Builder for {:?} didn't produce an output file; writing an empty one", &name_scoped);
+									// fs::write(&dest_path, "")?;
 								},
 							}
 							let stat = fs::symlink_metadata(&dest_path)?;
@@ -616,10 +617,10 @@ impl<M: BuildModule> Project<M> {
 				
 				let response = match response {
 					InvokeResponse::Unit => {
-						// if there's no explicit response, keep the tempdir around and return its path
+						// if there's no explicit response, keep the tempdir around and return its index
 						let path = path_util::str_of_path(tempdir.path()).to_owned();
-						project.keep_tempdir(reason.parent(), tempdir)?;
-						InvokeResponse::Str(path)
+						let res = project.keep_tempdir(reason.parent(), tempdir)?;
+						InvokeResponse::Resource(res.0)
 					},
 					other => {
 						tempdir.close()?;
@@ -681,6 +682,12 @@ impl<M: BuildModule> Project<M> {
 		self.active_tasks.get(&token).map(|x| x.deps())
 	}
 
+	pub fn get_tempdir(&self, token: ActiveBuildToken, tempdir: Tempdir) -> Result<&Path> {
+		self.active_tasks.get(&token)
+			.ok_or_else(||anyhow!("No such build token"))
+			.and_then(|x| x.get_tempdir(tempdir))
+	}
+
 	// we just built something as requested, register it as a dependency on the parent target
 	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: BuildResult) -> Result<()> {
 		match key {
@@ -699,11 +706,10 @@ impl<M: BuildModule> Project<M> {
 		Ok(())
 	}
 	
-	fn keep_tempdir(&mut self, parent: Option<ActiveBuildToken>, tmp: tempdir::TempDir) -> Result<()> {
+	fn keep_tempdir(&mut self, parent: Option<ActiveBuildToken>, tmp: tempdir::TempDir) -> Result<Tempdir> {
 		let parent = parent.ok_or_else(|| anyhow!("Can't collect tempdir; no parent token"))?;
 		let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(Default::default);
-		parent_dep_set.keep_tempdir(tmp);
-		Ok(())
+		Ok(parent_dep_set.keep_tempdir(tmp))
 	}
 	
 	pub fn lookup<'a>(&'a self, key: &'a BuildRequest) -> Result<Option<&'a Cached>> {
@@ -725,7 +731,7 @@ impl<M: BuildModule> Project<M> {
 		CPath::try_from(ret)?.into_simple()
 	}
 
-	fn tmp_path(&self, name: &Scoped<Simple>) -> Result<Simple> {
+	pub fn tmp_path(&self, name: &Scoped<Simple>) -> Result<Simple> {
 		self._path("tmp", name)
 	}
 

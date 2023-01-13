@@ -1,70 +1,79 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::Arc;
 
 use anyhow::*;
 use log::*;
-use ambl_common::build::{InvokeResponse, InvokeAction, Invoke, WriteDest};
+use ambl_common::build::{InvokeResponse, InvokeAction, Invoke, WriteDest, FileSource};
 
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
 use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::path_util::{lexists, Unscoped, CPath, Scope, Simple, Scoped};
-use crate::project::{Project, ActiveBuildToken};
+use crate::project::{Project, ActiveBuildToken, ProjectMutex};
 use crate::sync::MutexHandle;
 
-pub fn perform2<'a, M: BuildModule>(
+pub fn perform<'a, M: BuildModule>(
 	request: Invoke,
 	token: ActiveBuildToken,
-	module_arc: &Arc<Unscoped>,
+	module_path: &Unscoped,
 	scope: &Scope,
-	mut project_handle: MutexHandle<Project<M>>
+	project: ProjectMutex<'a, M>
 ) -> Result<InvokeResponse> {
 	match request {
-		Invoke::Action(action) => {
-			let expanded = action.map(|p: String| Unscoped::from_string(p, scope));
-			perform(&expanded, scope, project_handle)
+		Invoke::Action(ref action) => {
+			crate::debug::shell_on_failure(perform_invoke(action, token, scope, project))
 		},
 		Invoke::Dependency(request) => {
-			let (build_request, post_build) = BuildRequest::from(request, Some(module_arc), scope)?;
-			let project = project_handle.lock("ambl_invoke")?;
+			let (build_request, post_build) = BuildRequest::from(request, Some(module_path), scope)?;
 			let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
 			persist.into_response(&project, &post_build)
 		},
 	}
 }
 
-fn perform<M: BuildModule>(
-	action: &InvokeAction<Unscoped>,
+fn perform_invoke<M: BuildModule>(
+	action: &InvokeAction,
+	token: ActiveBuildToken,
 	scope: &Scope,
-	mut project_handle: MutexHandle<Project<M>>
+	project: ProjectMutex<M>
 ) -> Result<InvokeResponse> {
 	result_block(|| {
+		let dest_tmp = |project: &Project<M>, target: &String| {
+			let target = Scoped::new(scope.copy(), Simple::try_from(target.to_owned())?);
+			Project::tmp_path(project, &target)
+		};
 		match action {
 			InvokeAction::WriteDest(f) => {
-				let target = Scoped::new(scope.copy(), Simple::try_from(f.target.to_owned())?);
-				let project = project_handle.lock("ambl_invoke")?;
-				let path = Project::dest_path(&project, &target)?;
-				debug!("Writing file {}", &path);
+				let path = dest_tmp(&project, &f.target)?;
+				debug!("Writing output file {} for target {}", &path, &f.target);
 				let dest_pb = PathBuf::from(path.as_path());
 				if let Some(parent) = dest_pb.parent() {
 					fs::create_dir_all(parent)?;
+				}
+				if !f.replace && lexists(path.as_path())? {
+					return Err(anyhow!("Attempted to replace existing file {}", &path))
 				}
 				fs::write(path.as_path(), &f.contents)
 					.with_context(|| format!("Writing file {}", &path))?;
 			},
 			InvokeAction::CopyFile(f) => {
-				debug!("Copying file {} -> {}", &f.src, &f.dest);
-				let dest_pb = PathBuf::from(f.dest_path());
-				if let Some(parent) = dest_pb.parent() {
-					fs::create_dir_all(parent)?;
+				match &f.source_root {
+					FileSource::Target(t) => todo!("Copy file from target"),
+					FileSource::Tempdir(tempdir) => {
+						let temp_root: &Path = project.get_tempdir(token, *tempdir)?;
+						let mut src = PathBuf::from(temp_root);
+						src.push(Unscoped::from_string(f.source_suffix.clone(), scope).0);
+						let dest = dest_tmp(&project, &f.dest_target)?;
+						debug!("Copying file {} -> {}", src.display(), &dest);
+						if !lexists(&src)? {
+							return Err(anyhow!("Copy source doesn't exist: {}", src.display()));
+						};
+						fs::copy(&src, dest.as_path())
+							.with_context(|| format!("Copying file {} -> {}", src.display(), &dest))?;
+					},
 				}
-				if !lexists(&f.src)? {
-					return Err(anyhow!("Copy source doesn't exist: {}", &f.src));
-				};
-				fs::copy(&f.src, &f.dest)
-					.with_context(|| format!("Copying file {} -> {}", &f.src, &f.dest))?;
 			},
 		}
 		Ok(InvokeResponse::Unit)

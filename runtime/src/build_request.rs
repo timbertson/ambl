@@ -50,6 +50,7 @@ impl BuildRequest {
 					Unscoped::from_string(s, scope)
 				});
 				// If there is a scope, make sure it's used for the default CWD
+				// TODO should an explicit relative CWD be joined onto the scope?
 				let override_cwd = match (scope.as_simple(), &gen.cwd) {
 					(Some(scope), None) => {
 						gen.cwd = Some(scope.clone().into());

@@ -231,7 +231,7 @@ impl BuildModule for WasmModule {
 
 		let mut state = StateRef::empty();
 		
-		let module_arc = Arc::new(module.path.clone());
+		let module_path = module.path.clone();
 		let state_invoke = state.clone(); // to move into closure
 		linker.func_wrap("env", "ambl_invoke", move |mut caller: Caller<'_, StoreInner>, data: u32, data_len: u32, out_offset: u32, out_len_offset: u32| {
 			debug!("ambl_invoke");
@@ -242,13 +242,14 @@ impl BuildModule for WasmModule {
 				debug!("Got string from wasm: {}", &s);
 				let request: TaggedInvoke = serde_json::from_str(&s)?;
 				debug!("Got dep request: {:?} from WebAssembly", &request);
-				let project_handle = project.handle();
+				let mut project_handle = project.handle();
 				let TaggedInvoke { token, request } = request;
 				let token = ActiveBuildToken::from_raw(token);
 				let scope_map = caller.data_mut();
 				let scope = scope_map.get(&token)
 					.ok_or_else(|| anyhow!("invoke called without an active scope; this should be impossible"))?;
-				invoke::perform2(request, token, &module_arc, scope, project_handle)
+				let project = project_handle.lock("ambl_invoke")?;
+				invoke::perform(request, token, &module_path, scope, project)
 			})();
 			debug!("ambl_invoke: returning {:?} to WASM module", response);
 			let result: Result<()> = (|| {

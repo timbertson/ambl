@@ -25,7 +25,7 @@ fn run_can_only_see_dependencies() -> Result<()> {
 			for line in lines {
 				p.record(line);
 			}
-			Ok(())
+			c.no_output()
 		}).build_file("a")?;
 
 		eq!(p.log(), vec!("dep_1", "dep_2"));

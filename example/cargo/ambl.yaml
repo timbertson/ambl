@@ -1,6 +1,6 @@
 - target:
     names: [default]
-    module: ambl-builder/build
+    module: ambl-builder/module/ambl-example-cargo-builder
  
 - include:
     mode: WASM # TODO

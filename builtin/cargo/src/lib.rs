@@ -123,6 +123,7 @@ fn build_workspace_meta(c: TargetCtx) -> Result<()> {
 	let meta = c.run(cargo(&c)?.args(vec!(
 		"metadata", "--no-deps", "--format-version", "1"
 	)).stdout(Stdout::String))?.into_string()?;
+	debug(&format!("META: {}", &meta));
 	c.write_dest(meta)?;
 	Ok(())
 }
@@ -188,12 +189,12 @@ pub fn module_rules(c: BaseCtx) -> Result<Vec<Rule>> {
 }
 
 ffi!(build_all);
-pub fn build_all(c: BaseCtx) -> Result<()> {
+pub fn build_all(c: TargetCtx) -> Result<()> {
 	let meta = workspace_meta(&c)?;
 	for pkg in meta.packages {
 		c.build(format!("module/{}", pkg.name))?;
 	}
-	Ok(())
+	c.no_output()
 }
 
 ffi!(module_build);
@@ -209,20 +210,19 @@ pub fn module_build(c: TargetCtx) -> Result<()> {
 		.args(vec!("build", "--target", "wasm32-unknown-unknown", "--package"))
 		.arg(&conf.name)
 		.impure_share_dir("target")
-	)?.into_string()?;
+	)?.into_tempdir()?;
 
 	// TODO full cargo substitution logic
-	c.copy_to_dest(format!("{}/target/wasm32-unknown-unknown/debug/{}.wasm", tmp, conf.name.replace("-", "_")))?;
+	tmp.copy_to_dest(&c, format!("target/wasm32-unknown-unknown/debug/{}.wasm", conf.name.replace("-", "_")))?;
 	Ok(())
 }
 
 ffi!(module_sources);
-pub fn module_sources(c: BaseCtx) -> Result<()> {
+pub fn module_sources(c: TargetCtx) -> Result<()> {
 	// TODO: depend on non-rs files?
 	// TODO "." for scan includes the prefix, but then depending on the returned files includes it again!?
 	for source_file in c.list_fileset(fileset("src").include_files("*.rs"))? {
-		debug(&format!("BUILDY: {}", source_file));
 		c.build(format!("../{}", source_file))?;
 	}
-	Ok(())
+	c.no_output()
 }

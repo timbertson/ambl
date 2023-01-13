@@ -1,3 +1,4 @@
+use ambl_common::ctx::Tempdir;
 use log::*;
 use ambl_common::build::FileSelection;
 use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
@@ -310,13 +311,21 @@ impl ActiveBuildState {
 	pub fn deps(&self) -> &DepSet {
 		&self.deps
 	}
+
+	pub fn get_tempdir(&self, tempdir: Tempdir) -> Result<&Path> {
+		self.tempdirs.get(tempdir.0 as usize)
+			.ok_or_else(|| anyhow!("No such tempdir in active task"))
+			.map(|t| t.path())
+	}
 	
 	pub fn add(&mut self, request: BuildRequest, result: BuildResult) {
 		self.deps.add(request, result)
 	}
 
-	pub fn keep_tempdir(&mut self, tmp: tempdir::TempDir) {
-		self.tempdirs.push(tmp)
+	pub fn keep_tempdir(&mut self, tmp: tempdir::TempDir) -> Tempdir {
+		let next_idx = self.tempdirs.len();
+		self.tempdirs.push(tmp);
+		Tempdir(next_idx as u32)
 	}
 }
 

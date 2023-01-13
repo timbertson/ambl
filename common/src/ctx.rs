@@ -4,7 +4,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::ffi::{ResultFFI, SizedPtr};
-use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, FilesetDependency, CopyFile, WriteDest};
+use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, FilesetDependency, WriteDest, CopyFile};
 use crate::rule::EnvLookup;
 
 #[cfg(target_arch = "wasm32")]
@@ -58,7 +58,7 @@ impl BaseCtx {
 		ResultFFI::deserialize(response_slice)
 	}
 
-	fn invoke(&self, request: Invoke) -> Result<InvokeResponse> {
+	pub fn invoke(&self, request: Invoke) -> Result<InvokeResponse> {
 		match &self.invoker {
 			None => self.invoke_ffi(request),
 			Some(invoker) => invoker.invoke(request),
@@ -69,7 +69,7 @@ impl BaseCtx {
 		self.invoke(Invoke::Dependency(dep))
 	}
 
-	fn invoke_action(&self, act: InvokeAction<String>) -> Result<InvokeResponse> {
+	fn invoke_action(&self, act: InvokeAction) -> Result<InvokeResponse> {
 		self.invoke(Invoke::Action(act))
 	}
 	
@@ -171,20 +171,18 @@ impl TargetCtx {
 
 	pub fn write_dest<C: Into<Vec<u8>>>(&self, contents: C) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
-			target: self.target.clone(),
+			target: self.target.to_owned(),
 			contents: contents.into(),
+			replace: true,
 		})))
 	}
 
-	pub fn copy_file<S: Into<String>, S2: Into<String>>(&self, src: S, dest: S2) -> Result<()> {
-		ignore_result(self.invoke_action(InvokeAction::CopyFile(CopyFile {
-			src: src.into(),
-			dest: dest.into(),
+	pub fn no_output(&self) -> Result<()> {
+		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
+			target: self.target.to_owned(),
+			contents: vec!(),
+			replace: false,
 		})))
-	}
-
-	pub fn copy_to_dest<S: Into<String>>(&self, path: S) -> Result<()> {
-		self.copy_file(path, self.dest.to_str().unwrap().to_owned())
 	}
 }
 
@@ -207,3 +205,17 @@ impl AsMut<BaseCtx> for TargetCtx {
 		&mut self.base
 	}
 }
+
+// Newtype wrapper for tempdir resource (a possible return value of a `run` dependency)
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct Tempdir(pub u32);
+impl Tempdir {
+	pub fn copy_to_dest<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<()> {
+		ignore_result(ctx.invoke(Invoke::Action(InvokeAction::CopyFile(CopyFile {
+			source_root: crate::build::FileSource::Tempdir(*self),
+			source_suffix: path.into(),
+			dest_target: ctx.target().to_owned(),
+		}))))
+	}
+}
+

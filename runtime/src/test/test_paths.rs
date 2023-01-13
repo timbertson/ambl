@@ -12,7 +12,7 @@ use super::test_module::DEFAULT_BUILD_FN;
 #[serial]
 fn test_paths_of_nested_module() -> Result<()> {
 	TestProject::in_tempdir(|p| {
-		// Nested buil is a module at the root, but which will be invoked from `subdir/` scope.
+		// Nested build is a module at the root, but which will be invoked from `subdir/` scope.
 		let nested_build_m = p.new_module().set_name("nested-build").builder(|p, ctx| {
 			ctx.build("../root")?;
 			p.record(format!(
@@ -31,7 +31,7 @@ fn test_paths_of_nested_module() -> Result<()> {
 				ctx.target(),
 				ctx.dest().display()
 			));
-			Ok(())
+			ctx.no_output()
 		});
 
 		// define a target (which we'll scope under `subdir/`) which is built by nested-build
@@ -53,6 +53,34 @@ fn test_paths_of_nested_module() -> Result<()> {
 		eq!(fs::read_to_string(cwd.join(".ambl/out/subdir/a"))?, "nested!");
 		eq!(fs::read_to_string(cwd.join(".ambl/out/root"))?, "");
 
+		Ok(())
+	})
+}
+
+#[test]
+#[serial]
+fn test_module_which_is_itself_a_target() -> Result<()> {
+	TestProject::in_tempdir(|p| {
+		p.target_builder("my.wasm", |p, ctx| {
+			p.record("build wasm");
+			ctx.write_dest("(not used...)")
+		});
+
+		p.inject_rule(target("a", function("build").module("my.wasm")));
+		
+		// this isn't going via the FS but we're making sure it gets loaded from the
+		// target path (within .ambl/out)
+		let implementation = p.new_module().set_name(".trou/out/my.wasm").builder(|p, ctx| {
+			p.record(format!("build {}", ctx.target()));
+			ctx.no_output()
+		});
+		p.inject_module(implementation);
+
+		p.build_file("a")?;
+		eq!(p.log(), vec!(
+			format!("build wasm"),
+			format!("build a")
+		));
 		Ok(())
 	})
 }

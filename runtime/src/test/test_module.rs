@@ -190,7 +190,7 @@ impl<'a> BuildModule for TestModule<'a> {
 struct BuildState<'a, 'b, 'c> {
 	project: &'a TestProject<'a>,
 	module: &'b Unscoped,
-	scope: &'c Scope,
+	scope: &'c Scope<'c>,
 }
 
 lazy_static::lazy_static! {
@@ -248,24 +248,15 @@ impl TestInvoker {
 }
 impl Invoker for TestInvoker {
 	fn invoke(&self, request: Invoke) -> Result<InvokeResponse> {
-		match request {
-			Invoke::Action(action) => invoke::perform(action),
-			Invoke::Dependency(request) => {
-				let arc = Arc::clone(&INVOKE_REFERENCES);
-				let map = arc.lock().unwrap();
-				let build_state = map.get(&self.token)
-					.ok_or_else(|| format!("No invoke reference found for token {:?}", &self.token))
-					.unwrap()
-					.to_owned();
-				drop(map);
-				let BuildState { project, module, scope } = build_state;
-				let project = project.lock();
-				let (build_request, post_build) = BuildRequest::from(request, Some(module), &scope)?;
-				debug!("TestInvoker building {:?}", &build_request);
-				let (project, dep) = Project::build(project, &build_request, &BuildReason::Dependency(self.token))?;
-				dep.into_response(&project, &post_build)
-			},
-		}
+		let arc = Arc::clone(&INVOKE_REFERENCES);
+		let map = arc.lock().unwrap();
+		let build_state = map.get(&self.token)
+			.ok_or_else(|| format!("No invoke reference found for token {:?}", &self.token))
+			.unwrap()
+			.to_owned();
+		drop(map);
+		let BuildState { project, module, scope } = build_state;
+		invoke::perform(request, self.token, module, scope, project.lock())
 	}
 }
 
@@ -330,7 +321,7 @@ impl<'a> TestProject<'a> {
 	fn lock<'b>(&'b self) -> Mutexed<'b, Project<TestModule<'a>>>
 		where 'a : 'b // project liftime outlives lock lifetime
 	{
-		unsafe { self.handle.unsafe_lock("tests").expect("lock() failed") }
+		unsafe { self.handle.unsafe_lock_shared("tests").expect("lock() failed") }
 	}
 
 	pub fn with_lock<'b, R, F: FnOnce(Mutexed<'b, Project<TestModule<'a>>>) -> R>(&'b self, f: F) -> R

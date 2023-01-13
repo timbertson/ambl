@@ -1,9 +1,9 @@
 use anyhow::*;
-use std::path::Path;
 use std::{collections::BTreeMap, ops::{DerefMut, Deref}};
 
 use serde::{Serialize, Deserialize};
 
+use crate::ctx::Tempdir;
 use crate::rule::{FunctionSpec, EnvLookup};
 
 // Top level argument to ambl_invoke. May be a dependency or an action
@@ -11,7 +11,7 @@ use crate::rule::{FunctionSpec, EnvLookup};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Invoke {
 	Dependency(DependencyRequest),
-	Action(InvokeAction<String>),
+	Action(InvokeAction),
 }
 
 // A request, which can be turned into a Dependency by resolving
@@ -44,6 +44,7 @@ pub struct TaggedInvoke {
 pub enum InvokeResponse {
 	Unit,
 	Bool(bool),
+	Resource(u32), // opaque resource (like a file descriptor)
 	Str(String),
 	StrOpt(Option<String>),
 	StrVec(Vec<String>),
@@ -54,6 +55,7 @@ impl InvokeResponse {
 	pub fn into_string(self) -> Result<String> { self.try_into() }
 	pub fn into_string_opt(self) -> Result<Option<String>> { self.try_into() }
 	pub fn into_string_vec(self) -> Result<Vec<String>> { self.try_into() }
+	pub fn into_tempdir(self) -> Result<Tempdir> { self.try_into().map(Tempdir) }
 	pub fn into_bool(self) -> Result<bool> { self.try_into() }
 }
 
@@ -98,6 +100,17 @@ impl TryInto<bool> for InvokeResponse {
 		match self {
 			Self::Bool(b) => Ok(b),
 			other => Err(anyhow!("Expected bool, got {:?}", other)),
+		}
+	}
+}
+
+impl TryInto<u32> for InvokeResponse {
+	type Error = anyhow::Error;
+
+	fn try_into(self) -> Result<u32> {
+		match self {
+			Self::Resource(x) => Ok(x),
+			other => Err(anyhow!("Expected Resource, got {:?}", other)),
 		}
 	}
 }
@@ -328,49 +341,27 @@ impl Default for Stdin {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum InvokeAction<P> {
+pub enum InvokeAction {
 	WriteDest(WriteDest),
-	CopyFile(CopyFile<P>),
-}
-
-impl<P> InvokeAction<P> {
-	pub fn map<P2, F: Fn(P) -> P2>(self, f: F) -> InvokeAction<P2> {
-		use InvokeAction::*;
-		match self {
-			WriteDest(x) => WriteDest(x),
-			CopyFile(x) => CopyFile(x.map(f)),
-		}
-	}
+	CopyFile(CopyFile),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WriteDest {
 	pub target: String,
 	pub contents: Vec<u8>,
+	pub replace: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CopyFile<P> {
-	pub src: P,
-	pub dest: P,
+pub struct CopyFile {
+	pub source_root: FileSource,
+	pub source_suffix: String,
+	pub dest_target: String,
 }
 
-impl<P> CopyFile<P> {
-	pub fn map<P2, F: Fn(P) -> P2>(self, f: F) -> CopyFile<P2> {
-		let Self { src, dest } = self;
-		CopyFile {
-			src: f(src),
-			dest: f(dest),
-		}
-	}
-}
-
-impl<P: AsRef<Path>> CopyFile<P> {
-	pub fn src_path(&self) -> &Path {
-		self.src.as_ref()
-	}
-
-	pub fn dest_path(&self) -> &Path {
-		self.dest.as_ref()
-	}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum FileSource {
+	Target(String),
+	Tempdir(Tempdir),
 }

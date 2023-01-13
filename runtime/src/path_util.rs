@@ -588,7 +588,7 @@ mod test {
 	}
 
 	fn s(s: &str) -> Scope {
-		Scope::new(p(s).into_simple().unwrap())
+		Scope::owned(p(s).into_simple().unwrap())
 	}
 
 	#[test]
@@ -608,8 +608,8 @@ mod test {
 
 	#[test]
 	fn test_join() {
-		let scope = Scope::new(p("x/y").into_simple().unwrap());
-		let join = |s| Scoped::new(scope.clone(), p(s)).as_cpath();
+		let scope = Scope::owned(p("x/y").into_simple().unwrap());
+		let join = |s: &str| Unscoped::from_string(s.to_owned(), &scope);
 		assert_eq!(join("foo/bar").0, p("x/y/foo/bar"));
 		assert_eq!(join("../z").0, p("x/z"));
 		assert_eq!(join("../../../z").0, p("../z"));
