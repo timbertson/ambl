@@ -31,7 +31,7 @@ fn test_paths_of_nested_module() -> Result<()> {
 				ctx.target(),
 				ctx.dest().display()
 			));
-			ctx.no_output()
+			ctx.empty_dest()
 		});
 
 		// define a target (which we'll scope under `subdir/`) which is built by nested-build
@@ -72,7 +72,7 @@ fn test_module_which_is_itself_a_target() -> Result<()> {
 		// target path (within .ambl/out)
 		let implementation = p.new_module().set_name(".trou/out/my.wasm").builder(|p, ctx| {
 			p.record(format!("build {}", ctx.target()));
-			ctx.no_output()
+			ctx.empty_dest()
 		});
 		p.inject_module(implementation);
 

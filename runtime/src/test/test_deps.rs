@@ -34,7 +34,7 @@ fn rebuild_if_dep_changes() -> Result<()> {
 		p.target_builder("a", |p, c| {
 			let contents = c.read_file("dep")?;
 			p.record(format!("built from: {}", contents));
-			c.no_output()
+			c.empty_dest()
 		});
 		p.write_file("dep", "1")?;
 
@@ -62,7 +62,7 @@ fn unchanged_rule_module_is_not_evaluated() -> Result<()> {
 			Ok(vec!(target("a", m.default_build_fn())))
 		}).builder(|p, ctx| {
 			p.record("build");
-			ctx.no_output()
+			ctx.empty_dest()
 		});
 		p.inject_rules_module(m);
 		
@@ -79,7 +79,7 @@ fn rule_change_causes_rebuild() -> Result<()> {
 	TestProject::in_tempdir(|p: &TestProject| {
 		let build_m = p.new_module().set_name("builder").builder(|p, ctx| {
 			p.record("build");
-			ctx.no_output()
+			ctx.empty_dest()
 		});
 
 		let rule_m = p.new_module().rule_fn(|m, ctx| {
@@ -107,7 +107,7 @@ fn equivalent_rule_module_does_not_cause_rebuild() -> Result<()> {
 	TestProject::in_tempdir(|p: &TestProject| {
 		let build_m = p.new_module().set_name("builder").builder(|p, ctx| {
 			p.record("build");
-			ctx.no_output()
+			ctx.empty_dest()
 		});
 
 		let rule_m = p.new_module().rule_fn(|m, ctx| {
@@ -200,7 +200,7 @@ fn test_does_not_cache_target_failures() -> Result<()> {
 				Err(anyhow!("Initial failure"))
 			} else {
 				p.record("succeed");
-				c.no_output()
+				c.empty_dest()
 			}
 		});
 

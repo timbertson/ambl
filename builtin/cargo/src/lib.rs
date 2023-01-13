@@ -194,7 +194,7 @@ pub fn build_all(c: TargetCtx) -> Result<()> {
 	for pkg in meta.packages {
 		c.build(format!("module/{}", pkg.name))?;
 	}
-	c.no_output()
+	c.empty_dest()
 }
 
 ffi!(module_build);
@@ -224,5 +224,5 @@ pub fn module_sources(c: TargetCtx) -> Result<()> {
 	for source_file in c.list_fileset(fileset("src").include_files("*.rs"))? {
 		c.build(format!("../{}", source_file))?;
 	}
-	c.no_output()
+	c.empty_dest()
 }

@@ -177,7 +177,7 @@ impl TargetCtx {
 		})))
 	}
 
-	pub fn no_output(&self) -> Result<()> {
+	pub fn empty_dest(&self) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
 			target: self.target.to_owned(),
 			contents: vec!(),
