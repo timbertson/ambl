@@ -1,7 +1,6 @@
 # Ambl hasn't been built yet
 
- - I'm hacking on some ideas to see if it's plausible
- - It's a laughably bad name, I'm absolutely going to change it
+I'm hacking on some ideas to see if it's plausible
 
 # What's the idea?
 
@@ -19,7 +18,7 @@ Part of the unknowns I hope to validate are:
  - will juggling many wasm modules in order to define build rules be fast enough to rival bazel?
  - how nice will it be to compose build logic implemented in different languages?
  - can we provide static typing for the boundaries between modules, or will it have to resort to untyped JSON-like strucures?
-   - something like capnp can be cross-language, but integrating it with the build process may be more amblble than it's worth
+   - something like capnp can be cross-language, but integrating it with the build process may be more trouble than it's worth
  - how to represent build rules such that changing one rule doesn't invalidate too many unrelated rules
 
 # Motivation / goals:
