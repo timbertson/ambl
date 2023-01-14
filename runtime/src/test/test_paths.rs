@@ -70,7 +70,7 @@ fn test_module_which_is_itself_a_target() -> Result<()> {
 		
 		// this isn't going via the FS but we're making sure it gets loaded from the
 		// target path (within .ambl/out)
-		let implementation = p.new_module().set_name(".trou/out/my.wasm").builder(|p, ctx| {
+		let implementation = p.new_module().set_name(".ambl/out/my.wasm").builder(|p, ctx| {
 			p.record(format!("build {}", ctx.target()));
 			ctx.empty_dest()
 		});

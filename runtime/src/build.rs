@@ -6,7 +6,7 @@ use anyhow::*;
 
 use crate::build_request::{BuildRequest, PostBuild};
 use crate::module::BuildModule;
-use crate::path_util::{Scoped, Scope};
+use crate::path_util::{Scoped, Scope, Simple};
 use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile};
 use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken};
 use crate::sync::{Mutexed, MutexRef};
@@ -203,6 +203,13 @@ impl BuildResponse {
 
 	pub fn full(result: BuildResult, response: InvokeResponse) -> Self {
 		Self { result, override_response: Some(response) }
+	}
+	
+	pub fn as_target(&self) -> Option<&Simple> {
+		match self.result {
+			BuildResult::Target(ref t) => t.target.as_ref(),
+			_ => None,
+		}
 	}
 	
 	pub fn into_response<M: BuildModule>(self, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {

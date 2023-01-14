@@ -462,7 +462,10 @@ impl Unscoped {
 	pub fn from_scoped<P: AsRef<CPath>>(path: &Scoped<P>) -> Unscoped {
 		Self::from_ref(&path.value.as_ref(), &path.scope)
 	}
-
+	
+	pub fn as_path(&self) -> &Path {
+		self.0.as_path()
+	}
 }
 
 impl Display for Unscoped {
@@ -474,6 +477,12 @@ impl Display for Unscoped {
 impl AsRef<Path> for Unscoped {
 	fn as_ref(&self) -> &Path {
 		self.0.as_path()
+	}
+}
+
+impl Into<PathBuf> for Unscoped {
+	fn into(self) -> PathBuf {
+		self.0.into()
 	}
 }
 
@@ -557,6 +566,13 @@ impl Deref for Absolute {
 		&self.0
 	}
 }
+
+// // Enum to distinguish buildable targets from plain files
+// #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// pub enum FileReference {
+// 	Target(Simple),
+// 	File(Unscoped),
+// }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Kind {

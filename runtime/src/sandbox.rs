@@ -76,8 +76,10 @@ impl Sandbox {
 						},
 						BuildResult::Target(file) => {
 							if let Some(output) = file.target.to_owned() {
-								// don't use `rel`, use the shadow path within .ambl/out
-								dest.insert(project.dest_path(&Scoped::root(output))?);
+								// don't use `target`, use the shadow path within .ambl/out/`target`
+								let unscoped = project.dest_path(&Scoped::root(output))?;
+								let simple = unscoped.0.into_simple()?;
+								dest.insert(simple);
 							}
 							// TODO don't include transitive deps if there is a checksum
 							for (key, _) in persist.require_deps()?.iter() {

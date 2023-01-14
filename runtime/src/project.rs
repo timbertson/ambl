@@ -199,13 +199,21 @@ impl<M: BuildModule> Project<M> {
 
 	fn load_module_inner<'a>(
 		project: ProjectMutex<'a, M>,
-		full_path: &Unscoped,
+		requested_path: &Unscoped,
 		reason: &BuildReason
 	) -> Result<ProjectMutexPair<'a, M, M>> {
-		debug!("Loading module {:?} for {:?}", full_path, reason);
 		// First, build the module file itself and register it as a dependency.
-		let file_dependency = BuildRequest::FileDependency(full_path.to_owned());
+		let file_dependency = BuildRequest::FileDependency(requested_path.to_owned());
 		let (mut project, module_built) = Self::build(project, &file_dependency, reason)?;
+
+		// If the module was a target, use the output path not the target name
+		let full_path_owned: Unscoped;
+		let mut full_path = requested_path;
+		if let Some(target) = module_built.as_target() {
+			full_path_owned = project.dest_path(&Scoped::root(target.to_owned()))?;
+			full_path = &full_path_owned;
+		}
+		debug!("Loading module {:?} for {:?}", full_path, reason);
 
 		result_block(|| {
 			let self_ref = project.self_ref.clone().unwrap();
@@ -535,9 +543,7 @@ impl<M: BuildModule> Project<M> {
 									fs::rename(&tmp_path, &dest_path)?;
 								},
 								None => {
-									return Err(anyhow!("Builder for {:?} didn't produce an output file. Use `` if this is intentional", &name_scoped))?;
-									// info!("Builder for {:?} didn't produce an output file; writing an empty one", &name_scoped);
-									// fs::write(&dest_path, "")?;
+									return Err(anyhow!("Builder for {:?} didn't produce an output file. Use `ctx.empty_dest()` if this is intentional", &name_scoped))?;
 								},
 							}
 							let stat = fs::symlink_metadata(&dest_path)?;
@@ -724,18 +730,18 @@ impl<M: BuildModule> Project<M> {
 		self.build_cache.invalidate()
 	}
 	
-	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<Simple> {
+	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<Unscoped> {
 		let mut ret: PathBuf = PathBuf::from(".ambl");
 		ret.push(base);
 		ret.push(Unscoped::from_scoped(name).0);
-		CPath::try_from(ret)?.into_simple()
+		Ok(Unscoped(CPath::try_from(ret)?))
 	}
 
-	pub fn tmp_path(&self, name: &Scoped<Simple>) -> Result<Simple> {
+	pub fn tmp_path(&self, name: &Scoped<Simple>) -> Result<Unscoped> {
 		self._path("tmp", name)
 	}
 
-	pub fn dest_path(&self, name: &Scoped<Simple>) -> Result<Simple> {
+	pub fn dest_path(&self, name: &Scoped<Simple>) -> Result<Unscoped> {
 		self._path("out", name)
 	}
 
