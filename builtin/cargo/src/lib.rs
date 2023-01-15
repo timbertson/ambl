@@ -2,21 +2,6 @@ use anyhow::*;
 use serde::{Deserialize, Serialize};
 use ambl_api::*;
 
-macro_rules! ffi {
-	($orig:ident) => {
-		// place it in a module to avoid namespace clash, but export it to C unmangled.
-		// I'd rather export as e.g. ${orig}_ffi but I don't think that's possible
-		pub mod $orig {
-			// use ambl_api::*;
-
-			#[no_mangle]
-			pub extern "C" fn $orig<'a>(ptr_in: *const u8, len_in: u32, ptr_out: &'a mut *mut u8, len_out: &'a mut u32) {
-				super::wrap_fn_mut1(super::$orig, ptr_in, len_in, ptr_out, len_out)
-			}
-		}
-	}
-}
-
 // TODO how do we share this struct nicely without
 // - making a second crate containing just the struct
 // - exposing internal functions (like `cargo`) on any module that depends on us
@@ -110,7 +95,7 @@ fn cargo(c: &BaseCtx) -> Result<Command> {
 	Ok(cmd(exe))
 }
 
-ffi!(build_workspace_meta);
+#[export]
 fn build_workspace_meta(c: TargetCtx) -> Result<()> {
 	// We need src/{lib,main} for cargo to evaluate.
 	// The contents don't actually matter, they could
@@ -135,7 +120,7 @@ fn workspace_meta<C: AsRef<BaseCtx>>(c: C) -> Result<CargoMetaMinimal> {
 	Ok(serde_json::from_str(&contents).with_context(|| contents.clone())?)
 }
 
-// ffi!(build_lockfile);
+// #[export]
 // fn build_lockfile(c: TargetCtx) -> Result<()> {
 // 	c.run(cargo(&c)?.args(vec!(
 // 		"--offline", "--update"
@@ -150,7 +135,7 @@ fn workspace_meta<C: AsRef<BaseCtx>>(c: C) -> Result<CargoMetaMinimal> {
 // 	Ok(())
 // }
 
-ffi!(get_rules);
+#[export]
 pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
 	Ok(vec!(
 		target("workspace-meta", function("build_workspace_meta")),
@@ -159,7 +144,7 @@ pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
 	))
 }
 
-ffi!(module_rules);
+#[export]
 pub fn module_rules(c: BaseCtx) -> Result<Vec<Rule>> {
 	let meta = workspace_meta(&c)?;
 	
@@ -188,7 +173,7 @@ pub fn module_rules(c: BaseCtx) -> Result<Vec<Rule>> {
 	Ok(result)
 }
 
-ffi!(build_all);
+#[export]
 pub fn build_all(c: TargetCtx) -> Result<()> {
 	let meta = workspace_meta(&c)?;
 	for pkg in meta.packages {
@@ -197,7 +182,7 @@ pub fn build_all(c: TargetCtx) -> Result<()> {
 	c.empty_dest()
 }
 
-ffi!(module_build);
+#[export]
 pub fn module_build(c: TargetCtx) -> Result<()> {
 	let conf: ModuleConfig = c.parse_config()?;
 	for name in conf.dep_names {
@@ -217,7 +202,7 @@ pub fn module_build(c: TargetCtx) -> Result<()> {
 	Ok(())
 }
 
-ffi!(module_sources);
+#[export]
 pub fn module_sources(c: TargetCtx) -> Result<()> {
 	// TODO: depend on non-rs files?
 	// TODO "." for scan includes the prefix, but then depending on the returned files includes it again!?

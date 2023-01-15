@@ -36,6 +36,7 @@ name = "ambl-api"
 version = "0.1.0"
 dependencies = [
  "ambl-common",
+ "ambl-macros",
  "anyhow",
  "serde",
  "serde_json",
@@ -59,6 +60,18 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ambl-macros"
+version = "0.1.0"
+dependencies = [
+ "ambl-api",
+ "ambl-common",
+ "anyhow",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

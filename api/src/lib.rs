@@ -5,6 +5,7 @@ pub use ambl_common::rule::*;
 pub use ambl_common::rule::dsl::*;
 pub use ambl_common::ffi::*;
 pub use ambl_common::ctx::*;
+pub use ambl_macros::*;
 
 // used to detect incompatible guest modules
 #[no_mangle]

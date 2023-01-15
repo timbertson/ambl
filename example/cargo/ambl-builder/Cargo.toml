@@ -8,3 +8,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = "1"
+
+ambl-api = { git = "https://github.com/timbertson/ambl", branch = "main" }
