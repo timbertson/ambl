@@ -187,16 +187,18 @@ impl Sandbox {
 
 			let response = result_block(|| {
 				std::fs::create_dir_all(&full_cwd)?;
-				let proc = cmd.spawn()?;
+				let mut proc = cmd.spawn()?;
 				let response = match output.stdout {
 					build::Stdout::String => {
 						let mut s: String = String::new();
-						proc.stdout.expect("stdout pipe").read_to_string(&mut s)?;
+						proc.stdout.take().expect("stdout pipe").read_to_string(&mut s)?;
 						InvokeResponse::Str(s.trim_end().to_owned())
 					},
 					_ => InvokeResponse::Unit,
 				};
-				let result = cmd.status()?;
+				let result = proc.wait()?;
+				debug!("- {:?}: {:?}", &cmd, &result);
+				std::thread::sleep(std::time::Duration::from_millis(500));
 				if result.success() {
 					Ok(response)
 				} else {
