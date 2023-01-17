@@ -48,11 +48,13 @@ pub enum InvokeResponse {
 	Str(String),
 	StrOpt(Option<String>),
 	StrVec(Vec<String>),
+	Bytes(Vec<u8>),
 	FileSet(String),
 }
 
 impl InvokeResponse {
 	pub fn into_string(self) -> Result<String> { self.try_into() }
+	pub fn into_bytes(self) -> Result<Vec<u8>> { self.try_into() }
 	pub fn into_string_opt(self) -> Result<Option<String>> { self.try_into() }
 	pub fn into_string_vec(self) -> Result<Vec<String>> { self.try_into() }
 	pub fn into_tempdir(self) -> Result<Tempdir> { self.try_into().map(Tempdir) }
@@ -65,6 +67,7 @@ impl TryInto<String> for InvokeResponse {
 	fn try_into(self) -> Result<String> {
 		match self {
 			Self::Str(s) => Ok(s),
+			Self::Bytes(v) => Ok(String::from_utf8(v)?),
 			Self::StrOpt(Some(s)) => Ok(s),
 			other => Err(anyhow!("Expected string, got {:?}", other)),
 		}
@@ -89,6 +92,17 @@ impl TryInto<Vec<String>> for InvokeResponse {
 		match self {
 			Self::StrVec(s) => Ok(s),
 			other => Err(anyhow!("Expected string array, got {:?}", other)),
+		}
+	}
+}
+
+impl TryInto<Vec<u8>> for InvokeResponse {
+	type Error = anyhow::Error;
+
+	fn try_into(self) -> Result<Vec<u8>> {
+		match self {
+			Self::Bytes(s) => Ok(s),
+			other => Err(anyhow!("Expected bytes, got {:?}", other)),
 		}
 	}
 }
@@ -343,6 +357,7 @@ impl Default for Stdin {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum InvokeAction {
 	WriteDest(WriteDest),
+	ReadFile(ReadFile),
 	CopyFile(CopyFile),
 }
 
@@ -358,6 +373,13 @@ pub struct CopyFile {
 	pub source_root: FileSource,
 	pub source_suffix: String,
 	pub dest_target: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+// TODO can this replace PostBuildAction?
+pub struct ReadFile {
+	pub source_root: FileSource,
+	pub source_suffix: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

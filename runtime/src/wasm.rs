@@ -187,7 +187,10 @@ impl StateRef {
 		
 		let ffi_name = format!("amblffi_{}", &f.fn_name);
 		let call_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(
-			store_ctx, &ffi_name)?;
+			&mut store_ctx, &ffi_name)?;
+			// .with_context(|| {
+			// 	anyhow!("{:?}", state.instance.exports(&mut store_ctx).map(|ex| ex.name()).collect::<Vec<&str>>())
+		// })?;
 		drop(write);
 		let (mut store, result) = self.call_str(store, call_ffi, &serde_json::to_string(arg)?, |b| Ok(b));
 

@@ -217,5 +217,13 @@ impl Tempdir {
 			dest_target: ctx.target().to_owned(),
 		}))))
 	}
+
+	pub fn read_file<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<()> {
+		ignore_result(ctx.invoke(Invoke::Action(InvokeAction::CopyFile(CopyFile {
+			source_root: crate::build::FileSource::Tempdir(*self),
+			source_suffix: path.into(),
+			dest_target: ctx.target().to_owned(),
+		}))))
+	}
 }
 

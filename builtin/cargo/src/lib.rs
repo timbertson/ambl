@@ -2,6 +2,23 @@ use anyhow::*;
 use serde::{Deserialize, Serialize};
 use ambl_api::*;
 
+
+/*
+
+Target structure:
+
+workspace-meta
+Cargo.lock
+
+module/{crate}
+sources/{crate}
+
+Everything depends on workspace-meta.
+
+All cargo commands run with --frozen and depend on the lockfile, _aside_ from the lockfile rule itself.
+
+*/
+
 // TODO how do we share this struct nicely without
 // - making a second crate containing just the struct
 // - exposing internal functions (like `cargo`) on any module that depends on us
@@ -89,14 +106,14 @@ struct CargoMetaDependency {
 	path: Option<String>,
 }
 
-fn cargo(c: &BaseCtx) -> Result<Command> {
+fn raw_cargo(c: &BaseCtx) -> Result<Command> {
 	let exe = c.lookup(exe_lookup("cargo"))?.ok_or_else(|| anyhow!("cargo not on $PATH"))?;
-	c.build("Cargo.toml")?;
+	minimal_cargo_files(c)?;
 	Ok(cmd(exe))
 }
 
-#[export]
-fn build_workspace_meta(c: TargetCtx) -> Result<()> {
+fn minimal_cargo_files(c: &BaseCtx) -> Result<()> {
+	c.build("Cargo.toml")?;
 	// We need src/{lib,main} for cargo to evaluate.
 	// The contents don't actually matter, they could
 	// even be blank
@@ -105,7 +122,18 @@ fn build_workspace_meta(c: TargetCtx) -> Result<()> {
 	} else {
 		c.build("src/main.rs")?;
 	}
-	let meta = c.run(cargo(&c)?.args(vec!(
+	Ok(())
+}
+
+fn cargo(c: &BaseCtx) -> Result<Command> {
+	c.build("Cargo.lock")?;
+	let raw = raw_cargo(c)?;
+	Ok(raw.arg("--locked"))
+}
+
+#[export]
+fn build_workspace_meta(c: TargetCtx) -> Result<()> {
+	let meta = c.run(raw_cargo(&c)?.args(vec!(
 		"metadata", "--no-deps", "--format-version", "1"
 	)).stdout(Stdout::String))?.into_string()?;
 	debug(&format!("META: {}", &meta));
@@ -120,20 +148,14 @@ fn workspace_meta<C: AsRef<BaseCtx>>(c: C) -> Result<CargoMetaMinimal> {
 	Ok(serde_json::from_str(&contents).with_context(|| contents.clone())?)
 }
 
-// #[export]
-// fn build_lockfile(c: TargetCtx) -> Result<()> {
-// 	c.run(cargo(&c)?.args(vec!(
-// 		"--offline", "--update"
-// 	))).or_else(|_|
-// 		c.run(cargo(&c)?.arg("generate-lockfile"))
-// 	)?;
-	
-// 	// TODO if there were a full sandbox, how would we reference the _current_ lockfile on disk?
-// 	// Perhaps there's a persistent_build_ctx or something which copies files if they exist?
-// 	// Maybe it doesn't matter that we need the un-target version, we just want to copy <previous-version-of-my-target> if present...
-// 	c.copy_to_dest(c.target())?;
-// 	Ok(())
-// }
+#[export]
+fn build_lockfile(c: TargetCtx) -> Result<()> {
+	// TODO how do we make this fast? I don't want cargo to update the lockfile all the time,
+	// but I also want it to update on demand. Maybe it needs a --force flag at the ambl level.
+	let tmpdir = c.run(raw_cargo(&c)?.arg("generate-lockfile"))?.into_tempdir()?;
+	tmpdir.copy_to_dest(&c, "Cargo.lock")?;
+	Ok(())
+}
 
 #[export]
 pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
@@ -187,7 +209,7 @@ pub fn module_build(c: TargetCtx) -> Result<()> {
 	let conf: ModuleConfig = c.parse_config()?;
 	for name in conf.dep_names {
 		// TODO parallel?
-		c.build(format!("build/{}", &name))?;
+		c.build(format!("module/{}", &name))?;
 	}
 	c.build(format!("sources/{}", &conf.name))?;
 	let tmp = c.run(cargo(&c)?

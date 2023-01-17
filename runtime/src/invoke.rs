@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, io};
 use std::path::{PathBuf, Path};
 use std::sync::Arc;
 
@@ -57,25 +57,42 @@ fn perform_invoke<M: BuildModule>(
 				}
 				fs::write(path.as_path(), &f.contents)
 					.with_context(|| format!("Writing file {}", &path))?;
+				Ok(InvokeResponse::Unit)
 			},
+
 			InvokeAction::CopyFile(f) => {
-				match &f.source_root {
-					FileSource::Target(t) => todo!("Copy file from target"),
-					FileSource::Tempdir(tempdir) => {
-						let temp_root: &Path = project.get_tempdir(token, *tempdir)?;
-						let mut src = PathBuf::from(temp_root);
-						src.push(Unscoped::from_string(f.source_suffix.clone(), scope).0);
-						let dest = dest_tmp(&project, &f.dest_target)?;
-						debug!("Copying file {} -> {}", src.display(), &dest);
-						if !lexists(&src)? {
-							return Err(anyhow!("Copy source doesn't exist: {}", src.display()));
-						};
-						fs::copy(&src, dest.as_path())
-							.with_context(|| format!("Copying file {} -> {}", src.display(), &dest))?;
-					},
-				}
+				let src = source_path(&project, token, scope, &f.source_root, &f.source_suffix)?;
+				let dest = dest_tmp(&project, &f.dest_target)?;
+				debug!("Copying file {} -> {}", src.display(), &dest);
+				if !lexists(&src)? {
+					return Err(anyhow!("Copy source doesn't exist: {}", src.display()));
+				};
+				fs::copy(&src, dest.as_path())
+					.with_context(|| format!("Copying file {} -> {}", src.display(), &dest))?;
+				Ok(InvokeResponse::Unit)
+			},
+
+			InvokeAction::ReadFile(f) => {
+				let src = source_path(&project, token, scope, &f.source_root, &f.source_suffix)?;
+				debug!("Reading file {}", src.display());
+				let bytes = fs::read(&src)
+					.with_context(|| format!("Reading file {}", src.display()))?;
+				Ok(InvokeResponse::Bytes(bytes))
 			},
 		}
-		Ok(InvokeResponse::Unit)
 	}).with_context(|| format!("Invoking action: {:?}", action))
+}
+
+fn source_path<M: BuildModule>(project: &ProjectMutex<M>, token: ActiveBuildToken, scope: &Scope, src: &FileSource, suffix: &str)
+	-> Result<PathBuf>
+{
+	match src {
+		FileSource::Target(t) => todo!("Get file from target"),
+		FileSource::Tempdir(tempdir) => {
+			let temp_root: &Path = project.get_tempdir(token, *tempdir)?;
+			let mut src = PathBuf::from(temp_root);
+			src.push(Unscoped::from_string(suffix.to_owned(), scope).0);
+			Ok(src)
+		}
+	}
 }
