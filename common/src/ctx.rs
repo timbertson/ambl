@@ -4,7 +4,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::ffi::{ResultFFI, SizedPtr};
-use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, FilesetDependency, WriteDest, CopyFile};
+use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, FilesetDependency, WriteDest, CopyFile, ReadFile};
 use crate::rule::EnvLookup;
 
 #[cfg(target_arch = "wasm32")]
@@ -218,12 +218,11 @@ impl Tempdir {
 		}))))
 	}
 
-	pub fn read_file<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<()> {
-		ignore_result(ctx.invoke(Invoke::Action(InvokeAction::CopyFile(CopyFile {
+	pub fn read_file<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<String> {
+		ctx.invoke(Invoke::Action(InvokeAction::ReadFile(ReadFile {
 			source_root: crate::build::FileSource::Tempdir(*self),
 			source_suffix: path.into(),
-			dest_target: ctx.target().to_owned(),
-		}))))
+		})))?.into_string()
 	}
 }
 

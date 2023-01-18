@@ -21,7 +21,7 @@ pub fn perform<'a, M: BuildModule>(
 	scope: &Scope,
 	project: ProjectMutex<'a, M>
 ) -> Result<InvokeResponse> {
-	match request {
+	let response = match request {
 		Invoke::Action(ref action) => {
 			crate::debug::shell_on_failure(perform_invoke(action, token, scope, project))
 		},
@@ -30,7 +30,9 @@ pub fn perform<'a, M: BuildModule>(
 			let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
 			persist.into_response(&project, &post_build)
 		},
-	}
+	};
+	debug!("invoke response: {:?}", &response);
+	response
 }
 
 fn perform_invoke<M: BuildModule>(

@@ -626,6 +626,7 @@ impl<M: BuildModule> Project<M> {
 						// if there's no explicit response, keep the tempdir around and return its index
 						let path = path_util::str_of_path(tempdir.path()).to_owned();
 						let res = project.keep_tempdir(reason.parent(), tempdir)?;
+						debug!("Returning tempdir as exec() response: {}", &path);
 						InvokeResponse::Resource(res.0)
 					},
 					other => {

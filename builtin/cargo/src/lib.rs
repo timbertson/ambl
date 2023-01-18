@@ -128,15 +128,15 @@ fn minimal_cargo_files(c: &BaseCtx) -> Result<()> {
 fn cargo(c: &BaseCtx) -> Result<Command> {
 	c.build("Cargo.lock")?;
 	let raw = raw_cargo(c)?;
-	Ok(raw.arg("--locked"))
+	Ok(raw.arg("--offline"))
 }
 
 #[export]
 fn build_workspace_meta(c: TargetCtx) -> Result<()> {
 	let meta = c.run(raw_cargo(&c)?.args(vec!(
 		"metadata", "--no-deps", "--format-version", "1"
-	)).stdout(Stdout::String))?.into_string()?;
-	debug(&format!("META: {}", &meta));
+	)).stdout(Stdout::String))?.into_string().context("cargo metadata output")?;
+	// debug(&format!("META: {}", &meta));
 	c.write_dest(meta)?;
 	Ok(())
 }
@@ -152,7 +152,7 @@ fn workspace_meta<C: AsRef<BaseCtx>>(c: C) -> Result<CargoMetaMinimal> {
 fn build_lockfile(c: TargetCtx) -> Result<()> {
 	// TODO how do we make this fast? I don't want cargo to update the lockfile all the time,
 	// but I also want it to update on demand. Maybe it needs a --force flag at the ambl level.
-	let tmpdir = c.run(raw_cargo(&c)?.arg("generate-lockfile"))?.into_tempdir()?;
+	let tmpdir = c.run(raw_cargo(&c)?.arg("fetch"))?.into_tempdir()?;
 	tmpdir.copy_to_dest(&c, "Cargo.lock")?;
 	Ok(())
 }
@@ -219,8 +219,13 @@ pub fn module_build(c: TargetCtx) -> Result<()> {
 		.impure_share_dir("target")
 	)?.into_tempdir()?;
 
+	// debug("here?");
+	// let lockfile = tmp.read_file(&c, "Cargo.lock").context("read lock")?;
+	// debug(&lockfile);
+
 	// TODO full cargo substitution logic
 	tmp.copy_to_dest(&c, format!("target/wasm32-unknown-unknown/debug/{}.wasm", conf.name.replace("-", "_")))?;
+	// Err(anyhow!("TODO"))
 	Ok(())
 }
 

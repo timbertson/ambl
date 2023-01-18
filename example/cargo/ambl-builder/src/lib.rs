@@ -2,7 +2,6 @@ use anyhow::*;
 use ambl_api::*;
 
 #[export]
-fn get_rules() -> Result<Vec<Rule>> {
-	debug("HI");
-	Ok(vec!())
+fn build(c: TargetCtx) -> Result<()> {
+	c.write_dest("Hello world!")
 }
