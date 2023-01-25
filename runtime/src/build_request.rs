@@ -5,7 +5,7 @@ use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::D
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
-use ambl_common::{build::{DependencyRequest, InvokeResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
+use ambl_common::{build::{DependencyRequest, InvokeResponse, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
 use crate::project::{ProjectRef, Project, ProjectHandle};
 use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
@@ -16,6 +16,7 @@ use crate::module::BuildModule;
 // (i.e. relative to project root, not to whatever scope the request came from)
 pub enum BuildRequest {
 	FileDependency(Unscoped),
+	FileExistence(Unscoped),
 	WasmCall(ResolvedFnSpec<'static>),
 	EnvVar(String),
 	EnvLookup(EnvLookup),
@@ -25,24 +26,24 @@ pub enum BuildRequest {
 }
 
 impl BuildRequest {
-	pub fn from<'a>(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &'a Scope<'a>) -> Result<(Self, PostBuild)> {
+	pub fn from<'a>(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &'a Scope<'a>) -> Result<Self> {
 		Ok(match req {
-			DependencyRequest::FileDependency(v) => {
-				let FileDependency { path, ret } = v;
+			DependencyRequest::FileDependency(path) => {
 				let path = Unscoped::from_string(path, scope);
-				let ret = PostBuildFile { path: path.clone(), ret };
-				(Self::FileDependency(path), PostBuild::FileDependency(ret))
+				Self::FileDependency(path)
 			},
-			DependencyRequest::WasmCall(v) => (
+			DependencyRequest::FileExistence(path) => {
+				let path = Unscoped::from_string(path, scope);
+				Self::FileExistence(path)
+			},
+			DependencyRequest::WasmCall(v) =>
 				Self::WasmCall(ResolvedFnSpec::from_explicit_fn_name(v, source_module, scope.clone())?),
-				PostBuild::Unit
-			),
-			DependencyRequest::EnvVar(v) => (Self::EnvVar(v), PostBuild::Unit),
-			DependencyRequest::EnvLookup(v) => (Self::EnvLookup(v), PostBuild::Unit),
+			DependencyRequest::EnvVar(v) => Self::EnvVar(v),
+			DependencyRequest::EnvLookup(v) => Self::EnvLookup(v),
 			DependencyRequest::Fileset(v) => {
 				let FilesetDependency { root, dirs, files } = v;
 				let root = Unscoped::from_string(root, scope);
-				(Self::Fileset(ResolvedFilesetDependency{ root, dirs, files }), PostBuild::Unit)
+				Self::Fileset(ResolvedFilesetDependency{ root, dirs, files })
 			},
 			DependencyRequest::Execute(v) => {
 				let gen_str : GenCommand<String> = v.into();
@@ -57,24 +58,12 @@ impl BuildRequest {
 					},
 					_ => ()
 				};
-				(Self::Execute(gen), PostBuild::Unit)
+				Self::Execute(gen)
 			},
-			DependencyRequest::Universe => (Self::Universe, PostBuild::Unit),
+			DependencyRequest::Universe => Self::Universe,
 		})
 	}
 }
-
-// Information not needed in the build itself, but used to formuate a response
-pub enum PostBuild {
-	FileDependency(PostBuildFile),
-	Unit,
-}
-
-pub struct PostBuildFile {
-	pub path: Unscoped,
-	pub ret: FileDependencyType,
-}
-
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ResolvedFnSpec<'a> {

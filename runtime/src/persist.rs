@@ -5,9 +5,9 @@ use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::D
 
 use anyhow::*;
 use serde::{Serialize, de::DeserializeOwned, Deserialize};
-use ambl_common::{build::{DependencyRequest, InvokeResponse, FileDependency, FileDependencyType, Command, GenCommand}, rule::{FunctionSpec, Config}};
+use ambl_common::{build::{DependencyRequest, InvokeResponse, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
-use crate::build_request::{ResolvedFnSpec, ResolvedFilesetDependency, BuildRequest, PostBuild};
+use crate::build_request::{ResolvedFnSpec, ResolvedFilesetDependency, BuildRequest};
 use crate::project::{ProjectRef, Project, ProjectHandle};
 use crate::path_util::{Simple, Scoped, CPath, Unscoped, ResolveModule, self};
 use crate::module::BuildModule;
@@ -24,11 +24,11 @@ impl PersistFile {
 		Ok(Self { mtime, target })
 	}
 
-	pub fn from_path<P: AsRef<Path>>(p: P, target: Option<Simple>) -> Result<Option<Self>> {
+	pub fn from_path<P: AsRef<Path>>(p: P, target: Option<Simple>) -> Result<Self> {
 		let p = p.as_ref();
 		match fs::symlink_metadata(p) {
-			Result::Ok(stat) => Ok(Some(Self::from_stat(stat, target)?)),
-			Result::Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+			Result::Ok(stat) => Ok(Self::from_stat(stat, target)?),
+			Result::Err(err) if err.kind() == io::ErrorKind::NotFound => Err(anyhow!("No such file: {}", p.display())),
 			Result::Err(err) => Err(err).with_context(|| format!("Reading {}", p.display())),
 		}
 	}
@@ -208,9 +208,10 @@ and is stored in the cache (in BuildResultWithDeps).
 */
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BuildResult {
-	File(Option<PersistFile>),
+	File(PersistFile),
 	Target(PersistFile), // TODO can we just use File() variant here?
 	Env(Option<String>),
+	Bool(bool),
 	Fileset(Vec<String>),
 	Wasm(serde_json::Value),
 	AlwaysClean,
@@ -230,6 +231,9 @@ impl BuildResult {
 
 			(Target(a), Target(b)) => a != b,
 			(Target(_), _) => incompatible(),
+
+			(Bool(a), Bool(b)) => a != b,
+			(Bool(_), _) => incompatible(),
 
 			(Env(a), Env(b)) => a != b,
 			(Env(_), _) => incompatible(),

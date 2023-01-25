@@ -253,7 +253,7 @@ impl BuildModule for WasmModule {
 				let scope = scope_map.get(&token)
 					.ok_or_else(|| anyhow!("invoke called without an active scope; this should be impossible"))?;
 				let project = project_handle.lock("ambl_invoke")?;
-				invoke::perform(request, token, &module_path, scope, project)
+				invoke::perform(project, &module_path, scope, token, request)
 			})();
 			debug!("ambl_invoke: returning {:?} to WASM module", response);
 			let result: Result<()> = (|| {

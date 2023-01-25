@@ -4,31 +4,32 @@ use std::sync::Arc;
 
 use anyhow::*;
 use log::*;
-use ambl_common::build::{InvokeResponse, InvokeAction, Invoke, WriteDest, FileSource};
+use ambl_common::build::{InvokeResponse, InvokeAction, Invoke, WriteDest, FileSource, DependencyRequest};
 
-use crate::build::BuildReason;
+use crate::build::{BuildReason, BuildResponse};
 use crate::build_request::BuildRequest;
 use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::path_util::{lexists, Unscoped, CPath, Scope, Simple, Scoped};
-use crate::project::{Project, ActiveBuildToken, ProjectMutex};
+use crate::persist::BuildResult;
+use crate::project::{Project, ActiveBuildToken, ProjectMutex, ProjectMutexPair};
 use crate::sync::MutexHandle;
 
 pub fn perform<'a, M: BuildModule>(
-	request: Invoke,
-	token: ActiveBuildToken,
+	project: ProjectMutex<'a, M>,
 	module_path: &Unscoped,
 	scope: &Scope,
-	project: ProjectMutex<'a, M>
+	token: ActiveBuildToken,
+	request: Invoke,
 ) -> Result<InvokeResponse> {
 	let response = match request {
-		Invoke::Action(ref action) => {
-			crate::debug::shell_on_failure(perform_invoke(action, token, scope, project))
+		Invoke::Action(action) => {
+			crate::debug::shell_on_failure(perform_invoke(project, module_path, scope, token, &action))
 		},
 		Invoke::Dependency(request) => {
-			let (build_request, post_build) = BuildRequest::from(request, Some(module_path), scope)?;
+			let build_request = BuildRequest::from(request, Some(module_path), scope)?;
 			let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
-			persist.into_response(&project, &post_build)
+			persist.into_response()
 		},
 	};
 	debug!("invoke response: {:?}", &response);
@@ -36,10 +37,11 @@ pub fn perform<'a, M: BuildModule>(
 }
 
 fn perform_invoke<M: BuildModule>(
-	action: &InvokeAction,
-	token: ActiveBuildToken,
+	project: ProjectMutex<M>,
+	module_path: &Unscoped,
 	scope: &Scope,
-	project: ProjectMutex<M>
+	token: ActiveBuildToken,
+	action: &InvokeAction,
 ) -> Result<InvokeResponse> {
 	result_block(|| {
 		let dest_tmp = |project: &Project<M>, target: &String| {
@@ -63,7 +65,7 @@ fn perform_invoke<M: BuildModule>(
 			},
 
 			InvokeAction::CopyFile(f) => {
-				let src = source_path(&project, token, scope, &f.source_root, &f.source_suffix)?;
+				let (project, src) = source_path(project, module_path, scope, token, &f.source_root, Some(&f.source_suffix))?;
 				let dest = dest_tmp(&project, &f.dest_target)?;
 				debug!("Copying file {} -> {}", src.display(), &dest);
 				if !lexists(&src)? {
@@ -75,7 +77,7 @@ fn perform_invoke<M: BuildModule>(
 			},
 
 			InvokeAction::ReadFile(f) => {
-				let src = source_path(&project, token, scope, &f.source_root, &f.source_suffix)?;
+				let (project, src) = source_path(project, module_path, scope, token, &f.source_root, f.source_suffix.as_deref())?;
 				debug!("Reading file {}", src.display());
 				let bytes = fs::read(&src)
 					.with_context(|| format!("Reading file {}", src.display()))?;
@@ -85,16 +87,41 @@ fn perform_invoke<M: BuildModule>(
 	}).with_context(|| format!("Invoking action: {:?}", action))
 }
 
-fn source_path<M: BuildModule>(project: &ProjectMutex<M>, token: ActiveBuildToken, scope: &Scope, src: &FileSource, suffix: &str)
-	-> Result<PathBuf>
+fn source_path<'a, M: BuildModule>(
+	mut project: ProjectMutex<'a, M>,
+	module_path: &Unscoped,
+	scope: &Scope,
+	token: ActiveBuildToken,
+	src: &FileSource,
+	suffix: Option<&str>
+)
+	-> Result<ProjectMutexPair<'a, M, PathBuf>>
 {
-	match src {
-		FileSource::Target(t) => todo!("Get file from target"),
+	let mut src = match src {
+		FileSource::Target(path) => {
+			let request = DependencyRequest::FileDependency(path.to_owned());
+			let build_request = BuildRequest::from(request, Some(module_path), scope)?;
+			let (project_ret, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
+			project = project_ret;
+			let target = match persist.result {
+				BuildResult::Target(t) => t.target,
+				BuildResult::File(t) => t.target,
+				_ => None,
+			};
+			let unscoped = match target {
+				Some(t) => project.dest_path(&Scoped::root(t))?,
+				None => Unscoped::from_string(path.to_owned(), scope),
+			};
+			unscoped.0.into()
+		},
 		FileSource::Tempdir(tempdir) => {
 			let temp_root: &Path = project.get_tempdir(token, *tempdir)?;
-			let mut src = PathBuf::from(temp_root);
-			src.push(Unscoped::from_string(suffix.to_owned(), scope).0);
-			Ok(src)
+			PathBuf::from(temp_root)
 		}
+	};
+
+	if let Some(suffix) = suffix {
+		src.push(Unscoped::from_string(suffix.to_owned(), scope).0);
 	}
+	Ok((project, src))
 }

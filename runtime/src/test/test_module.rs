@@ -1,3 +1,4 @@
+use ambl_common::build::{InvokeAction, ReadFile, FileSource};
 use ambl_common::ffi::ResultFFI;
 use log::*;
 use std::{ops::{Deref, DerefMut}, path::PathBuf};
@@ -7,11 +8,11 @@ use std::{collections::HashMap, ops::Index, env::{current_dir, self}, rc::Rc, de
 
 use anyhow::*;
 use tempdir::TempDir;
-use ambl_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, FileDependency, InvokeResponse, FileDependencyType, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
+use ambl_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, InvokeResponse, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
 use crate::build::BuildReason;
-use crate::build_request::{ResolvedFnSpec, BuildRequest, PostBuild, PostBuildFile};
+use crate::build_request::{ResolvedFnSpec, BuildRequest};
 use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project};
 use crate::persist::{PersistFile, BuildResult, BuildResultWithDeps};
 use crate::module::BuildModule;
@@ -256,7 +257,7 @@ impl Invoker for TestInvoker {
 			.to_owned();
 		drop(map);
 		let BuildState { project, module, scope } = build_state;
-		invoke::perform(request, self.token, module, scope, project.lock())
+		invoke::perform(project.lock(), module, scope, self.token, request)
 	}
 }
 
@@ -265,6 +266,7 @@ pub struct TestProject<'a> {
 	rules: Mutex<Vec<Rule>>,
 
 	project: ProjectRef<TestModule<'a>>,
+	token: ActiveBuildToken,
 	handle: ProjectHandle<TestModule<'a>>,
 	root: TempDir,
 	log: Log,
@@ -282,7 +284,7 @@ impl<'a> TestProject<'a> {
 
 		p.cache_mut().invalidate_if(|dep| {
 			match dep.result {
-				BuildResult::File(Some(ref f)) if f == &FAKE_FILE => false,
+				BuildResult::File(ref f) if f == &FAKE_FILE => false,
 				_ => true,
 			}
 		});
@@ -293,13 +295,14 @@ impl<'a> TestProject<'a> {
 		// silly mac has a /tmp symlink
 		let root_abs = fs::canonicalize(root.path())?;
 		let project = Project::new(CPath::new(root_abs.to_str().unwrap().to_owned()).into_absolute()?)?;
+		let token = ActiveBuildToken::generate();
 
 		let handle = project.handle();
 		let module_count = AtomicUsize::new(0);
 		let monotonic_clock = AtomicUsize::new(1);
 		let log = Default::default();
 		let rules = Default::default();
-		let s = Self { project, handle, root, log, module_count, monotonic_clock, rules };
+		let s = Self { project, handle, token, root, log, module_count, monotonic_clock, rules };
 		s.lock().replace_rules(vec!());
 		Ok(s)
 	}
@@ -371,7 +374,7 @@ impl<'a> TestProject<'a> {
 		// mark the module file as fresh to skip having to write an actual file
 		p.inject_cache(
 			BuildRequest::FileDependency(Unscoped::new(s)),
-			BuildResultWithDeps::simple(BuildResult::File(Some(FAKE_FILE.clone())))
+			BuildResultWithDeps::simple(BuildResult::File(FAKE_FILE.clone()))
 		).expect("inject_module");
 		drop(p);
 		self
@@ -385,48 +388,52 @@ impl<'a> TestProject<'a> {
 		};
 		p.inject_cache(
 			BuildRequest::FileDependency(Unscoped::new(v.into())),
-			BuildResultWithDeps::simple(BuildResult::File(Some(stat)))
+			BuildResultWithDeps::simple(BuildResult::File(stat))
 		).expect("touch_fake");
 		drop(p);
 		self
 	}
 
 	pub fn build_file(&self, f: &str) -> Result<&Self> {
-		self.build_file_as(f, FileDependencyType::Unit)?;
+		self.build_dep(&DependencyRequest::FileDependency(f.into()))?;
 		Ok(self)
 	}
 
 	pub fn build_file_contents(&self, f: &str) -> Result<String> {
-		self.build_file_as(f, FileDependencyType::Contents)?.try_into()
-	}
-
-	pub fn build_file_as(&self, f: &str, ret: FileDependencyType) -> Result<InvokeResponse> {
-		println!("\n=== start build_file({})", f);
-		let path = Unscoped::new(f.to_owned());
-		let req = BuildRequest::FileDependency(path.clone());
-		let post_build = PostBuild::FileDependency(PostBuildFile { path, ret });
-		let response = self.build_full(&req, post_build)?;
-		println!("=== end build_file({})\n", f);
-		Ok(response)
+		self.invoke_full(&Invoke::Action(InvokeAction::ReadFile(ReadFile {
+			source_root: FileSource::Target(f.into()),
+			source_suffix: None,
+		})))?.try_into()
 	}
 
 	pub fn build_dep(&self, req: &DependencyRequest) -> Result<InvokeResponse> {
-		let (build_request, post_build) = BuildRequest::from(req.to_owned(), None, &Scope::root())?;
-		self.build_full(&build_request, PostBuild::Unit)
+		let build_request = BuildRequest::from(req.to_owned(), None, &Scope::root())?;
+		self.build_full(&build_request)
 	}
 
-	fn build_full(&self, req: &BuildRequest, post: PostBuild) -> Result<InvokeResponse> {
+	fn build_full(&self, req: &BuildRequest) -> Result<InvokeResponse> {
 		let project = self.lock();
 		let (project, result) = Project::build(project, req, &BuildReason::Explicit)
 			.with_context(|| format!("Building {:?}", req))?;
 
-		let response = result.into_response(&project, &post);
+		let response = result.into_response();
 		drop(project);
 
 		// testcases run multiple builds, make sure we don't short-circuit between them
 		self.reset();
 
 		response
+	}
+
+	fn invoke_full(&self, req: &Invoke) -> Result<InvokeResponse> {
+		let module = Unscoped::new("_fake_root_module".to_owned());
+		let result = invoke::perform(self.lock(), &module, Scope::static_root(), self.token, req.to_owned())
+			.with_context(|| format!("Building {:?}", req));
+
+		// testcases run multiple builds, make sure we don't short-circuit between them
+		self.reset();
+
+		result
 	}
 
 	pub fn write_file<F: AsRef<Path>, S: AsRef<[u8]>>(&self, path: F, contents: S) -> Result<&Self> {

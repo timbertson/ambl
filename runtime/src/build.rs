@@ -1,10 +1,10 @@
 use std::fs;
 
-use ambl_common::build::{InvokeResponse, FileDependencyType};
+use ambl_common::build::InvokeResponse;
 use log::*;
 use anyhow::*;
 
-use crate::build_request::{BuildRequest, PostBuild};
+use crate::build_request::BuildRequest;
 use crate::module::BuildModule;
 use crate::path_util::{Scoped, Scope, Simple};
 use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile};
@@ -35,20 +35,32 @@ impl BuildReason {
 pub struct BuildCache;
 
 impl BuildCache {
-	pub fn build_simple<'a, M: BuildModule, Build>(
+	pub fn build_trivial<'a, M: BuildModule, Build>(
 		project: ProjectMutex<'a, M>,
 		key: &BuildRequest,
 		build_fn: Build
 	) -> Result<ProjectMutexPair<'a, M, BuildResponse>> where
 		Build: FnOnce() -> Result<BuildResult>
 	{
-		// TODO name better?
-		let get_ctx = |project| {
+		Self::build_simple(project, key, |project| {
 			let mut project: Mutexed<Project<M>> = project;
 			let ret = project.unlocked_block(|_| {
 				build_fn()
 			});
 			Ok((project, ret?))
+		})
+	}
+
+	pub fn build_simple<'a, M: BuildModule, Build>(
+		project: ProjectMutex<'a, M>,
+		key: &BuildRequest,
+		build_fn: Build
+	) -> Result<ProjectMutexPair<'a, M, BuildResponse>> where
+		Build: FnOnce(Mutexed<Project<M>>) -> Result<ProjectMutexPair<M, BuildResult>>
+	{
+		// TODO name better?
+		let get_ctx = |project| {
+			build_fn(project)
 		};
 
 		let needs_rebuild = |project, ctx: &BuildResult, cached: &BuildResultWithDeps| {
@@ -212,15 +224,16 @@ impl BuildResponse {
 		}
 	}
 	
-	pub fn into_response<M: BuildModule>(self, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
+	pub fn into_response(self) -> Result<InvokeResponse> {
 		use BuildResult::*;
 		let Self { override_response, result } = self;
 		if let Some(response) = override_response {
 			Ok(response)
 		} else {
 			match result {
-				File(file) => Self::response_of_file(file, project, post_build),
-				Target(file) => Self::response_of_file(Some(file), project, post_build),
+				File(file) => Ok(InvokeResponse::Unit),
+				Target(file) => Ok(InvokeResponse::Unit),
+				Bool(b) => Ok(InvokeResponse::Bool(b)),
 				Fileset(fileset) => Ok(InvokeResponse::StrVec(fileset)),
 				Env(env) => Ok(InvokeResponse::StrOpt(env)),
 				Wasm(wasm) => Ok(InvokeResponse::Str(serde_json::to_string(&wasm)?)),
@@ -228,37 +241,5 @@ impl BuildResponse {
 				AlwaysClean => Ok(InvokeResponse::Unit),
 			}
 		}
-	}
-
-	fn response_of_file<M: BuildModule>(file: Option<PersistFile>, project: &Project<M>, post_build: &PostBuild) -> Result<InvokeResponse> {
-		let post_build = match post_build {
-			PostBuild::FileDependency(f) => f,
-			_ => panic!("file response with non-file request"),
-		};
-		let path = &post_build.path;
-
-		// Only allow a missing file if we are explicitly testing for existence
-		if file.is_none() && post_build.ret != FileDependencyType::Existence {
-			return Err(anyhow!("No such file or directory: {}", &path));
-		}
-
-		Ok(match post_build.ret {
-			FileDependencyType::Unit => InvokeResponse::Unit,
-			FileDependencyType::Existence => InvokeResponse::Bool(file.is_some()),
-			FileDependencyType::Contents => {
-				let file = file.ok_or_else(|| anyhow!("No file produced for target {}", &path))?;
-				let contents = if let Some(ref target) = file.target {
-					let full_path = project.dest_path(&Scoped::new(Scope::root(), target.to_owned()))?;
-					fs::read_to_string(full_path.as_ref()).with_context(||
-						format!("Can't read target {} (from {})", &path, &full_path)
-					)
-				} else {
-					fs::read_to_string(&path.0).with_context(||
-						format!("Can't read {}", &path)
-					)
-				};
-				InvokeResponse::Str(contents?)
-			},
-		})
 	}
 }

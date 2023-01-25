@@ -6,7 +6,7 @@ use serial_test::serial;
 use anyhow::*;
 use crate::build_request::BuildRequest;
 use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::Project};
-use ambl_common::{rule::dsl::*, build::{DependencyRequest, FileDependency}};
+use ambl_common::{rule::dsl::*, build::{DependencyRequest}};
 use super::util::*;
 
 use super::test_module::DEFAULT_BUILD_FN;
@@ -49,6 +49,27 @@ fn rebuild_if_dep_changes() -> Result<()> {
 		p.build_file("a")?;
 
 		eq!(p.log().reset(), vec!("built from: 2"));
+		Ok(())
+	})
+}
+
+#[test]
+#[serial]
+fn existence_check_doesnt_cause_build() -> Result<()> {
+	TestProject::in_tempdir(|p: &TestProject| {
+		p.target_builder("target", |p, c| {
+			p.record("built target");
+			c.empty_dest()
+		});
+		p.write_file("plain", "1")?;
+
+		let exists = |path: &str| {
+			p.build_dep(&DependencyRequest::FileExistence(path.to_owned()))?.into_bool()
+		};
+		eq!(exists("target")?, true);
+		eq!(exists("plain")?, true);
+		eq!(exists("no_such_file")?, false);
+		assert_prop!(p.log().reset(), Log::is_empty); // did NOT build `target`
 		Ok(())
 	})
 }

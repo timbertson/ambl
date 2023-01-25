@@ -17,14 +17,14 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use ambl_common::build::{DependencyRequest, InvokeResponse, self, FileDependency, FileDependencyType, GenCommand, FilesetDependency};
+use ambl_common::build::{DependencyRequest, InvokeResponse, self, GenCommand, FilesetDependency};
 use ambl_common::ctx::{BaseCtx, TargetCtx, Tempdir};
 use ambl_common::ffi::ResultFFI;
 use ambl_common::rule::*;
 use wasmtime::*;
 
 use crate::build::{BuildCache, BuildReason, BuildResponse};
-use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency, PostBuild};
+use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
 use crate::{err::*, path_util, fileset};
 use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::persist::*;
@@ -577,6 +577,28 @@ impl<M: BuildModule> Project<M> {
 					get_target, do_build)
 			},
 
+			BuildRequest::FileExistence(path) => {
+				BuildCache::build_simple(project, request, |project| {
+					let mut project: Mutexed<Project<M>> = project;
+					let root_rule = Arc::clone(&project.root_rule);
+					let file_simple = path.0.clone().into_simple_or_self();
+					let target: Option<FoundTarget> = match file_simple {
+						Result::Ok(ref simple) => {
+							let (project_ret, target) = Project::target(project, &root_rule, simple)?;
+							project = project_ret;
+							target
+						},
+						Result::Err(_) => None,
+					};
+					let exists = match target {
+						Some(_) => true,
+						None => path_util::lexists(path.as_path())?,
+					};
+					debug!("Path {} exists? {}", path, exists);
+					Ok((project, BuildResult::Bool(exists)))
+				})
+			},
+
 			BuildRequest::WasmCall(spec) => {
 				let do_build = |project, _ctx: &(), build_token| {
 					let mut project: Mutexed<Project<M>> = project;
@@ -607,7 +629,7 @@ impl<M: BuildModule> Project<M> {
 					Self::noop_ctx, do_build)
 			},
 			BuildRequest::Fileset(spec) => {
-				BuildCache::build_simple(project, request, || {
+				BuildCache::build_trivial(project, request, || {
 					Ok(BuildResult::Fileset(fileset::scan(spec)?))
 				})
 			},
@@ -638,7 +660,7 @@ impl<M: BuildModule> Project<M> {
 				Ok((project, BuildResponse::full(BuildResult::AlwaysClean, response)))
 			},
 			BuildRequest::EnvVar(key) => {
-				BuildCache::build_simple(project, request, || {
+				BuildCache::build_trivial(project, request, || {
 					let value = match std::env::var_os(key) {
 						Some(os) => Some(os.into_string().map_err(|_| anyhow!("${} is not valid unicode", key))?),
 						None => None,
@@ -649,7 +671,7 @@ impl<M: BuildModule> Project<M> {
 			BuildRequest::EnvLookup(lookup) => {
 				// More efficient than doing it client-side, since we only invlidate if the
 				// result changes, not the envvar
-				BuildCache::build_simple(project, request, || {
+				BuildCache::build_trivial(project, request, || {
 					let value = match std::env::var_os(&lookup.key) {
 						Some(os) => Some(os.into_string().map_err(|_| anyhow!("${} is not valid unicode", &lookup.key))?),
 						None => None,

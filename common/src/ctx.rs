@@ -4,7 +4,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::ffi::{ResultFFI, SizedPtr};
-use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, FileDependencyType, FileDependency, Invoke, InvokeAction, FilesetDependency, WriteDest, CopyFile, ReadFile};
+use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, Invoke, InvokeAction, FilesetDependency, WriteDest, CopyFile, ReadFile, FileSource};
 use crate::rule::EnvLookup;
 
 #[cfg(target_arch = "wasm32")]
@@ -80,33 +80,28 @@ impl BaseCtx {
 
 	// invoke shortcuts
 	pub fn build<S: Into<String>>(&self, path: S) -> Result<()> {
-		self.invoke_dep(DependencyRequest::FileDependency(FileDependency {
-			path: path.into(),
-			ret: FileDependencyType::Unit,
-		})).map(|ret| match ret {
-			InvokeResponse::Unit => (),
-			other => panic!("Unexpected file dependency response: {:?}", other),
-		})
+		ignore_result(self.invoke_dep(DependencyRequest::FileDependency(path.into())))
 	}
 
 	pub fn exists<S: Into<String>>(&self, path: S) -> Result<bool> {
-		self.invoke_dep(DependencyRequest::FileDependency(FileDependency {
-			path: path.into(),
-			ret: FileDependencyType::Existence,
-		})).map(|ret| match ret {
+		self.invoke_dep(DependencyRequest::FileExistence(path.into())).map(|ret| match ret {
 			InvokeResponse::Bool(b) => b,
-			other => panic!("Unexpected file dependency response: {:?}", other),
+			other => panic!("Unexpected file existence response: {:?}", other),
 		})
 	}
 
 	pub fn read_file<S: Into<String>>(&self, path: S) -> Result<String> {
-		self.invoke_dep(DependencyRequest::FileDependency(FileDependency {
-			path: path.into(),
-			ret: FileDependencyType::Contents,
-		})).map(|ret| match ret {
-			InvokeResponse::Str(s) => s,
-			other => panic!("Unexpected file dependency response: {:?}", other),
-		})
+		self.invoke_action(InvokeAction::ReadFile(ReadFile {
+			source_root: FileSource::Target(path.into()),
+			source_suffix: None,
+		}))?.into_string()
+	}
+
+	pub fn read_file_bytes<S: Into<String>>(&self, path: S) -> Result<Vec<u8>> {
+		self.invoke_action(InvokeAction::ReadFile(ReadFile {
+			source_root: FileSource::Target(path.into()),
+			source_suffix: None,
+		}))?.into_bytes()
 	}
 	
 	pub fn list_fileset(&self, fileset: FilesetDependency) -> Result<Vec<String>> {
@@ -221,7 +216,7 @@ impl Tempdir {
 	pub fn read_file<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<String> {
 		ctx.invoke(Invoke::Action(InvokeAction::ReadFile(ReadFile {
 			source_root: crate::build::FileSource::Tempdir(*self),
-			source_suffix: path.into(),
+			source_suffix: Some(path.into()),
 		})))?.into_string()
 	}
 }

@@ -4,7 +4,7 @@ use serial_test::serial;
 
 use anyhow::*;
 use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::Project};
-use ambl_common::{rule::dsl::*, build::{DependencyRequest, FileDependency}};
+use ambl_common::{rule::dsl::*, build::{DependencyRequest}};
 use super::util::*;
 
 use super::test_module::DEFAULT_BUILD_FN;

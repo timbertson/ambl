@@ -19,7 +19,8 @@ pub enum Invoke {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DependencyRequest {
 	// File (or target)
-	FileDependency(FileDependency),
+	FileDependency(String),
+	FileExistence(String),
 	
 	// an explicit method + args in a wasm module
 	WasmCall(FunctionSpec),
@@ -40,7 +41,7 @@ pub struct TaggedInvoke {
 }
 
 // response types corresponding to the above
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InvokeResponse {
 	Unit,
 	Bool(bool),
@@ -127,24 +128,6 @@ impl TryInto<u32> for InvokeResponse {
 			other => Err(anyhow!("Expected Resource, got {:?}", other)),
 		}
 	}
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct FileDependency {
-	pub path: String,
-	pub ret: FileDependencyType,
-}
-impl FileDependency {
-	pub fn new(path: String) -> Self {
-		Self { path, ret: FileDependencyType::Unit }
-	}
-}
-
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum FileDependencyType {
-	Unit, // just depend on it
-	Existence, // check existence
-	Contents, // return contents
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -376,10 +359,9 @@ pub struct CopyFile {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-// TODO can this replace PostBuildAction?
 pub struct ReadFile {
 	pub source_root: FileSource,
-	pub source_suffix: String,
+	pub source_suffix: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

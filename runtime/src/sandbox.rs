@@ -5,7 +5,7 @@ use std::io::{Read, Stdin};
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use ambl_common::build::{self, FileDependency, GenCommand, InvokeResponse};
+use ambl_common::build::{self, GenCommand, InvokeResponse};
 
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
@@ -71,7 +71,7 @@ impl Sandbox {
 						.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
 						.raw();
 					match &persist.result {
-						BuildResult::File(Some(_)) => {
+						BuildResult::File(_) => {
 							dest.insert(rel);
 						},
 						BuildResult::Target(file) => {
