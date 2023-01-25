@@ -209,7 +209,6 @@ and is stored in the cache (in BuildResultWithDeps).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BuildResult {
 	File(PersistFile),
-	Target(PersistFile), // TODO can we just use File() variant here?
 	Env(Option<String>),
 	Bool(bool),
 	Fileset(Vec<String>),
@@ -228,9 +227,6 @@ impl BuildResult {
 		match (self, prior) {
 			(File(a), File(b)) => a != b,
 			(File(_), _) => incompatible(),
-
-			(Target(a), Target(b)) => a != b,
-			(Target(_), _) => incompatible(),
 
 			(Bool(a), Bool(b)) => a != b,
 			(Bool(_), _) => incompatible(),

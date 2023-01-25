@@ -549,7 +549,7 @@ impl<M: BuildModule> Project<M> {
 							let stat = fs::symlink_metadata(&dest_path)?;
 
 							BuildResultWithDeps {
-								result: BuildResult::Target(PersistFile::from_stat(stat, Some(name_scoped.flatten()))?),
+								result: BuildResult::File(PersistFile::from_stat(stat, Some(name_scoped.flatten()))?),
 								deps: Some(project.collect_deps(build_token)?),
 							}
 						} else {

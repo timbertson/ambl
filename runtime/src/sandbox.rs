@@ -71,15 +71,15 @@ impl Sandbox {
 						.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
 						.raw();
 					match &persist.result {
-						BuildResult::File(_) => {
-							dest.insert(rel);
-						},
-						BuildResult::Target(file) => {
+						BuildResult::File(file) => {
 							if let Some(output) = file.target.to_owned() {
 								// don't use `target`, use the shadow path within .ambl/out/`target`
 								let unscoped = project.dest_path(&Scoped::root(output))?;
 								let simple = unscoped.0.into_simple()?;
 								dest.insert(simple);
+							} else {
+								// normal file
+								dest.insert(rel);
 							}
 							// TODO don't include transitive deps if there is a checksum
 							for (key, _) in persist.require_deps()?.iter() {

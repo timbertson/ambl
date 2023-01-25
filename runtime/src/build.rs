@@ -219,7 +219,7 @@ impl BuildResponse {
 	
 	pub fn as_target(&self) -> Option<&Simple> {
 		match self.result {
-			BuildResult::Target(ref t) => t.target.as_ref(),
+			BuildResult::File(ref f) => f.target.as_ref(),
 			_ => None,
 		}
 	}
@@ -232,7 +232,6 @@ impl BuildResponse {
 		} else {
 			match result {
 				File(file) => Ok(InvokeResponse::Unit),
-				Target(file) => Ok(InvokeResponse::Unit),
 				Bool(b) => Ok(InvokeResponse::Bool(b)),
 				Fileset(fileset) => Ok(InvokeResponse::StrVec(fileset)),
 				Env(env) => Ok(InvokeResponse::StrOpt(env)),

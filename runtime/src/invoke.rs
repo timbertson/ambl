@@ -104,7 +104,6 @@ fn source_path<'a, M: BuildModule>(
 			let (project_ret, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
 			project = project_ret;
 			let target = match persist.result {
-				BuildResult::Target(t) => t.target,
 				BuildResult::File(t) => t.target,
 				_ => None,
 			};
