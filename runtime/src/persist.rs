@@ -1,6 +1,7 @@
 use ambl_common::ctx::Tempdir;
 use log::*;
-use ambl_common::build::FileSelection;
+use ambl_common::build::{FileSelection, ChecksumConfig};
+use std::os::unix::prelude::OsStringExt;
 use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
 
 use anyhow::*;
@@ -13,23 +14,91 @@ use crate::path_util::{Simple, Scoped, CPath, Unscoped, ResolveModule, self};
 use crate::module::BuildModule;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PersistFile {
-	pub mtime: u128,
-	pub target: Option<Simple>,
-	// TODO add hash for checksumming
+pub enum PersistChecksum {
+	File(Checksum),
+	BrokenSymlink,
+	Disabled,
 }
-impl PersistFile {
-	pub fn from_stat(stat: fs::Metadata, target: Option<Simple>) -> Result<Self> {
-		let mtime = stat.modified()?.duration_since(UNIX_EPOCH)?.as_millis();
-		Ok(Self { mtime, target })
-	}
 
-	pub fn from_path<P: AsRef<Path>>(p: P, target: Option<Simple>) -> Result<Self> {
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Mtime(pub u128);
+impl Mtime {
+	fn from_stat(stat: &fs::Metadata) -> Result<Self> {
+		Ok(Self(stat.modified()?.duration_since(UNIX_EPOCH)?.as_millis()))
+	}
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Checksum(pub u32);
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SymlinkStat {
+	canonical: String,
+	mtime: Option<Mtime>, // None for broken symlinks, since we only care about the mtime of the canonical destination
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FileStat {
+	File(Mtime),
+	Symlink(SymlinkStat),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistFile {
+	pub stat: FileStat,
+	pub target: Option<Simple>,
+	pub checksum: PersistChecksum,
+}
+
+impl PersistFile {
+	fn compute_checksum(p: &Path) -> Result<Checksum> {
+		Ok(Checksum(crc32fast::hash(&fs::read(p)?)))
+	}
+	
+	pub fn from_path<P: AsRef<Path>>(p: P, target: Option<Simple>, checksum_config: ChecksumConfig) -> Result<Self> {
 		let p = p.as_ref();
-		match fs::symlink_metadata(p) {
-			Result::Ok(stat) => Ok(Self::from_stat(stat, target)?),
-			Result::Err(err) if err.kind() == io::ErrorKind::NotFound => Err(anyhow!("No such file: {}", p.display())),
-			Result::Err(err) => Err(err).with_context(|| format!("Reading {}", p.display())),
+		match path_util::lstat_opt(p)? {
+			Some(lstat) => {
+				// TODO race condition between stat & canonicalize?
+				
+				let trivial_checksum = match checksum_config {
+					ChecksumConfig::Enabled => None,
+					ChecksumConfig::Disabled => Some(PersistChecksum::Disabled),
+				};
+				let (stat, trivial_checksum) = if lstat.is_symlink() {
+					let dest_stat = path_util::fsopt(p, fs::metadata(p))?;
+
+					let canonical = path_util::string_of_pathbuf(fs::canonicalize(p)?);
+					match dest_stat {
+						Some(dest_stat) => {
+							let file_stat = FileStat::Symlink(SymlinkStat {
+								canonical,
+								mtime: Some(Mtime::from_stat(&dest_stat)?)
+							});
+							(file_stat, trivial_checksum)
+						},
+						None => {
+							let file_stat = FileStat::Symlink(SymlinkStat { canonical, mtime: None });
+							let trivial_checksum = Some(trivial_checksum.unwrap_or(PersistChecksum::BrokenSymlink));
+							(file_stat, trivial_checksum)
+						},
+					}
+				} else {
+					(FileStat::File(Mtime::from_stat(&lstat)?), trivial_checksum)
+				};
+
+				let checksum = match trivial_checksum {
+					Some(c) => c,
+					None => PersistChecksum::File(Self::compute_checksum(p)?),
+				};
+
+				Ok(Self {
+					stat,
+					checksum,
+					target,
+				})
+			},
+			None => Err(anyhow!("No such file: {}", p.display())),
 		}
 	}
 }
@@ -188,10 +257,6 @@ impl BuildResultWithDeps {
 	pub fn simple(result: BuildResult) -> BuildResultWithDeps {
 		BuildResultWithDeps { result, deps: None }
 	}
-	
-	pub fn require_deps(&self) -> Result<&DepSet> {
-		self.deps.as_ref().ok_or_else(|| anyhow!("BuildResult {:?} has no deps", &self.result))
-	}
 }
 
 impl std::ops::Deref for BuildResultWithDeps {
@@ -218,45 +283,74 @@ pub enum BuildResult {
 }
 
 impl BuildResult {
-	pub fn has_changed_since(&self, prior: &Self) -> bool {
-		let incompatible = || {
-			debug!("Comparing incompatible persisted dependencies: ({:?}, {:?})", self, prior);
-			true
+	pub fn is_equivalent_to(&self, prior: &Self) -> bool {
+		let result = {
+			let incompatible = || {
+				debug!("Comparing incompatible persisted dependencies: ({:?}, {:?})", self, prior);
+				false
+			};
+			use BuildResult::*;
+			match (self, prior) {
+				(File(a), File(b)) => {
+					let PersistFile { checksum: checksum_a, stat: stat_a, target: target_a } = a;
+					let PersistFile { checksum: checksum_b, stat: stat_b, target: target_b } = b;
+					if target_a != target_b {
+						// If the target differs, always consider it changed
+						// We could possibly make this return true under certain conditions
+						// but it's rare enough not to bother.
+						false
+					} else if stat_a == stat_b {
+						// not modified, don't need to test checksums
+						true
+					} else {
+						// file might have changed, compare checksums.
+						match (checksum_a, checksum_b) {
+							// If either old or new is disabled, disregard checksum
+							(PersistChecksum::Disabled, _) | (_, PersistChecksum::Disabled) => false,
+							
+							(checksum_a, checksum_b) => checksum_a == checksum_b,
+						}
+					}
+				},
+				(File(_), _) => incompatible(),
+
+				(Bool(a), Bool(b)) => a == b,
+				(Bool(_), _) => incompatible(),
+
+				(Env(a), Env(b)) => a == b,
+				(Env(_), _) => incompatible(),
+
+				(Wasm(a), Wasm(b)) => a == b,
+				(Wasm(_), _) => incompatible(),
+
+				(Fileset(a), Fileset(b)) => a == b,
+				(Fileset(_), _) => incompatible(),
+
+				(AlwaysDirty, AlwaysDirty) => false,
+				(AlwaysDirty, _) => incompatible(),
+
+				(AlwaysClean, AlwaysClean) => true,
+				(AlwaysClean, _) => incompatible(),
+			}
 		};
-		use BuildResult::*;
-		match (self, prior) {
-			(File(a), File(b)) => a != b,
-			(File(_), _) => incompatible(),
-
-			(Bool(a), Bool(b)) => a != b,
-			(Bool(_), _) => incompatible(),
-
-			(Env(a), Env(b)) => a != b,
-			(Env(_), _) => incompatible(),
-
-			(Wasm(a), Wasm(b)) => a != b,
-			(Wasm(_), _) => incompatible(),
-
-			(Fileset(a), Fileset(b)) => a != b,
-			(Fileset(_), _) => incompatible(),
-
-			(AlwaysDirty, AlwaysDirty) => true,
-			(AlwaysDirty, _) => incompatible(),
-
-			(AlwaysClean, AlwaysClean) => false,
-			(AlwaysClean, _) => incompatible(),
-		}
+		debug!("is_equivalent_to({:?}, {:?}) -> {:?}", self, prior, result);
+		result
 	}
 }
+
 
 // the in-memory struct to collect deps during the build of a target.
 // it's stored in Project, keyed by ActiveBuildToken
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DepSet {
 	pub deps: Vec<(BuildRequest, BuildResult)>,
+	pub checksum: ChecksumConfig,
 }
 
-const EMPTY_DEPSET: DepSet = DepSet { deps: Vec::new() };
+const EMPTY_DEPSET: DepSet = DepSet {
+	deps: Vec::new(),
+	checksum: ChecksumConfig::Enabled,
+};
 const EMPTY_DEPSET_PTR: &'static DepSet = &EMPTY_DEPSET;
 
 impl DepSet {
@@ -289,7 +383,10 @@ impl DepSet {
 
 impl Default for DepSet {
 	fn default() -> Self {
-		Self { deps: Default::default() }
+		Self {
+			deps: Default::default(),
+			checksum: Default::default(),
+		}
 	}
 }
 
@@ -310,6 +407,10 @@ impl ActiveBuildState {
 
 	pub fn deps(&self) -> &DepSet {
 		&self.deps
+	}
+
+	pub fn configure_checksum(&mut self, config: ChecksumConfig) {
+		self.deps.checksum = config;
 	}
 
 	pub fn get_tempdir(&self, tempdir: Tempdir) -> Result<&Path> {

@@ -5,7 +5,7 @@ use std::io::{Read, Stdin};
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use ambl_common::build::{self, GenCommand, InvokeResponse};
+use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig};
 
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
@@ -76,14 +76,24 @@ impl Sandbox {
 								// don't use `target`, use the shadow path within .ambl/out/`target`
 								let unscoped = project.dest_path(&Scoped::root(output))?;
 								let simple = unscoped.0.into_simple()?;
+								debug!("Adding target to sandbox: {}", &simple);
 								dest.insert(simple);
 							} else {
 								// normal file
+								debug!("Adding file to sandbox: {}", &rel);
 								dest.insert(rel);
 							}
-							// TODO don't include transitive deps if there is a checksum
-							for (key, _) in persist.require_deps()?.iter() {
-								Self::collect_paths(project, dest, key)?;
+							if let Some(deps) = &persist.deps {
+								// don't include transitive deps if there is a checksum,
+								// as that may be impure
+								match deps.checksum {
+									ChecksumConfig::Enabled => (),
+									ChecksumConfig::Disabled => {
+										for (key, _) in deps.iter() {
+											Self::collect_paths(project, dest, key)?;
+										}
+									}
+								}
 							}
 						},
 						_ => (),

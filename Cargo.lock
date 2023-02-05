@@ -80,6 +80,7 @@ version = "0.1.0"
 dependencies = [
  "ambl-common",
  "anyhow",
+ "crc32fast",
  "ctor",
  "env_logger",
  "glob",

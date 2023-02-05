@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::*;
 use log::*;
-use ambl_common::build::{InvokeResponse, InvokeAction, Invoke, WriteDest, FileSource, DependencyRequest};
+use ambl_common::build::{InvokeResponse, InvokeAction, Invoke, WriteDest, FileSource, DependencyRequest, ChecksumConfig};
 
 use crate::build::{BuildReason, BuildResponse};
 use crate::build_request::BuildRequest;
@@ -37,7 +37,7 @@ pub fn perform<'a, M: BuildModule>(
 }
 
 fn perform_invoke<M: BuildModule>(
-	project: ProjectMutex<M>,
+	mut project: ProjectMutex<M>,
 	module_path: &Unscoped,
 	scope: &Scope,
 	token: ActiveBuildToken,
@@ -61,6 +61,17 @@ fn perform_invoke<M: BuildModule>(
 				}
 				fs::write(path.as_path(), &f.contents)
 					.with_context(|| format!("Writing file {}", &path))?;
+				if f.contents.is_empty() {
+					// targets with output might want to disable checksums, but targets with empty
+					// outpt never make sense to checksum
+					project.configure_checksum(token, ChecksumConfig::Disabled);
+				}
+				Ok(InvokeResponse::Unit)
+			},
+
+			InvokeAction::ConfigureChecksum(enabled) => {
+				let config = if *enabled { ChecksumConfig::Enabled } else { ChecksumConfig::Disabled };
+				project.configure_checksum(token, config);
 				Ok(InvokeResponse::Unit)
 			},
 

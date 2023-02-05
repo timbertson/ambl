@@ -337,11 +337,24 @@ impl Default for Stdin {
 	}
 }
 
+#[derive(Copy, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChecksumConfig {
+	Enabled,
+	Disabled,
+}
+
+impl Default for ChecksumConfig {
+	fn default() -> Self {
+		ChecksumConfig::Enabled
+	}
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum InvokeAction {
 	WriteDest(WriteDest),
 	ReadFile(ReadFile),
 	CopyFile(CopyFile),
+	ConfigureChecksum(bool),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

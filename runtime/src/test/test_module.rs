@@ -1,6 +1,8 @@
 use ambl_common::build::{InvokeAction, ReadFile, FileSource};
 use ambl_common::ffi::ResultFFI;
 use log::*;
+use std::fs::OpenOptions;
+use std::os::unix;
 use std::{ops::{Deref, DerefMut}, path::PathBuf};
 use serde::{de::DeserializeOwned, Serialize};
 use core::fmt;
@@ -14,7 +16,7 @@ use wasmtime::Engine;
 use crate::build::BuildReason;
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
 use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project};
-use crate::persist::{PersistFile, BuildResult, BuildResultWithDeps};
+use crate::persist::{PersistFile, BuildResult, BuildResultWithDeps, FileStat, Mtime, PersistChecksum};
 use crate::module::BuildModule;
 use crate::sync::{Mutexed, MutexHandle};
 use crate::err::result_block;
@@ -274,7 +276,11 @@ pub struct TestProject<'a> {
 	monotonic_clock: AtomicUsize,
 }
 
-const FAKE_FILE: PersistFile = PersistFile { mtime: 0, target: None };
+const FAKE_FILE: PersistFile = PersistFile {
+	stat: FileStat::File(Mtime(0)),
+	target: None,
+	checksum: PersistChecksum::Disabled,
+};
 
 impl<'a> TestProject<'a> {
 	fn reset(&self) {
@@ -383,8 +389,9 @@ impl<'a> TestProject<'a> {
 	pub fn touch_fake<S: Into<String>>(&self, v: S) -> &Self {
 		let mut p = self.lock();
 		let stat = PersistFile {
-			mtime: self.monotonic_clock.fetch_add(1, Ordering::Relaxed) as u128,
+			stat: FileStat::File(Mtime(self.monotonic_clock.fetch_add(1, Ordering::Relaxed) as u128)),
 			target: None,
+			checksum: PersistChecksum::Disabled,
 		};
 		p.inject_cache(
 			BuildRequest::FileDependency(Unscoped::new(v.into())),
@@ -445,6 +452,19 @@ impl<'a> TestProject<'a> {
 		fs::create_dir_all(pb.parent().unwrap())?;
 		let path = path.as_ref();
 		fs::write(path, contents).with_context(|| format!("Writing file {:?}", path))?;
+		Ok(self)
+	}
+
+	pub fn write_symlink<P1: AsRef<Path>, P2: AsRef<Path>>(&self, path: P1, dest: P2) -> Result<&Self> {
+		debug!("Testcase is writing symlink {} -> {}",
+			path.as_ref().display(),
+			dest.as_ref().display(),
+		);
+		let pb = path.as_ref().to_owned();
+		fs::create_dir_all(pb.parent().unwrap())?;
+		let path = path.as_ref();
+		let dest = dest.as_ref();
+		unix::fs::symlink(dest, path).with_context(|| format!("Symlinking {:?} -> {:?}", path, dest))?;
 		Ok(self)
 	}
 

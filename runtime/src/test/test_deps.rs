@@ -55,6 +55,32 @@ fn rebuild_if_dep_changes() -> Result<()> {
 
 #[test]
 #[serial]
+fn file_updated_with_identical_contents_doesnt_cause_rebuild() -> Result<()> {
+	TestProject::in_tempdir(|p: &TestProject| {
+		p.target_builder("a", |p, c| {
+			let contents = c.read_file("dep")?;
+			p.record(format!("built from: {}", contents));
+			c.empty_dest()
+		});
+		p.write_file("dep", "1")?;
+
+		p.build_file("a")?;
+		p.build_file("a")?;
+		eq!(p.log().reset(), vec!("built from: 1"));
+		
+		println!("");
+
+		p.write_file("dep", "2")?;
+		p.build_file("a")?;
+		p.build_file("a")?;
+
+		eq!(p.log().reset(), vec!("built from: 2"));
+		Ok(())
+	})
+}
+
+#[test]
+#[serial]
 fn existence_check_doesnt_cause_build() -> Result<()> {
 	TestProject::in_tempdir(|p: &TestProject| {
 		p.target_builder("target", |p, c| {

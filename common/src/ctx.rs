@@ -123,6 +123,10 @@ impl BaseCtx {
 	pub fn always_rebuild(&self) -> Result<()> {
 		ignore_result(self.invoke_dep(DependencyRequest::Universe))
 	}
+
+	pub fn disable_checksum(&self) -> Result<()> {
+		ignore_result(self.invoke_action(InvokeAction::ConfigureChecksum(false)))
+	}
 }
 
 impl AsRef<BaseCtx> for BaseCtx {

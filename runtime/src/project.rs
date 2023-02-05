@@ -17,7 +17,7 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use ambl_common::build::{DependencyRequest, InvokeResponse, self, GenCommand, FilesetDependency};
+use ambl_common::build::{DependencyRequest, InvokeResponse, self, GenCommand, FilesetDependency, ChecksumConfig};
 use ambl_common::ctx::{BaseCtx, TargetCtx, Tempdir};
 use ambl_common::ffi::ResultFFI;
 use ambl_common::rule::*;
@@ -546,11 +546,14 @@ impl<M: BuildModule> Project<M> {
 									return Err(anyhow!("Builder for {:?} didn't produce an output file. Use `ctx.empty_dest()` if this is intentional", &name_scoped))?;
 								},
 							}
-							let stat = fs::symlink_metadata(&dest_path)?;
-
+							let deps = project.collect_deps(build_token)?;
 							BuildResultWithDeps {
-								result: BuildResult::File(PersistFile::from_stat(stat, Some(name_scoped.flatten()))?),
-								deps: Some(project.collect_deps(build_token)?),
+								result: BuildResult::File(PersistFile::from_path(
+									&dest_path,
+									Some(name_scoped.flatten()),
+									deps.checksum
+								)?),
+								deps: Some(deps),
 							}
 						} else {
 							debug!("Treating dependency as a plain file: {:?}", &request);
@@ -560,7 +563,9 @@ impl<M: BuildModule> Project<M> {
 								},
 								_ => {
 									// treat it as a source file
-									BuildResultWithDeps::simple(BuildResult::File(PersistFile::from_path(cpath_ref, None)?))
+									BuildResultWithDeps::simple(BuildResult::File(
+										PersistFile::from_path(cpath_ref, None, ChecksumConfig::default())?
+									))
 								},
 							}
 						};
@@ -570,8 +575,6 @@ impl<M: BuildModule> Project<M> {
 					))
 				};
 				
-				// NOTE: scope needs to be for the TARGET, not the name.
-				// But only a buildable has that....
 				BuildCache::build_with_deps(
 					project, reason, request,
 					get_target, do_build)
@@ -735,6 +738,12 @@ impl<M: BuildModule> Project<M> {
 		Ok(())
 	}
 	
+	pub fn configure_checksum(&mut self, token: ActiveBuildToken, config: ChecksumConfig) -> () {
+		debug!("configuring checksum config {:?} for build {:?}", config, token);
+		let parent_dep_set = self.active_tasks.entry(token).or_insert_with(Default::default);
+		parent_dep_set.configure_checksum(config);
+	}
+
 	fn keep_tempdir(&mut self, parent: Option<ActiveBuildToken>, tmp: tempdir::TempDir) -> Result<Tempdir> {
 		let parent = parent.ok_or_else(|| anyhow!("Can't collect tempdir; no parent token"))?;
 		let parent_dep_set = self.active_tasks.entry(parent).or_insert_with(Default::default);

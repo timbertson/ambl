@@ -81,10 +81,15 @@ fn ensure_writeable(path: &Path, stat: &Metadata) -> Result<()> {
 }
 
 pub fn lstat_opt<P: AsRef<Path>>(p: P) -> Result<Option<fs::Metadata>> {
-	match p.as_ref().symlink_metadata() {
-		Result::Ok(m) => Ok(Some(m)),
+	let p = p.as_ref();
+	Ok(fsopt(p, p.symlink_metadata())?)
+}
+
+pub fn fsopt<P: AsRef<Path>, T>(p: P, result: io::Result<T>) -> Result<Option<T>> {
+	match result {
+		Result::Ok(x) => Ok(Some(x)),
 		Result::Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-		Result::Err(e) => Err(e.into()),
+		Result::Err(e) => Err(e).with_context(|| format!("Accessing {}", p.as_ref().display())),
 	}
 }
 

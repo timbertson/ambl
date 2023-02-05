@@ -94,9 +94,11 @@ impl BuildCache {
 		let needs_rebuild = |project, ctx: &Ctx, cached: &BuildResultWithDeps| {
 			// if cached value doesn't have deps, it may have been e.g. a File which has now become a Target
 			if let Some(ref deps) = cached.deps {
-				return Self::requires_build(project, cached.require_deps()?);
+				Self::requires_build(project, deps)
+			} else {
+				debug!("cached {:?} needs rebuild because it has no stored deps", cached);
+				Ok((project, true))
 			}
-			Ok((project, true))
 		};
 		Self::build_full(project, key, get_ctx, needs_rebuild, build_fn)
 	}
@@ -122,6 +124,7 @@ impl BuildCache {
 
 			Some(Cached::Cached(cached)) => {
 				let (project_ret, ctx) = get_ctx(project)?;
+				debug!("Checking if rebuild is needed for {:?}", &cached);
 				let (project_ret, needs_build) = needs_rebuild(project_ret, &ctx, &cached)?;
 				project = project_ret;
 				if !needs_build {
@@ -182,7 +185,7 @@ impl BuildCache {
 			project = project_ret;
 			
 			// if the result differs from what this target was based on, rebuild this target
-			if dep_latest.result.has_changed_since(dep_cached) {
+			if !dep_latest.result.is_equivalent_to(dep_cached) {
 				debug!("Dependency {:?} state ({:?}) has changed since ({:?}); triggering rebuild of parent",
 					dep_key,
 					&dep_latest.result,
