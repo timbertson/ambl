@@ -33,10 +33,7 @@ fn run_can_only_see_dependencies() -> Result<()> {
 			c.build("checksum")?;
 			c.build("plain_file_dep")?;
 			let files = c.run(cmd("ls").arg("-1").stdout(Stdout::String))?.into_string()?;
-			
-			// TODO should .ambl/out be symlinked directly into the tempdir?
-			let targets = c.run(cmd("ls").arg("-1").arg(".ambl/out").stdout(Stdout::String))?.into_string()?;
-			let mut lines: Vec<&str> = files.lines().filter(|l| !l.ends_with(".wasm")).chain(targets.lines()).collect();
+			let mut lines: Vec<&str> = files.lines().filter(|l| !l.ends_with(".wasm")).collect();
 			lines.sort();
 			for line in lines {
 				p.record(line);

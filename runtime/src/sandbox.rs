@@ -1,5 +1,6 @@
 use log::*;
 use tempdir::TempDir;
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Stdin};
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
@@ -26,10 +27,10 @@ struct Roots {
 }
 
 impl Sandbox {
-	fn install_symlink(roots: &Roots, rel: &Simple) -> Result<()> {
+	fn install_symlink(roots: &Roots, rel: &Simple, dest_rel: Option<&Simple>) -> Result<()> {
 		result_block(|| {
 			let link = roots.tmp.join(rel);
-			let target = roots.project.join(rel);
+			let target = roots.project.join(dest_rel.unwrap_or(rel));
 			Self::_link(roots, link, target)
 		}).with_context(|| format!("Installing symlink {:?} (in root {:?})", rel, roots.tmp))
 	}
@@ -58,13 +59,13 @@ impl Sandbox {
 
 	fn collect_paths<'a, 'b, M: BuildModule>(
 		project: &'a Project<M>,
-		dest: &mut HashSet<Simple>,
+		dest: &mut HashMap<Simple, Option<Simple>>,
 		key: &'b BuildRequest,
 	) -> Result<()> where 'a : 'b {
 		match key {
 			BuildRequest::FileDependency(cpath) => {
 				if let Result::Ok(rel) = cpath.to_owned().0.into_simple() {
-					if dest.contains(&rel) {
+					if dest.contains_key(&rel) {
 						return Ok(());
 					}
 					let persist = project.lookup(&key)?
@@ -76,12 +77,12 @@ impl Sandbox {
 								// don't use `target`, use the shadow path within .ambl/out/`target`
 								let unscoped = project.dest_path(&Scoped::root(output))?;
 								let simple = unscoped.0.into_simple()?;
-								debug!("Adding target to sandbox: {}", &simple);
-								dest.insert(simple);
+								debug!("Adding target to sandbox: {} ({})", &rel, &simple);
+								dest.insert(rel, Some(simple));
 							} else {
 								// normal file
 								debug!("Adding file to sandbox: {}", &rel);
-								dest.insert(rel);
+								dest.insert(rel, None);
 							}
 							if let Some(deps) = &persist.deps {
 								// don't include transitive deps if there is a checksum,
@@ -176,8 +177,8 @@ impl Sandbox {
 			// all directories the command shoulnd't have access to
 
 			debug!("Installing {} symlinks", rel_paths.len());
-			for rel in rel_paths {
-				Self::install_symlink(&roots, &rel.to_owned().into())?;
+			for (k, v) in rel_paths {
+				Self::install_symlink(&roots, &k, v.as_ref())?;
 			}
 
 			debug!("Installing {} symlinks to impure_shared_dirs", impure_share_dirs.len());
