@@ -275,6 +275,7 @@ and is stored in the cache (in BuildResultWithDeps).
 pub enum BuildResult {
 	File(PersistFile),
 	Env(Option<String>),
+	EnvKeys(Vec<String>),
 	Bool(bool),
 	Fileset(Vec<String>),
 	Wasm(serde_json::Value),
@@ -319,6 +320,9 @@ impl BuildResult {
 
 				(Env(a), Env(b)) => a == b,
 				(Env(_), _) => incompatible(),
+
+				(EnvKeys(a), EnvKeys(b)) => a == b,
+				(EnvKeys(_), _) => incompatible(),
 
 				(Wasm(a), Wasm(b)) => a == b,
 				(Wasm(_), _) => incompatible(),

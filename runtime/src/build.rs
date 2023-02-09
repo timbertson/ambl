@@ -238,6 +238,7 @@ impl BuildResponse {
 				Bool(b) => Ok(InvokeResponse::Bool(b)),
 				Fileset(fileset) => Ok(InvokeResponse::StrVec(fileset)),
 				Env(env) => Ok(InvokeResponse::StrOpt(env)),
+				EnvKeys(env) => Ok(InvokeResponse::StrVec(env)),
 				Wasm(wasm) => Ok(InvokeResponse::Str(serde_json::to_string(&wasm)?)),
 				AlwaysDirty => Ok(InvokeResponse::Unit),
 				AlwaysClean => Ok(InvokeResponse::Unit),

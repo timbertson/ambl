@@ -26,7 +26,11 @@ pub enum DependencyRequest {
 	WasmCall(FunctionSpec),
 
 	EnvVar(String),
+	EnvKeys(String),
+
+	// lookup the first matching on $PATH, for example
 	EnvLookup(EnvLookup),
+
 	Fileset(FilesetDependency),
 	Execute(Command),
 	Universe,
@@ -246,12 +250,22 @@ impl Command {
 		self
 	}
 
-	pub fn env<V: IntoIterator<Item=(String, String)>>(mut self, v: V) -> Self {
+	pub fn env<S1: Into<String>, S2: Into<String>>(mut self, k: S1, v: S2) -> Self {
+		self.env.insert(k.into(), v.into());
+		self
+	}
+
+	pub fn envs<V: IntoIterator<Item=(String, String)>>(mut self, v: V) -> Self {
 		self.env.extend(v.into_iter());
 		self
 	}
 
-	pub fn env_inherit<S: Into<String>, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
+	pub fn env_inherit<S: Into<String>>(mut self, k: S) -> Self {
+		self.env_inherit.push(k.into());
+		self
+	}
+	
+	pub fn envs_inherit<S: Into<String>, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
 		self.env_inherit.extend(v.into_iter().map(|s| s.into()));
 		self
 	}

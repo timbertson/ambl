@@ -120,6 +120,10 @@ impl BaseCtx {
 		self.invoke_dep(DependencyRequest::EnvVar(key.into()))?.into_string()
 	}
 
+	pub fn env_keys<S: Into<String>>(&self, glob: S) -> Result<Vec<String>> {
+		self.invoke_dep(DependencyRequest::EnvKeys(glob.into()))?.into_string_vec()
+	}
+
 	pub fn always_rebuild(&self) -> Result<()> {
 		ignore_result(self.invoke_dep(DependencyRequest::Universe))
 	}

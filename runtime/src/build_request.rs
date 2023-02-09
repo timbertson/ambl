@@ -19,6 +19,7 @@ pub enum BuildRequest {
 	FileExistence(Unscoped),
 	WasmCall(ResolvedFnSpec<'static>),
 	EnvVar(String),
+	EnvKeys(String),
 	EnvLookup(EnvLookup),
 	Fileset(ResolvedFilesetDependency),
 	Execute(GenCommand<Unscoped>),
@@ -39,6 +40,7 @@ impl BuildRequest {
 			DependencyRequest::WasmCall(v) =>
 				Self::WasmCall(ResolvedFnSpec::from_explicit_fn_name(v, source_module, scope.clone())?),
 			DependencyRequest::EnvVar(v) => Self::EnvVar(v),
+			DependencyRequest::EnvKeys(v) => Self::EnvKeys(v),
 			DependencyRequest::EnvLookup(v) => Self::EnvLookup(v),
 			DependencyRequest::Fileset(v) => {
 				let FilesetDependency { root, dirs, files } = v;

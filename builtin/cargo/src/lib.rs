@@ -2,78 +2,6 @@ use anyhow::*;
 use serde::{Deserialize, Serialize};
 use ambl_api::*;
 
-
-/*
-
-Target structure:
-
-workspace-meta
-Cargo.lock
-
-module/{crate}
-sources/{crate}
-
-Everything depends on workspace-meta.
-
-All cargo commands run with --frozen and depend on the lockfile, _aside_ from the lockfile rule itself.
-
-*/
-
-// TODO how do we share this struct nicely without
-// - making a second crate containing just the struct
-// - exposing internal functions (like `cargo`) on any module that depends on us
-// #[derive(Clone, Debug, Serialize, Deserialize)]
-// #[serde(deny_unknown_fields)]
-// pub struct CargoOpts {
-// 	package: Option<String>,
-// 	package_path: Option<String>,
-// }
-
-// impl Default for CargoOpts {
-// 	fn default() -> Self {
-// 		Self {
-// 			package: Default::default(),
-// 			package_path: Default::default(),
-// 		}
-// 	}
-// }
-
-// impl CargoOpts {
-// 	fn init<C: AsRef<BaseCtx>>(c: C) -> Result<Self> {
-// 		let c = c.as_ref();
-// 		let opts: CargoOpts = c.parse_config()?;
-// 		Ok(opts)
-// 	}
-
-// 	fn package<C: AsRef<BaseCtx>>(&self, c: C) -> Result<String> {
-// 		let prefix = self.package_path.as_deref().unwrap_or(".");
-// 		let cargo_contents = c.as_ref().read_file(format!("{}/Cargo.toml", prefix))?;
-// 		let toml: CargoMinimal = toml::from_str(&cargo_contents)?;
-// 		Ok(toml.package.name)
-// 	}
-// }
-
-// #[derive(Serialize, Deserialize)]
-// struct CargoPackage {
-// 	name: String,
-// }
-
-// #[derive(Serialize, Deserialize)]
-// struct CargoMinimal {
-// 	package: CargoPackage,
-// }
-
-#[derive(Deserialize, Serialize)]
-struct UserConfig {
-	root: String,
-}
-
-impl Default for UserConfig {
-	fn default() -> Self {
-		Self { root: "..".to_owned() }
-	}
-}
-
 #[derive(Deserialize, Serialize)]
 struct ModuleConfig {
 	name: String,
@@ -88,7 +16,6 @@ impl Default for ModuleConfig {
 #[derive(Deserialize)]
 struct CargoMetaMinimal {
 	packages: Vec<CargoMetaPackage>,
-	// workspace_root: String,
 }
 
 #[derive(Deserialize)]
@@ -143,7 +70,6 @@ fn build_workspace_meta(c: TargetCtx) -> Result<()> {
 
 fn workspace_meta<C: AsRef<BaseCtx>>(c: C) -> Result<CargoMetaMinimal> {
 	let c = c.as_ref();
-	// TODO mark with checksum?
 	let contents = c.read_file("workspace-meta")?;
 	Ok(serde_json::from_str(&contents).with_context(|| contents.clone())?)
 }
@@ -212,20 +138,19 @@ pub fn module_build(c: TargetCtx) -> Result<()> {
 		c.build(format!("module/{}", &name))?;
 	}
 	c.build(format!("sources/{}", &conf.name))?;
+
 	let tmp = c.run(cargo(&c)?
-		// TODO run this with lock, but update the lock explicitly
 		.args(vec!("build", "--target", "wasm32-unknown-unknown", "--package"))
 		.arg(&conf.name)
+		
+		.env_inherit("PATH")
+		// TODO this feels very generic
+		.envs_inherit(c.env_keys("NIX_*")?)
 		.impure_share_dir("target")
 	)?.into_tempdir()?;
 
-	// debug("here?");
-	// let lockfile = tmp.read_file(&c, "Cargo.lock").context("read lock")?;
-	// debug(&lockfile);
-
 	// TODO full cargo substitution logic
 	tmp.copy_to_dest(&c, format!("target/wasm32-unknown-unknown/debug/{}.wasm", conf.name.replace("-", "_")))?;
-	// Err(anyhow!("TODO"))
 	Ok(())
 }
 

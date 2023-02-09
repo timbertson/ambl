@@ -671,6 +671,17 @@ impl<M: BuildModule> Project<M> {
 					Ok(BuildResult::Env(value))
 				})
 			},
+			BuildRequest::EnvKeys(glob) => {
+				BuildCache::build_trivial(project, request, || {
+					let pat = glob::Pattern::new(glob)?;
+					let mut keys: Vec<String> = std::env::vars()
+						.map(|(k,v)| k)
+						.filter(|k| pat.matches(&k))
+						.collect();
+					keys.sort();
+					Ok(BuildResult::EnvKeys(keys))
+				})
+			},
 			BuildRequest::EnvLookup(lookup) => {
 				// More efficient than doing it client-side, since we only invlidate if the
 				// result changes, not the envvar
