@@ -7,6 +7,7 @@ pub use ambl_common::ffi::*;
 pub use ambl_common::ctx::*;
 pub use ambl_macros::*;
 use log::*;
+use ambl_common::LogLevel;
 
 // used to detect incompatible guest modules
 #[no_mangle]
@@ -18,13 +19,9 @@ static AMBL_LOGGER: AmblLogger = AmblLogger;
 
 #[no_mangle]
 pub extern "C" fn ambl_init(level_int: u32) {
-	let level = ambl_common::LogLevel::from_int(level_int);
+	let level = LogLevel::from_int(level_int);
 	log::set_max_level(level.to_level_filter());
 	log::set_logger(&AMBL_LOGGER).unwrap();
-}
-
-pub fn debug(s: &str) {
-	unsafe { ambl_debug(s.as_ptr(), s.len() as u32) };
 }
 
 #[no_mangle]
@@ -49,7 +46,8 @@ impl log::Log for AmblLogger {
 	}
 
 	fn log(&self, record: &Record) {
-		debug(&format!("{}", &record.args()));
+		let s = format!("{}", &record.args());
+		unsafe { ambl_log(LogLevel::to_int(record.level()), s.as_ptr(), s.len() as u32) };
 	}
 
 	fn flush(&self) {

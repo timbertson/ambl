@@ -5,7 +5,7 @@ use log::*;
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
-use ambl_common::build::*;
+use ambl_common::{build::*, LogLevel};
 use ambl_common::ctx::*;
 use ambl_common::ffi::ResultFFI;
 use ambl_common::rule::*;
@@ -13,7 +13,7 @@ use wasmtime::*;
 
 use crate::build::BuildReason;
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
-use crate::path_util::Scope;
+use crate::path_util::{Scope, self};
 use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, ProjectHandle, ActiveBuildToken}, persist::{PersistFile}, module::{BuildModule}, path_util::{Scoped, CPath, Unscoped}, err::result_block, invoke};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
@@ -177,7 +177,7 @@ impl StateRef {
 		let mut store_ctx = store.as_context_mut();
 		let scope_map = store_ctx.data_mut();
 		let token = ActiveBuildToken::from_raw(arg.as_ref().token);
-		let inserted = match scope_map.entry(token) {
+		let inserted = match scope_map.scopes.entry(token) {
 			Entry::Occupied(_) => false,
 			Entry::Vacant(entry) => {
 				entry.insert(f.scope.clone());
@@ -197,14 +197,17 @@ impl StateRef {
 		if inserted {
 			let mut store_ctx = store.as_context_mut();
 			let scope_map = store_ctx.data_mut();
-			scope_map.remove(&token);
+			scope_map.scopes.remove(&token);
 		}
 
 		result
 	}
 }
 
-type StoreInner = HashMap<ActiveBuildToken, Scope<'static>>;
+pub struct StoreInner {
+	name: String,
+	scopes: HashMap<ActiveBuildToken, Scope<'static>>,
+}
 
 pub struct WasmModule {
 	state: StateRef,
@@ -250,7 +253,7 @@ impl BuildModule for WasmModule {
 				let TaggedInvoke { token, request } = request;
 				let token = ActiveBuildToken::from_raw(token);
 				let scope_map = caller.data_mut();
-				let scope = scope_map.get(&token)
+				let scope = scope_map.scopes.get(&token)
 					.ok_or_else(|| anyhow!("invoke called without an active scope; this should be impossible"))?;
 				let project = project_handle.lock("ambl_invoke")?;
 				invoke::perform(project, &module_path, scope, token, request)
@@ -264,16 +267,25 @@ impl BuildModule for WasmModule {
 		})?;
 
 		let state_debug = state.clone(); // to move into closure
-		linker.func_wrap("env", "ambl_debug", move |mut caller: Caller<'_, _>, data: u32, data_len: u32| {
+		linker.func_wrap("env", "ambl_log", move |mut caller: Caller<'_, StoreInner>, level: u32, data: u32, data_len: u32| {
 			let state = state_debug.clone();
-			let s: Result<String> = (||{
-				let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
-				Ok(String::from_utf8(data_bytes)?)
-			})();
-			println!("debug: {}", &s.expect("failed to decode debug string"));
+			let level = LogLevel::from_int(level);
+			if log_enabled!(level) {
+				let s: Result<String> = (||{
+					let data_bytes = state.copy_bytes(&mut caller, offset(data), data_len)?;
+					Ok(String::from_utf8(data_bytes)?)
+				})();
+				let module_name: &str = caller.data().name.as_ref();
+				log::log!(target: module_name, level, "{}", {
+					s.expect("failed to decode log string")
+				});
+			}
 		})?;
 
-		let mut store = Store::new(&engine, Default::default());
+		let mut store = Store::new(&engine, StoreInner {
+			name: module.path.as_path().file_name().map(path_util::str_of_os).unwrap_or("wasm").to_string(),
+			scopes: Default::default(),
+		});
 		debug!("instantiating...");
 		let instance = linker.instantiate(&mut store, &module.wasm)?;
 
