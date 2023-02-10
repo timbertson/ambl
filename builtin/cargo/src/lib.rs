@@ -1,6 +1,7 @@
 use anyhow::*;
 use serde::{Deserialize, Serialize};
 use ambl_api::*;
+use log::*;
 
 #[derive(Deserialize, Serialize)]
 struct ModuleConfig {
@@ -64,6 +65,7 @@ fn build_workspace_meta(c: TargetCtx) -> Result<()> {
 		"metadata", "--no-deps", "--format-version", "1"
 	)).stdout(Stdout::String))?.into_string().context("cargo metadata output")?;
 	// debug(&format!("META: {}", &meta));
+	debug!("META: {}", &meta);
 	c.write_dest(meta)?;
 	Ok(())
 }

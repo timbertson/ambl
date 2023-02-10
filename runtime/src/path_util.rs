@@ -596,7 +596,7 @@ impl<'a> ResolveModule<'a> {
 			.as_ref()
 			.map(Unscoped::from_scoped)
 			.or_else(|| self.source_module.map(|p| p.to_owned()))
-			.ok_or_else(||anyhow!("Received a WasmCall without a populated module"))
+			.ok_or_else(||anyhow!("Received a WasmCall with no module specified, and no implicit module"))
 	}
 }
 

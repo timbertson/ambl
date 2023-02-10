@@ -1,10 +1,10 @@
 - target:
     names: [default]
-    module: ambl-builder/module/ambl-example-cargo-builder
+    path: ambl-builder/module/ambl-example-cargo-builder
  
 - include:
     mode: WASM # TODO
-    module: builtin:cargo
+    path: builtin:cargo
     scope: ambl-builder
     # config:
     #   root: ../ambl-builder

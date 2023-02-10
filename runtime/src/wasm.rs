@@ -299,6 +299,8 @@ impl BuildModule for WasmModule {
 
 		let ambl_api_version: TypedFunc<(), u32> = instance.get_typed_func::<(), u32, _>(&mut store, "ambl_api_version")?;
 		debug!("API version: {}", ambl_api_version.call(&mut store, ())?);
+		let ambl_init: TypedFunc<u32, ()> = instance.get_typed_func::<u32, (), _>(&mut store, "ambl_init")?;
+		ambl_init.call(&mut store, ambl_common::LogLevel::to_int(log::max_level().to_level().unwrap_or(log::Level::Warn)))?;
 		Ok(WasmModule { state, store })
 	}
 

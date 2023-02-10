@@ -38,6 +38,7 @@ dependencies = [
  "ambl-common",
  "ambl-macros",
  "anyhow",
+ "log",
  "serde",
  "serde_json",
 ]
@@ -48,6 +49,7 @@ version = "0.1.0"
 dependencies = [
  "ambl-api",
  "anyhow",
+ "log",
  "serde",
  "serde_json",
  "toml 0.4.10",
@@ -58,6 +60,7 @@ name = "ambl-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "serde",
  "serde_json",
 ]
