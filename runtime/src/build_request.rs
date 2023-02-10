@@ -80,9 +80,9 @@ pub struct ResolvedFnSpec<'a> {
 
 impl<'a> ResolvedFnSpec<'a> {
 	pub fn from_explicit_fn_name(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope<'a>) -> Result<Self> {
-		let FunctionSpec { fn_name, module, config } = f;
+		let FunctionSpec { fn_name, path, config } = f;
 		let fn_name = fn_name.ok_or_else(|| anyhow!("Function spec is missing a function name"))?;
-		let explicit_cpath = module.map(CPath::new);
+		let explicit_cpath = path.map(CPath::new);
 		let full_module = ResolveModule {
 			source_module,
 			explicit_path: explicit_cpath.as_ref().map(|p| Scoped::new(scope.copy(), p)),

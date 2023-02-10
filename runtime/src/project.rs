@@ -96,11 +96,16 @@ impl Nested {
 #[derive(Clone, Debug)]
 // just like Include but the paths are typed
 pub struct ScopedInclude {
-	pub module: Option<CPath>,
+	pub path: Option<CPath>,
 	pub fn_name: String,
 	pub relative_scope: Option<Simple>,
-	pub config: ambl_common::rule::Config,
-	pub mode: IncludeMode, // TODO this is bad modelling, YAML doesn't use config
+	pub config: IncludeConfig
+}
+
+#[derive(Clone, Debug)]
+pub enum IncludeConfig {
+	YAML,
+	WASM(ambl_common::rule::Config)
 }
 
 impl ScopedInclude {
@@ -139,13 +144,20 @@ impl ProjectRule {
 					None => None,
 					Some(rel) => Some(Simple::try_from(rel.to_owned())?),
 				};
-				let include = ScopedInclude {
-					module: spec.get_module().to_owned().map(CPath::new),
-					fn_name: spec.get_fn_name().as_deref().unwrap_or("get_rules").to_owned(),
-					config: spec.get_config().to_owned(),
-					mode: spec.get_mode(),
-					relative_scope,
+				let path = spec.get_path().to_owned().map(CPath::new);
+				let config = match spec.get_mode() {
+					IncludeMode::YAML => {
+						if let Some(config) = spec.get_config().value() {
+							return Err(anyhow!(
+								"Configuration can't be passed to a yaml include ({:?})\nConfiguration value: {:?}",
+								&path, &config));
+						}
+						IncludeConfig::YAML
+					},
+					IncludeMode::WASM => IncludeConfig::WASM(spec.get_config().to_owned()),
 				};
+				let fn_name = spec.get_fn_name().as_deref().unwrap_or("get_rules").to_owned();
+				let include = ScopedInclude { path, relative_scope, config, fn_name };
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(include))))
 			},
 		}
@@ -186,7 +198,7 @@ impl<M: BuildModule> Project<M> {
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
 			self_ref: None,
-			root_rule: Arc::new(ProjectRule::from_rule(dsl::include(dsl::yaml("ambl.yaml")), Scope::static_root())?),
+			root_rule: Arc::new(ProjectRule::from_rule(dsl::rule(dsl::include("ambl.yaml")), Scope::static_root())?),
 		});
 
 		// lock the project to populate self_ref
@@ -288,7 +300,7 @@ impl<M: BuildModule> Project<M> {
 				if t.names.iter().any(|n| n == name) {
 					result_block(|| {
 						let rel_name = CPath::new(name.to_owned()).into_simple()?;
-						let module_cpath = t.build.module.as_ref().map(|m| {
+						let module_cpath = t.build.path.as_ref().map(|m| {
 							CPath::new(m.to_owned())
 						});
 						let full_module = ResolveModule {
@@ -367,7 +379,7 @@ impl<M: BuildModule> Project<M> {
 							.map(|rel| Scope::owned(scope.join_simple(rel.to_owned())))
 							.unwrap_or_else(|| scope.clone());
 						
-						let explicit_path = include.module.as_ref()
+						let explicit_path = include.path.as_ref()
 							.map(|cpath| Scoped::new(scope.copy(), cpath));
 						let module_path = ResolveModule {
 							explicit_path,
@@ -375,8 +387,8 @@ impl<M: BuildModule> Project<M> {
 						}.resolve()?;
 						let mut wasm_module_path = None;
 
-						let rules = match include.mode {
-							IncludeMode::YAML => {
+						let rules = match include.config {
+							IncludeConfig::YAML => {
 								let (project_ret, rules) = Self::load_yaml_rules(
 									project,
 									&module_path,
@@ -386,12 +398,12 @@ impl<M: BuildModule> Project<M> {
 								rules
 							},
 
-							IncludeMode::WASM => {
+							IncludeConfig::WASM(ref config) => {
 								let request = BuildRequest::WasmCall(ResolvedFnSpec {
 									scope: absolute_scope.clone(),
 									fn_name: include.fn_name.to_owned(),
 									full_module: module_path.clone(),
-									config: include.config.to_owned(),
+									config: config.to_owned(),
 								});
 								wasm_module_path = Some(module_path);
 
@@ -683,7 +695,7 @@ impl<M: BuildModule> Project<M> {
 				})
 			},
 			BuildRequest::EnvLookup(lookup) => {
-				// More efficient than doing it client-side, since we only invlidate if the
+				// More efficient than doing it client-side, since we only invalidate if the
 				// result changes, not the envvar
 				BuildCache::build_trivial(project, request, || {
 					let value = match std::env::var_os(&lookup.key) {

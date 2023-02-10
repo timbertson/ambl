@@ -32,7 +32,7 @@ impl Default for Config {
 #[serde(rename_all = "snake_case")]
 pub struct Include {
 	#[serde(default)]
-	module: Option<String>,
+	path: Option<String>,
 
 	#[serde(default)]
 	scope: Option<String>,
@@ -43,8 +43,8 @@ pub struct Include {
 	#[serde(rename = "fn", default)]
 	fn_name: Option<String>,
 
-	// TODO: just detect file extension?
-	mode: IncludeMode, // TODO this is bad modelling, YAML doesn't use config
+	#[serde(default)]
+	mode: Option<IncludeMode>, // TODO this is bad modelling, YAML doesn't use config
 }
 
 impl Include {
@@ -68,8 +68,8 @@ impl Include {
 		&self.scope
 	}
 
-	pub fn get_module(& self) -> &Option<String> {
-		&self.module
+	pub fn get_path(& self) -> &Option<String> {
+		&self.path
 	}
 
 	pub fn get_fn_name(& self) -> &Option<String> {
@@ -81,7 +81,20 @@ impl Include {
 	}
 
 	pub fn get_mode(& self) -> IncludeMode {
-		self.mode
+		// assume WASM unless it's overridden or path ends in .ya?ml
+		self.mode.unwrap_or_else(|| {
+			let is_yaml = match self.path {
+				Some(ref p) => p.ends_with(".yml") || p.ends_with(".yaml"),
+				None => false
+			};
+			if is_yaml { IncludeMode::YAML } else { IncludeMode::WASM }
+		})
+	}
+}
+
+impl Into<Rule> for Include {
+	fn into(self) -> Rule {
+		Rule::Include(self)
 	}
 }
 
@@ -92,7 +105,7 @@ pub struct FunctionSpec {
 	pub fn_name: Option<String>,
 
 	#[serde(default)]
-	pub module: Option<String>,
+	pub path: Option<String>,
 
 	#[serde(default)]
 	pub config: Config,
@@ -104,8 +117,8 @@ impl FunctionSpec {
 		Ok(self)
 	}
 
-	pub fn module<S: Into<String>>(mut self, s: S) -> Self {
-		self.module = Some(s.into());
+	pub fn path<S: Into<String>>(mut self, s: S) -> Self {
+		self.path = Some(s.into());
 		self
 	}
 }
@@ -140,6 +153,12 @@ pub struct Target {
 	pub build: FunctionSpec,
 }
 
+impl Into<Rule> for Target {
+	fn into(self) -> Rule {
+		Rule::Target(self)
+	}
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NestedRule {
 	#[serde(default)]
@@ -169,60 +188,50 @@ pub mod dsl {
 		})
 	}
 
-	pub fn include(m: Include) -> Rule {
-		Rule::Include(m)
+	pub fn rule<R: Into<Rule>>(r: R) -> Rule {
+		r.into()
 	}
 
-	pub fn module<S: Into<String>>(module: S) -> Include {
+	pub fn include<S: Into<String>>(path: S) -> Include {
 		Include {
-			module: Some(module.into()),
+			path: Some(path.into()),
 			fn_name: None,
 			scope: None,
 			config: Default::default(),
-			mode: IncludeMode::WASM
+			mode: Default::default(),
 		}
 	}
 
 	pub fn this_module() -> Include {
 		Include {
-			module: None,
+			path: None,
 			fn_name: None,
 			scope: None,
 			config: Default::default(),
-			mode: IncludeMode::WASM
-		}
-	}
-
-	pub fn yaml<S: Into<String>>(path: S) -> Include {
-		Include {
-			module: Some(path.into()),
-			fn_name: None,
-			scope: None,
-			config: Default::default(),
-			mode: IncludeMode::YAML
+			mode: Some(IncludeMode::WASM)
 		}
 	}
 
 	pub fn function<S: Into<String>>(fn_name: S) -> FunctionSpec {
 		FunctionSpec {
 			fn_name: Some(fn_name.into()),
-			module: None,
+			path: None,
 			config: Default::default()
 		}
 	}
 
 	pub fn default_function() -> FunctionSpec {
 		FunctionSpec {
-			module: None,
+			path: None,
 			fn_name: None,
 			config: Default::default()
 		}
 	}
 
-	pub fn build_via<S: Into<String>, S2: Into<String>>(module: S, fn_name: S2) -> FunctionSpec {
+	pub fn build_via<S: Into<String>, S2: Into<String>>(path: S, fn_name: S2) -> FunctionSpec {
 		FunctionSpec {
 			fn_name: Some(fn_name.into()),
-			module: Some(module.into()),
+			path: Some(path.into()),
 			config: Default::default()
 		}
 	}

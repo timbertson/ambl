@@ -88,7 +88,7 @@ pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
 	Ok(vec!(
 		target("workspace-meta", function("build_workspace_meta")),
 		target("Cargo.lock", function("build_lockfile")),
-		include(this_module().function("module_rules")),
+		rule(this_module().function("module_rules")),
 	))
 }
 
