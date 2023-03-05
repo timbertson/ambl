@@ -11,7 +11,7 @@ use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig};
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
 use crate::persist::{DepSet, BuildResult};
-use crate::project::{Project, ProjectMutexPair};
+use crate::project::{Project, ProjectMutexPair, ProjectSandbox, Implicits};
 use crate::sync::{Mutexed, MutexHandle};
 use crate::path_util::{External, Absolute, Scoped, CPath, Simple, Unscoped, lexists};
 use crate::err::result_block;
@@ -59,6 +59,7 @@ impl Sandbox {
 
 	fn collect_paths<'a, 'b, M: BuildModule>(
 		project: &'a Project<M>,
+		implicits: &'b Implicits,
 		dest: &mut HashMap<Simple, Option<Simple>>,
 		key: &'b BuildRequest,
 	) -> Result<()> where 'a : 'b {
@@ -68,7 +69,7 @@ impl Sandbox {
 					if dest.contains_key(&rel) {
 						return Ok(());
 					}
-					let persist = project.lookup(&key)?
+					let persist = project.lookup(implicits, &key)?
 						.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
 						.raw();
 					match &persist.result {
@@ -91,7 +92,7 @@ impl Sandbox {
 									ChecksumConfig::Enabled => (),
 									ChecksumConfig::Disabled => {
 										for (key, _) in deps.iter() {
-											Self::collect_paths(project, dest, key)?;
+											Self::collect_paths(project, implicits, dest, key)?;
 										}
 									}
 								}
@@ -110,14 +111,16 @@ impl Sandbox {
 		Ok(())
 	}
 
-	pub fn run<'a, M: BuildModule>(mut project: Mutexed<'a, Project<M>>,
+	pub fn run<'a, M: BuildModule>(
+		mut project: Mutexed<'a, Project<M>>,
+		implicits: &Implicits,
 		command: &GenCommand<Unscoped>,
 		reason: &BuildReason,
 	) -> Result<(Mutexed<'a, Project<M>>, TempDir, InvokeResponse)> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
 		let mut rel_paths = Default::default();
 		for (dep, state) in dep_set.deps.iter() {
-			Self::collect_paths(&project, &mut rel_paths, dep)
+			Self::collect_paths(&project, implicits, &mut rel_paths, dep)
 				.context("initializing command sandbox")?;
 		}
 		
@@ -125,15 +128,40 @@ impl Sandbox {
 		let mut cmd = Command::new(&exe.0.as_path());
 
 		cmd.env_clear();
+
 		let mut env_inherit: HashSet<String> = HashSet::from_iter(env_inherit.into_iter().map(ToOwned::to_owned));
+
+		// inherit from project sandbox configuration
+		{
+			if implicits.sandbox.nix {
+				let request = BuildRequest::EnvKeys("NIX_*".to_owned());
+				let (project_ret, value) = Project::<M>::build(project, implicits, &request, reason)?;
+				project = project_ret;
+				match value.result {
+					BuildResult::EnvKeys(keys) => {
+						for key in keys {
+							env_inherit.insert(key.to_owned());
+						}
+					},
+					_ => panic!("impossible result from Envvar request"),
+				}
+			}
+			
+			for key in implicits.sandbox.allow_env.iter() {
+				env_inherit.insert(key.to_owned());
+			}
+		}
+
 		// Make sure we have minimal requisite environment, add these in if they're not already included:
 		// TODO scope to osx / linux / etc
 		for key in ["PATH", "HOME", "LD_DYLD_PATH", "LD_LIBRARY_PATH"] {
 			env_inherit.insert(key.to_owned());
 		}
+
+		// populate the inherited env values
 		for k in env_inherit {
 			let request = BuildRequest::EnvVar(k.to_owned());
-			let (project_ret, value) = Project::<M>::build(project, &request, reason)?;
+			let (project_ret, value) = Project::<M>::build(project, implicits, &request, reason)?;
 			match value.result {
 				BuildResult::Env(value) => {
 					if let Some(v) = value {
@@ -174,7 +202,7 @@ impl Sandbox {
 			
 			// TODO: actual sandboxing.
 			// Use something like user namespacing to shadow
-			// all directories the command shoulnd't have access to
+			// all directories the command shouldn't have access to
 
 			debug!("Installing {} symlinks", rel_paths.len());
 			for (k, v) in rel_paths {

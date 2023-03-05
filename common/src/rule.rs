@@ -132,16 +132,10 @@ pub struct EnvLookup {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct Alias {
-	name: String,
-	path: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum Rule {
 	Target(Target),
 	Include(Include),
+	Sandbox(Sandbox),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -156,6 +150,20 @@ pub struct Target {
 impl Into<Rule> for Target {
 	fn into(self) -> Rule {
 		Rule::Target(self)
+	}
+}
+
+// TODO not sure if these should really be rules, but it's expedient for now
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sandbox {
+	Nix,
+	AllowEnv(Vec<String>),
+}
+
+impl Into<Rule> for Sandbox {
+	fn into(self) -> Rule {
+		Rule::Sandbox(self)
 	}
 }
 
@@ -262,6 +270,21 @@ pub mod dsl {
 			root: root.into(),
 			dirs: Default::default(),
 			files: Default::default(),
+		}
+	}
+	
+	pub mod sandbox {
+		use super::*;
+		pub fn nix_compat() -> Rule {
+			rule(Sandbox::Nix)
+		}
+
+		pub fn allow_env<S: Into<String>>(s: S) -> Rule {
+			rule(Sandbox::AllowEnv(vec!(s.into())))
+		}
+
+		pub fn allow_envs<S: Into<String>, V: Iterator<Item=S>>(v: V) -> Rule {
+			rule(Sandbox::AllowEnv(v.map(Into::into).collect()))
 		}
 	}
 }

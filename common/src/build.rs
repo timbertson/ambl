@@ -1,4 +1,5 @@
 use anyhow::*;
+use std::collections::BTreeSet;
 use std::{collections::BTreeMap, ops::{DerefMut, Deref}};
 
 use serde::{Serialize, Deserialize};
@@ -185,7 +186,7 @@ pub struct GenCommand<Path> {
 	pub args: Vec<String>,
 	pub cwd: Option<Path>,
 	pub env: BTreeMap<String, String>,
-	pub env_inherit: Vec<String>,
+	pub env_inherit: BTreeSet<String>,
 	pub impure_share_dirs: Vec<Path>,
 	pub output: Stdio,
 	pub input: Stdin,
@@ -261,7 +262,7 @@ impl Command {
 	}
 
 	pub fn env_inherit<S: Into<String>>(mut self, k: S) -> Self {
-		self.env_inherit.push(k.into());
+		self.env_inherit.insert(k.into());
 		self
 	}
 	

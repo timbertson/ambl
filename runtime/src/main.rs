@@ -23,7 +23,7 @@ use log::*;
 use anyhow::*;
 use path_util::{CPath, Unscoped};
 use build_request::BuildRequest;
-use project::{Project, ModuleCache};
+use project::{Project, ModuleCache, Implicits};
 use build::BuildReason;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json::map::OccupiedEntry;
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
 		for arg in args {
 			let request = BuildRequest::FileDependency(Unscoped::new(arg));
 			let reason = BuildReason::Explicit;
-			let (project_ret, _) = Project::build(project_mutexed, &request, &reason)?;
+			let (project_ret, _) = Project::build(project_mutexed, &project::DEFAULT_IMPLICITS, &request, &reason)?;
 			project_mutexed = project_ret;
 		}
 		Ok(())

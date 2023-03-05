@@ -11,9 +11,10 @@ use ambl_common::ffi::ResultFFI;
 use ambl_common::rule::*;
 use wasmtime::*;
 
-use crate::build::BuildReason;
+use crate::build::{BuildReason, TargetContext};
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
 use crate::path_util::{Scope, self};
+use crate::project::{Implicits, FoundTarget};
 use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, ProjectHandle, ActiveBuildToken}, persist::{PersistFile}, module::{BuildModule}, path_util::{Scoped, CPath, Unscoped}, err::result_block, invoke};
 
 const U32_SIZE: u32 = size_of::<u32>() as u32;
@@ -167,20 +168,25 @@ impl StateRef {
 		Ok(())
 	}
 
-	pub fn call<C: AsContextMut<Data = StoreInner>, Ctx: Serialize + AsRef<BaseCtx>>(&self, mut store: C, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>) -> Result<Vec<u8>> {
+	pub fn build<C: AsContextMut<Data = StoreInner>, Ctx: Serialize + AsRef<BaseCtx>>(
+		&self, mut store: C, implicits: &Implicits, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>
+	) -> Result<Vec<u8>> {
 		debug!("call({:?})", f);
 		let mut write = self.write();
 		let state = write.as_ref()?;
 
-		// We wrap every call by inserting the scope into the store. This
-		// lets us reattach the (implicit) scope within `invoke`
+		// We wrap every call by inserting the scope + options into the store. This
+		// lets us access these implicit params within `invoke`
 		let mut store_ctx = store.as_context_mut();
-		let scope_map = store_ctx.data_mut();
+		let store_innter = store_ctx.data_mut();
 		let token = ActiveBuildToken::from_raw(arg.as_ref().token);
-		let inserted = match scope_map.scopes.entry(token) {
+		let inserted = match store_innter.target_contexts.entry(token) {
 			Entry::Occupied(_) => false,
 			Entry::Vacant(entry) => {
-				entry.insert(f.scope.clone());
+				entry.insert(TargetContext {
+					scope: f.scope.clone(),
+					options: implicits.clone(),
+				});
 				true
 			}
 		};
@@ -196,8 +202,8 @@ impl StateRef {
 
 		if inserted {
 			let mut store_ctx = store.as_context_mut();
-			let scope_map = store_ctx.data_mut();
-			scope_map.scopes.remove(&token);
+			let store_innter = store_ctx.data_mut();
+			store_innter.target_contexts.remove(&token);
 		}
 
 		result
@@ -206,7 +212,7 @@ impl StateRef {
 
 pub struct StoreInner {
 	name: String,
-	scopes: HashMap<ActiveBuildToken, Scope<'static>>,
+	target_contexts: HashMap<ActiveBuildToken, TargetContext>,
 }
 
 pub struct WasmModule {
@@ -252,11 +258,11 @@ impl BuildModule for WasmModule {
 				let mut project_handle = project.handle();
 				let TaggedInvoke { token, request } = request;
 				let token = ActiveBuildToken::from_raw(token);
-				let scope_map = caller.data_mut();
-				let scope = scope_map.scopes.get(&token)
+				let store_innter = caller.data_mut();
+				let target_context = store_innter.target_contexts.get(&token)
 					.ok_or_else(|| anyhow!("invoke called without an active scope; this should be impossible"))?;
 				let project = project_handle.lock("ambl_invoke")?;
-				invoke::perform(project, &module_path, scope, token, request)
+				invoke::perform(project, &module_path, target_context, token, request)
 			})();
 			debug!("ambl_invoke: returning {:?} to WASM module", response);
 			let result: Result<()> = (|| {
@@ -284,7 +290,7 @@ impl BuildModule for WasmModule {
 
 		let mut store = Store::new(&engine, StoreInner {
 			name: module.path.as_path().file_name().map(path_util::str_of_os).unwrap_or("wasm").to_string(),
-			scopes: Default::default(),
+			target_contexts: Default::default(),
 		});
 		debug!("instantiating...");
 		let instance = linker.instantiate(&mut store, &module.wasm)?;
@@ -316,7 +322,13 @@ impl BuildModule for WasmModule {
 		Ok(WasmModule { state, store })
 	}
 
-	fn call<Ctx: AsRef<BaseCtx> + Serialize>(&mut self, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
-		self.state.call(&mut self.store, f, arg, _unlocked_evidence)
+	fn build<Ctx: AsRef<BaseCtx> + Serialize>(
+		&mut self,
+		implicits: &Implicits,
+		f: &ResolvedFnSpec,
+		arg: &Ctx,
+		_unlocked_evidence: &ProjectHandle<Self>
+	) -> Result<Vec<u8>> {
+		self.state.build(&mut self.store, implicits, f, arg, _unlocked_evidence)
 	}
 }

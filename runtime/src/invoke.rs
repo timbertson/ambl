@@ -6,29 +6,29 @@ use anyhow::*;
 use log::*;
 use ambl_common::build::{InvokeResponse, InvokeAction, Invoke, WriteDest, FileSource, DependencyRequest, ChecksumConfig};
 
-use crate::build::{BuildReason, BuildResponse};
+use crate::build::{BuildReason, BuildResponse, TargetContext};
 use crate::build_request::BuildRequest;
 use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::path_util::{lexists, Unscoped, CPath, Scope, Simple, Scoped};
 use crate::persist::BuildResult;
-use crate::project::{Project, ActiveBuildToken, ProjectMutex, ProjectMutexPair};
+use crate::project::{Project, ActiveBuildToken, ProjectMutex, ProjectMutexPair, Implicits};
 use crate::sync::MutexHandle;
 
 pub fn perform<'a, M: BuildModule>(
 	project: ProjectMutex<'a, M>,
 	module_path: &Unscoped,
-	scope: &Scope,
+	target_context: &TargetContext,
 	token: ActiveBuildToken,
 	request: Invoke,
 ) -> Result<InvokeResponse> {
 	let response = match request {
 		Invoke::Action(action) => {
-			crate::debug::shell_on_failure(perform_invoke(project, module_path, scope, token, &action))
+			crate::debug::shell_on_failure(perform_invoke(project, module_path, target_context, token, &action))
 		},
 		Invoke::Dependency(request) => {
-			let build_request = BuildRequest::from(request, Some(module_path), scope)?;
-			let (project, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
+			let build_request = BuildRequest::from(request, Some(module_path), &target_context.scope)?;
+			let (project, persist) = Project::build(project, &target_context.options, &build_request, &BuildReason::Dependency(token))?;
 			persist.into_response()
 		},
 	};
@@ -39,11 +39,12 @@ pub fn perform<'a, M: BuildModule>(
 fn perform_invoke<M: BuildModule>(
 	mut project: ProjectMutex<M>,
 	module_path: &Unscoped,
-	scope: &Scope,
+	target_context: &TargetContext,
 	token: ActiveBuildToken,
 	action: &InvokeAction,
 ) -> Result<InvokeResponse> {
 	result_block(|| {
+		let scope = &target_context.scope;
 		let dest_tmp = |project: &Project<M>, target: &String| {
 			let target = Scoped::new(scope.copy(), Simple::try_from(target.to_owned())?);
 			Project::tmp_path(project, &target)
@@ -76,7 +77,7 @@ fn perform_invoke<M: BuildModule>(
 			},
 
 			InvokeAction::CopyFile(f) => {
-				let (project, src) = source_path(project, module_path, scope, token, &f.source_root, Some(&f.source_suffix))?;
+				let (project, src) = built_source_path(project, target_context, module_path, token, &f.source_root, Some(&f.source_suffix))?;
 				let dest = dest_tmp(&project, &f.dest_target)?;
 				debug!("Copying file {} -> {}", src.display(), &dest);
 				if !lexists(&src)? {
@@ -88,7 +89,7 @@ fn perform_invoke<M: BuildModule>(
 			},
 
 			InvokeAction::ReadFile(f) => {
-				let (project, src) = source_path(project, module_path, scope, token, &f.source_root, f.source_suffix.as_deref())?;
+				let (project, src) = built_source_path(project, target_context, module_path, token, &f.source_root, f.source_suffix.as_deref())?;
 				debug!("Reading file {}", src.display());
 				let bytes = fs::read(&src)
 					.with_context(|| format!("Reading file {}", src.display()))?;
@@ -98,21 +99,22 @@ fn perform_invoke<M: BuildModule>(
 	}).with_context(|| format!("Invoking action: {:?}", action))
 }
 
-fn source_path<'a, M: BuildModule>(
+fn built_source_path<'a, M: BuildModule>(
 	mut project: ProjectMutex<'a, M>,
+	target_context: &TargetContext,
 	module_path: &Unscoped,
-	scope: &Scope,
 	token: ActiveBuildToken,
 	src: &FileSource,
 	suffix: Option<&str>
 )
 	-> Result<ProjectMutexPair<'a, M, PathBuf>>
 {
+	let scope = &target_context.scope;
 	let mut src = match src {
 		FileSource::Target(path) => {
 			let request = DependencyRequest::FileDependency(path.to_owned());
 			let build_request = BuildRequest::from(request, Some(module_path), scope)?;
-			let (project_ret, persist) = Project::build(project, &build_request, &BuildReason::Dependency(token))?;
+			let (project_ret, persist) = Project::build(project, &target_context.options, &build_request, &BuildReason::Dependency(token))?;
 			project = project_ret;
 			let target = match persist.result {
 				BuildResult::File(t) => t.target,

@@ -8,7 +8,7 @@ use crate::build_request::BuildRequest;
 use crate::module::BuildModule;
 use crate::path_util::{Scoped, Scope, Simple};
 use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile};
-use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken};
+use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken, Implicits};
 use crate::sync::{Mutexed, MutexRef};
 
 
@@ -32,17 +32,23 @@ impl BuildReason {
 	}
 }
 
+pub struct TargetContext {
+	pub scope: Scope<'static>,
+	pub options: Implicits,
+}
+
 pub struct BuildCache;
 
 impl BuildCache {
 	pub fn build_trivial<'a, M: BuildModule, Build>(
 		project: ProjectMutex<'a, M>,
+		implicits: &Implicits,
 		key: &BuildRequest,
 		build_fn: Build
 	) -> Result<ProjectMutexPair<'a, M, BuildResponse>> where
 		Build: FnOnce() -> Result<BuildResult>
 	{
-		Self::build_simple(project, key, |project| {
+		Self::build_simple(project, implicits, key, |project| {
 			let mut project: Mutexed<Project<M>> = project;
 			let ret = project.unlocked_block(|_| {
 				build_fn()
@@ -53,6 +59,7 @@ impl BuildCache {
 
 	pub fn build_simple<'a, M: BuildModule, Build>(
 		project: ProjectMutex<'a, M>,
+		implicits: &Implicits,
 		key: &BuildRequest,
 		build_fn: Build
 	) -> Result<ProjectMutexPair<'a, M, BuildResponse>> where
@@ -73,11 +80,12 @@ impl BuildCache {
 			Ok((project, BuildResultWithDeps::simple(ctx)))
 		};
 
-		Self::build_full(project, key, get_ctx, needs_rebuild, do_build)
+		Self::build_full(project, implicits, key, get_ctx, needs_rebuild, do_build)
 	}
 
 	pub fn build_with_deps<'a, M: BuildModule, Ctx, ComputeCtx, Build>(
 		project: ProjectMutex<'a, M>,
+		implicits: &Implicits,
 		reason: &BuildReason,
 		key: &BuildRequest,
 		get_ctx: ComputeCtx,
@@ -94,17 +102,18 @@ impl BuildCache {
 		let needs_rebuild = |project, ctx: &Ctx, cached: &BuildResultWithDeps| {
 			// if cached value doesn't have deps, it may have been e.g. a File which has now become a Target
 			if let Some(ref deps) = cached.deps {
-				Self::requires_build(project, deps)
+				Self::requires_build(project, implicits, deps)
 			} else {
 				debug!("cached {:?} needs rebuild because it has no stored deps", cached);
 				Ok((project, true))
 			}
 		};
-		Self::build_full(project, key, get_ctx, needs_rebuild, build_fn)
+		Self::build_full(project, implicits, key, get_ctx, needs_rebuild, build_fn)
 	}
 
 	fn build_full<'a, M: BuildModule, Ctx, ComputeCtx, NeedsRebuild, Build>(
 		mut project: ProjectMutex<'a, M>,
+		implicits: &Implicits,
 		key: &BuildRequest,
 		get_ctx: ComputeCtx,
 		needs_rebuild: NeedsRebuild,
@@ -115,7 +124,7 @@ impl BuildCache {
 		Build: FnOnce(ProjectMutex<'a, M>, Ctx) -> Result<ProjectMutexPair<'a, M, BuildResultWithDeps>>
 	{
 		// to_owned releases project borrow
-		let from_cache = match project.build_cache.lookup(key)?.map(|c| c.to_owned()) {
+		let from_cache = match project.build_cache.lookup(implicits, key)?.map(|c| c.to_owned()) {
 			Some(Cached::Fresh(cached)) => {
 				// already checked in this invocation, short-circuit
 				debug!("Short circuit, already built {:?} ({:?})", key, &cached);
@@ -129,7 +138,7 @@ impl BuildCache {
 				project = project_ret;
 				if !needs_build {
 					debug!("Marking cached result for {:?} ({:?}) as fresh", key, &cached);
-					project.build_cache.update(key.to_owned(), cached.to_owned())?;
+					project.build_cache.update(implicits.to_owned(), key.to_owned(), cached.to_owned())?;
 					CacheAware::Fresh(cached.result)
 				} else {
 					CacheAware::Stale(ctx)
@@ -148,7 +157,7 @@ impl BuildCache {
 			CacheAware::Stale(ctx) => {
 				let (project_ret, built) = build_fn(project, ctx)?;
 				project = project_ret;
-				project.build_cache.update(key.clone(), built.clone())?;
+				project.build_cache.update(implicits.clone(), key.clone(), built.clone())?;
 				built.result
 			},
 		};
@@ -157,6 +166,7 @@ impl BuildCache {
 
 	pub fn requires_build<'a, M: BuildModule>(
 		mut project: ProjectMutex<'a, M>,
+		implicits: &Implicits,
 		// TODO accept BuildResultWithDeps and a build type?
 		cached: &DepSet,
 	) -> Result<ProjectMutexPair<'a, M, bool>> {
@@ -172,7 +182,7 @@ impl BuildCache {
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
 			// TODO handle failure
-			let (project_ret, dep_latest) = match Project::build(project, dep_key, &reason) {
+			let (project_ret, dep_latest) = match Project::build(project, implicits, dep_key, &reason) {
 				Result::Ok(pair) => pair,
 				Result::Err(e) => {
 					warn!("Speculative build failed for {:?}; assuming dirty", dep_key);

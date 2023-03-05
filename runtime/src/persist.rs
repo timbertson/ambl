@@ -1,6 +1,7 @@
 use ambl_common::ctx::Tempdir;
 use log::*;
 use ambl_common::build::{FileSelection, ChecksumConfig};
+use std::borrow::BorrowMut;
 use std::os::unix::prelude::OsStringExt;
 use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
 
@@ -9,7 +10,7 @@ use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use ambl_common::{build::{DependencyRequest, InvokeResponse, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
 use crate::build_request::{ResolvedFnSpec, ResolvedFilesetDependency, BuildRequest};
-use crate::project::{ProjectRef, Project, ProjectHandle};
+use crate::project::{ProjectRef, Project, ProjectHandle, Implicits};
 use crate::path_util::{Simple, Scoped, CPath, Unscoped, ResolveModule, self};
 use crate::module::BuildModule;
 
@@ -127,15 +128,21 @@ pub struct PersistFileset {
 // dumb workaround for JSON only allowing string keys
 #[derive(Serialize, Deserialize)]
 struct DepStorePersist {
-	items: Vec<(BuildRequest, BuildResultWithDeps)>,
+	items: Vec<(Implicits, Vec<(BuildRequest, BuildResultWithDeps)>)>,
 }
 
-impl From<HashMap<BuildRequest, Cached>> for DepStorePersist {
-	fn from(map: HashMap<BuildRequest, Cached>) -> Self {
+impl From<HashMap<Implicits, HashMap<BuildRequest, Cached>>> for DepStorePersist {
+	fn from(map: HashMap<Implicits, HashMap<BuildRequest, Cached>>) -> Self {
 		Self {
 			items: map
 				.into_iter()
-				.map(|(k,v)| (k, v.into_raw()))
+				.map(|(implicits, cache)|
+					(implicits,
+						cache.into_iter().map(|(key, value)|
+							(key, value.into_raw())
+						).collect()
+					)
+				)
 				.collect()
 		}
 	}
@@ -146,7 +153,13 @@ impl From<DepStorePersist> for DepStore {
 		Self {
 			cache: store.items
 				.into_iter()
-				.map(|(k,v)| (k, Cached::Cached(v)))
+				.map(|(implicits, cache)|
+					(implicits,
+						cache.into_iter().map(|(key, value)|
+							(key, Cached::Cached(value))
+						).collect()
+					)
+				)
 				.collect()
 		}
 	}
@@ -176,7 +189,7 @@ impl Cached {
 
 #[derive(Debug)]
 pub struct DepStore {
-	cache: HashMap<BuildRequest, Cached>
+	cache: HashMap<Implicits, HashMap<BuildRequest, Cached>>,
 }
 
 const AMBL_CACHE_PATH: &str = ".ambl/cache.json";
@@ -220,22 +233,25 @@ impl DepStore {
 	pub fn invalidate_if<F: Fn(&BuildResultWithDeps) -> bool>(&mut self, f: F) -> () {
 		// Mark all Fresh entries as Cached
 		debug!("Invalidating cache ...");
-		for (k,v) in self.cache.iter_mut() {
-			match v {
-				Cached::Fresh(raw) if f(raw) => *v = Cached::Cached(raw.to_owned()), // TODO can we skip this clone?
-				_ => (),
+		for (_, cache) in self.cache.iter_mut() {
+			for (_,v) in cache.iter_mut() {
+				match v {
+					Cached::Fresh(raw) if f(raw) => *v = Cached::Cached(raw.to_owned()), // TODO can we skip this clone?
+					_ => (),
+				}
 			}
 		}
 	}
 
 	// TODO remove these result types if we don't do IO directly...
-	pub fn update(&mut self, key: BuildRequest, persist: BuildResultWithDeps) -> Result<()> {
-		self.cache.insert(key, Cached::Fresh(persist));
+	pub fn update(&mut self, implicits: Implicits, key: BuildRequest, persist: BuildResultWithDeps) -> Result<()> {
+		let cache = self.cache.entry(implicits).or_default();
+		cache.insert(key, Cached::Fresh(persist));
 		Ok(())
 	}
 
-	pub fn lookup<'a>(&'a self, key: &'a BuildRequest) -> Result<Option<&'a Cached>> {
-		Ok(self.cache.get(key))
+	pub fn lookup<'a>(&'a self, implicits: &'a Implicits, key: &BuildRequest) -> Result<Option<&'a Cached>> {
+		Ok(self.cache.get(implicits).and_then(|cache| cache.get(key)))
 	}
 }
 
