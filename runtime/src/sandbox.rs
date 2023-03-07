@@ -155,6 +155,7 @@ impl Sandbox {
 
 		// Make sure we have minimal requisite environment, add these in if they're not already included:
 		// TODO scope to osx / linux / etc
+		// TODO make PATH minimal if nix is used?
 		for key in ["PATH", "HOME", "LD_DYLD_PATH", "LD_LIBRARY_PATH"] {
 			env_inherit.insert(key.to_owned());
 		}

@@ -144,10 +144,6 @@ pub fn module_build(c: TargetCtx) -> Result<()> {
 	let tmp = c.run(cargo(&c)?
 		.args(vec!("build", "--target", "wasm32-unknown-unknown", "--package"))
 		.arg(&conf.name)
-		
-		.env_inherit("PATH")
-		// TODO this feels very generic
-		.envs_inherit(c.env_keys("NIX_*")?)
 		.impure_share_dir("target")
 	)?.into_tempdir()?;
 

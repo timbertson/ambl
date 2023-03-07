@@ -7,7 +7,7 @@ use anyhow::*;
 use crate::build_request::BuildRequest;
 use crate::module::BuildModule;
 use crate::path_util::{Scoped, Scope, Simple};
-use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile, ExplicitBuildResult};
+use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile, BuildRecord};
 use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken, Implicits, DEFAULT_IMPLICITS, HasImplicits};
 use crate::sync::{Mutexed, MutexRef};
 
@@ -70,7 +70,7 @@ impl BuildCache {
 
 		let needs_rebuild = |project, ctx: &BuildResult, cached: &BuildResultWithDeps| {
 			let project: Mutexed<Project<M>> = project;
-			Ok((project, ctx != &cached.result.result))
+			Ok((project, ctx != &cached.record.result))
 		};
 
 		let do_build = |project, ctx: BuildResult| {
@@ -97,7 +97,7 @@ impl BuildCache {
 			build_fn(project, &ctx, build_token)
 		};
 		let needs_rebuild = |project, ctx: &Ctx, cached: &BuildResultWithDeps| {
-			if cached.result.implicits.as_ref() != ctx.opt_implicits() {
+			if cached.record.implicits.as_ref() != ctx.opt_implicits() {
 				debug!("cached {:?} needs rebuild because its implicits have changed", cached);
 				Ok((project, true))
 			} else {
@@ -129,7 +129,7 @@ impl BuildCache {
 			Some(Cached::Fresh(cached)) => {
 				// already checked in this invocation, short-circuit
 				debug!("Short circuit, already built {:?} ({:?})", key, &cached);
-				CacheAware::Fresh(cached.result)
+				CacheAware::Fresh(cached.record)
 			},
 
 			Some(Cached::Cached(cached)) => {
@@ -140,7 +140,7 @@ impl BuildCache {
 				if !needs_build {
 					debug!("Marking cached result for {:?} ({:?}) as fresh", key, &cached);
 					project.build_cache.update(key.to_owned(), cached.to_owned())?;
-					CacheAware::Fresh(cached.result)
+					CacheAware::Fresh(cached.record)
 				} else {
 					CacheAware::Stale(ctx)
 				}
@@ -159,7 +159,7 @@ impl BuildCache {
 				let (project_ret, built) = build_fn(project, ctx)?;
 				project = project_ret;
 				project.build_cache.update(key.clone(), built.clone())?;
-				built.result
+				built.record
 			},
 		};
 		Ok((project, BuildResponse::new(result)))
@@ -212,22 +212,22 @@ impl BuildCache {
 }
 
 enum CacheAware<Ctx> {
-	Fresh(ExplicitBuildResult),
+	Fresh(BuildRecord),
 	Stale(Ctx),
 }
 
 pub struct BuildResponse {
 	// the result, to be persisted
-	pub result: ExplicitBuildResult,
+	pub result: BuildRecord,
 	override_response: Option<InvokeResponse>,
 }
 
 impl BuildResponse {
-	pub fn new(result: ExplicitBuildResult) -> Self {
+	pub fn new(result: BuildRecord) -> Self {
 		Self { result, override_response: None }
 	}
 
-	pub fn full(result: ExplicitBuildResult, response: InvokeResponse) -> Self {
+	pub fn full(result: BuildRecord, response: InvokeResponse) -> Self {
 		Self { result, override_response: Some(response) }
 	}
 	

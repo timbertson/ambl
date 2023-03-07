@@ -248,32 +248,31 @@ impl Default for DepStore {
 // we partition up the BuildResult enum types?
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BuildResultWithDeps {
-	pub result: ExplicitBuildResult, // the result of building this item
+	pub record: BuildRecord, // the result of building this item
 	pub deps: Option<DepSet>, // direct dependencies which were used to build this item. This will only be populated for Target + WASM deps
 }
 
 impl BuildResultWithDeps {
 	pub fn simple(result: BuildResult) -> BuildResultWithDeps {
-		BuildResultWithDeps { result: ExplicitBuildResult::simple(result), deps: None }
+		BuildResultWithDeps { record: BuildRecord::simple(result), deps: None }
 	}
 }
 
-impl std::ops::Deref for BuildResultWithDeps {
-	type Target = ExplicitBuildResult;
+// impl std::ops::Deref for BuildResultWithDeps {
+// 	type Target = BuildRecord;
 
-	fn deref(&self) -> &Self::Target {
-		&self.result
-	}
-}
+// 	fn deref(&self) -> &Self::Target {
+// 		&self.record
+// 	}
+// }
 
-// TODO rename this BuildResult, and then BuildResult can be BuiltValue or similar
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ExplicitBuildResult {
+pub struct BuildRecord {
 	pub implicits: Option<Implicits>,
-	pub result: BuildResult, // TODO rename value?
+	pub result: BuildResult,
 }
 
-impl ExplicitBuildResult {
+impl BuildRecord {
 	pub fn new(implicits: Implicits, result: BuildResult) -> Self {
 		Self { result, implicits: Some(implicits) }
 	}
@@ -371,7 +370,7 @@ impl BuildResult {
 // it's stored in Project, keyed by ActiveBuildToken
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DepSet {
-	pub deps: Vec<(BuildRequest, ExplicitBuildResult)>,
+	pub deps: Vec<(BuildRequest, BuildRecord)>,
 	pub checksum: ChecksumConfig,
 }
 
@@ -386,7 +385,7 @@ impl DepSet {
 		EMPTY_DEPSET_PTR
 	}
 
-	pub fn add(&mut self, request: BuildRequest, result: ExplicitBuildResult) {
+	pub fn add(&mut self, request: BuildRequest, result: BuildRecord) {
 		self.deps.push((request, result));
 	}
 
@@ -394,11 +393,11 @@ impl DepSet {
 		self.deps.len()
 	}
 
-	pub fn iter(&self) -> std::slice::Iter<(BuildRequest, ExplicitBuildResult)> {
+	pub fn iter(&self) -> std::slice::Iter<(BuildRequest, BuildRecord)> {
 		self.deps.iter()
 	}
 
-	pub fn get(&self, request: &BuildRequest) -> Option<&ExplicitBuildResult> {
+	pub fn get(&self, request: &BuildRequest) -> Option<&BuildRecord> {
 		self.deps.iter().find_map(|(dep_request, dep)| {
 			if request == dep_request {
 				Some(dep)
@@ -447,7 +446,7 @@ impl ActiveBuildState {
 			.map(|t| t.path())
 	}
 	
-	pub fn add(&mut self, request: BuildRequest, result: ExplicitBuildResult) {
+	pub fn add(&mut self, request: BuildRequest, result: BuildRecord) {
 		self.deps.add(request, result)
 	}
 

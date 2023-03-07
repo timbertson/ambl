@@ -641,7 +641,7 @@ impl<M: BuildModule> Project<M> {
 							}
 							let deps = project.collect_deps(build_token)?;
 							BuildResultWithDeps {
-								result: ExplicitBuildResult::new(
+								record: BuildRecord::new(
 									found_target.implicits.to_owned(),
 									BuildResult::File(PersistFile::from_path(
 										&dest_path,
@@ -719,7 +719,7 @@ impl<M: BuildModule> Project<M> {
 					
 					let persist = BuildResultWithDeps {
 						deps: Some(project.collect_deps(build_token)?),
-						result: ExplicitBuildResult::new(implicits.clone(), BuildResult::Wasm(result)),
+						record: BuildRecord::new(implicits.clone(), BuildResult::Wasm(result)),
 					};
 					Ok((project, persist))
 				};
@@ -757,7 +757,7 @@ impl<M: BuildModule> Project<M> {
 					}
 				};
 
-				Ok((project, BuildResponse::full(ExplicitBuildResult::simple(BuildResult::AlwaysClean), response)))
+				Ok((project, BuildResponse::full(BuildRecord::simple(BuildResult::AlwaysClean), response)))
 			},
 			BuildRequest::EnvVar(key) => {
 				BuildCache::build_trivial(project, request, || {
@@ -803,7 +803,7 @@ impl<M: BuildModule> Project<M> {
 					Ok(BuildResult::Env(None))
 				})
 			},
-			BuildRequest::Universe => Ok((project, BuildResponse::new(ExplicitBuildResult::simple(BuildResult::AlwaysDirty)))),
+			BuildRequest::Universe => Ok((project, BuildResponse::new(BuildRecord::simple(BuildResult::AlwaysDirty)))),
 		}?;
 
 		// always register dependency on parent, even if we short-circuited via the cache
@@ -829,7 +829,7 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
-	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: ExplicitBuildResult) -> Result<()> {
+	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: BuildRecord) -> Result<()> {
 		match key {
 			BuildRequest::Execute(_) => {
 				debug!("Skipping registration of execute dependency");

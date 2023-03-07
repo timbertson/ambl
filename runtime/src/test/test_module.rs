@@ -291,7 +291,7 @@ impl<'a> TestProject<'a> {
 		p.replace_rules(rules.clone());
 
 		p.cache_mut().invalidate_if(|dep| {
-			match dep.result.result {
+			match dep.record.result {
 				BuildResult::File(ref f) if f == &FAKE_FILE => false,
 				_ => true,
 			}
