@@ -1,3 +1,4 @@
+use ambl_common::ctx::TargetCtx;
 use log::*;
 use std::{fs, sync::{Arc, Mutex}};
 use ambl_common::rule::dsl;
@@ -131,7 +132,7 @@ fn rule_change_causes_rebuild() -> Result<()> {
 
 		let rule_m = p.new_module().rule_fn(|m, ctx| {
 			m.project.record("get_rules");
-			Ok(vec!(target("a", function("build").module("builder"))))
+			Ok(vec!(target("a", function("build").path("builder"))))
 		});
 		let m_name = rule_m.name.to_owned();
 		p.inject_rules_module(rule_m);
@@ -159,7 +160,7 @@ fn equivalent_rule_module_does_not_cause_rebuild() -> Result<()> {
 
 		let rule_m = p.new_module().rule_fn(|m, ctx| {
 			m.project.record("get_rules");
-			Ok(vec!(target("a", function("build").module("builder"))))
+			Ok(vec!(target("a", function("build").path("builder"))))
 		});
 		let m_name = rule_m.name.to_owned();
 		p.inject_rules_module(rule_m);
@@ -273,7 +274,7 @@ fn test_does_not_cache_wasm_call_failures() -> Result<()> {
 				Ok(())
 			}
 		});
-		let req = DependencyRequest::WasmCall(dsl::function("fn").module(&module.name));
+		let req = DependencyRequest::WasmCall(dsl::function("fn").path(&module.name));
 
 		p.inject_module(module);
 
@@ -284,6 +285,29 @@ fn test_does_not_cache_wasm_call_failures() -> Result<()> {
 
 		p.build_dep(&req)?;
 		eq!(p.log(), vec!("fail", "succeed"));
+
+		Ok(())
+	})
+}
+
+
+#[test]
+#[serial]
+fn test_implicits_change_causes_rebuild() -> Result<()> {
+	TestProject::in_tempdir(|p: &TestProject| {
+		let builder = |p: &TestProject, c: &TargetCtx| {
+			p.log().record("built");
+			c.write_dest("ok")
+		};
+
+		p.target_builder("target", builder);
+
+		p.build_file("target")?;
+		eq!(p.log(), vec!("built"));
+
+		p.inject_rule(sandbox::nix_compat());
+		p.build_file("target")?;
+		eq!(p.log(), vec!("built", "built"));
 
 		Ok(())
 	})

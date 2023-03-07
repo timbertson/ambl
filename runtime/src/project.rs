@@ -109,6 +109,30 @@ pub enum ProjectRule {
 	Mutable(RwRef<MutableRule>),
 }
 
+impl ProjectRule {
+	pub fn collate_raw_rules(mut implicits: Implicits, scope: &Scope, rules: Vec<Rule>) -> Result<(Implicits, Vec<ProjectRule>)> {
+			// merge implicits with any new options present in rules
+			let non_config_rules = rules.into_iter()
+				.filter_map(|rule| {
+					match rule {
+						Rule::Sandbox(sandbox) => {
+							implicits.merge_sandbox(sandbox);
+							None
+						},
+						Rule::Target(t) => Some(NonConfigRule::Target(t)),
+						Rule::Include(i) => Some(NonConfigRule::Include(i)),
+					}
+				});
+
+			let project_rules = non_config_rules.into_iter()
+					.map(|rule| {
+						ProjectRule::from_rule(rule, scope)
+					})
+					.collect::<Result<Vec<ProjectRule>>>()?;
+			Ok((implicits, project_rules))
+	}
+}
+
 // A wrapper encapsulating a single include's state,
 // from initial -> loading -> loaded
 #[derive(Clone, Debug)]
@@ -148,6 +172,16 @@ impl Implicits {
 impl Default for Implicits {
 	fn default() -> Self {
 		Self { sandbox: Default::default() }
+	}
+}
+
+pub trait HasImplicits {
+	fn opt_implicits(&self) -> Option<&Implicits>;
+}
+
+impl HasImplicits for &Implicits {
+	fn opt_implicits(&self) -> Option<&Implicits> {
+		Some(self)
 	}
 }
 
@@ -364,7 +398,7 @@ impl<M: BuildModule> Project<M> {
 			},
 		}
 	}
-
+	
 	fn handle_importable_rule<'a, 'b>(
 		mut project: ProjectMutex<'a, M>,
 		parent_implicits: &'b Implicits,
@@ -454,7 +488,7 @@ impl<M: BuildModule> Project<M> {
 									&request,
 									&BuildReason::Import)?;
 
-								let rules: Vec<Rule> = match persist_dep.result {
+								let rules: Vec<Rule> = match persist_dep.result.result {
 									BuildResult::Wasm(jvalue) => serde_json::from_value(jvalue.to_owned())
 										.with_context(|| format!("Deserializing JSON as a list of Rules:\n```\n{}\n```", &jvalue))?,
 									other => {
@@ -467,25 +501,8 @@ impl<M: BuildModule> Project<M> {
 						};
 
 						handle.with_write(|writeable| {
-							let mut implicits: Implicits = parent_implicits.clone();
-							// merge with any new options present in rules
-							let non_config_rules = rules.into_iter()
-								.filter_map(|rule| {
-									match rule {
-										Rule::Sandbox(sandbox) => {
-											implicits.merge_sandbox(sandbox);
-											None
-										},
-										Rule::Target(t) => Some(NonConfigRule::Target(t)),
-										Rule::Include(i) => Some(NonConfigRule::Include(i)),
-									}
-								});
-
-							let project_rules = non_config_rules.into_iter()
-									.map(|rule| {
-										ProjectRule::from_rule(rule, scope)
-									})
-									.collect::<Result<Vec<ProjectRule>>>()?;
+							let (implicits, project_rules) = ProjectRule::collate_raw_rules(
+								parent_implicits.clone(), scope, rules)?;
 							let nested = MutableRule::Nested(Nested {
 								implicits,
 								module_path: wasm_module_path,
@@ -525,8 +542,8 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, target))
 	}
 	
-	fn noop_ctx(project: Mutexed<Project<M>>) -> Result<ProjectMutexPair<M, ()>> {
-		Ok((project, ()))
+	fn noop_ctx<'a>(implicits: &'a Implicits) -> impl FnOnce(Mutexed<Project<M>>) -> Result<ProjectMutexPair<M, &'a Implicits>> {
+		|project| Ok((project, implicits))
 	}
 
 	/* Build this dependency, persisting (and returning) its result
@@ -624,11 +641,14 @@ impl<M: BuildModule> Project<M> {
 							}
 							let deps = project.collect_deps(build_token)?;
 							BuildResultWithDeps {
-								result: BuildResult::File(PersistFile::from_path(
-									&dest_path,
-									Some(name_scoped.flatten()),
-									deps.checksum
-								)?),
+								result: ExplicitBuildResult::new(
+									found_target.implicits.to_owned(),
+									BuildResult::File(PersistFile::from_path(
+										&dest_path,
+										Some(name_scoped.flatten()),
+										deps.checksum
+									)?)
+								),
 								deps: Some(deps),
 							}
 						} else {
@@ -652,12 +672,12 @@ impl<M: BuildModule> Project<M> {
 				};
 				
 				BuildCache::build_with_deps(
-					project, implicits, reason, request,
+					project, reason, request,
 					get_target, do_build)
 			},
 
 			BuildRequest::FileExistence(path) => {
-				BuildCache::build_simple(project, implicits, request, |project| {
+				BuildCache::build_simple(project, request, |project| {
 					let mut project: Mutexed<Project<M>> = project;
 					let root_rule = Arc::clone(&project.root_rule);
 					let file_simple = path.0.clone().into_simple_or_self();
@@ -679,7 +699,7 @@ impl<M: BuildModule> Project<M> {
 			},
 
 			BuildRequest::WasmCall(spec) => {
-				let do_build = |project, _ctx: &(), build_token| {
+				let do_build = |project, _implicits: &&Implicits, build_token| {
 					let mut project: Mutexed<Project<M>> = project;
 
 					let (project_ret, mut wasm_module) = Self::load_module_inner(
@@ -699,17 +719,17 @@ impl<M: BuildModule> Project<M> {
 					
 					let persist = BuildResultWithDeps {
 						deps: Some(project.collect_deps(build_token)?),
-						result: BuildResult::Wasm(result),
+						result: ExplicitBuildResult::new(implicits.clone(), BuildResult::Wasm(result)),
 					};
 					Ok((project, persist))
 				};
 
 				BuildCache::build_with_deps(
-					project, implicits, reason, request,
-					Self::noop_ctx, do_build)
+					project, reason, request,
+					Self::noop_ctx(implicits), do_build)
 			},
 			BuildRequest::Fileset(spec) => {
-				BuildCache::build_trivial(project, implicits, request, || {
+				BuildCache::build_trivial(project, request, || {
 					Ok(BuildResult::Fileset(fileset::scan(spec)?))
 				})
 			},
@@ -737,10 +757,10 @@ impl<M: BuildModule> Project<M> {
 					}
 				};
 
-				Ok((project, BuildResponse::full(BuildResult::AlwaysClean, response)))
+				Ok((project, BuildResponse::full(ExplicitBuildResult::simple(BuildResult::AlwaysClean), response)))
 			},
 			BuildRequest::EnvVar(key) => {
-				BuildCache::build_trivial(project, implicits, request, || {
+				BuildCache::build_trivial(project, request, || {
 					let value = match std::env::var_os(key) {
 						Some(os) => Some(os.into_string().map_err(|_| anyhow!("${} is not valid unicode", key))?),
 						None => None,
@@ -749,7 +769,7 @@ impl<M: BuildModule> Project<M> {
 				})
 			},
 			BuildRequest::EnvKeys(glob) => {
-				BuildCache::build_trivial(project, implicits, request, || {
+				BuildCache::build_trivial(project, request, || {
 					let pat = glob::Pattern::new(glob)?;
 					let mut keys: Vec<String> = std::env::vars()
 						.map(|(k,v)| k)
@@ -762,7 +782,7 @@ impl<M: BuildModule> Project<M> {
 			BuildRequest::EnvLookup(lookup) => {
 				// More efficient than doing it client-side, since we only invalidate if the
 				// result changes, not the envvar
-				BuildCache::build_trivial(project, implicits, request, || {
+				BuildCache::build_trivial(project, request, || {
 					let value = match std::env::var_os(&lookup.key) {
 						Some(os) => Some(os.into_string().map_err(|_| anyhow!("${} is not valid unicode", &lookup.key))?),
 						None => None,
@@ -783,7 +803,7 @@ impl<M: BuildModule> Project<M> {
 					Ok(BuildResult::Env(None))
 				})
 			},
-			BuildRequest::Universe => Ok((project, BuildResponse::new(BuildResult::AlwaysDirty))),
+			BuildRequest::Universe => Ok((project, BuildResponse::new(ExplicitBuildResult::simple(BuildResult::AlwaysDirty)))),
 		}?;
 
 		// always register dependency on parent, even if we short-circuited via the cache
@@ -809,7 +829,7 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	// we just built something as requested, register it as a dependency on the parent target
-	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: BuildResult) -> Result<()> {
+	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: ExplicitBuildResult) -> Result<()> {
 		match key {
 			BuildRequest::Execute(_) => {
 				debug!("Skipping registration of execute dependency");
@@ -838,8 +858,8 @@ impl<M: BuildModule> Project<M> {
 		Ok(parent_dep_set.keep_tempdir(tmp))
 	}
 	
-	pub fn lookup<'a>(&'a self, implicits: &'a Implicits, key: &'a BuildRequest) -> Result<Option<&'a Cached>> {
-		self.build_cache.lookup(implicits, key)
+	pub fn lookup<'a>(&'a self, key: &'a BuildRequest) -> Result<Option<&'a Cached>> {
+		self.build_cache.lookup(key)
 	}
 
 	pub fn save(&self) -> Result<()> {
@@ -871,10 +891,13 @@ impl<M: BuildModule> Project<M> {
 	}
 
 	#[cfg(test)]
-	pub fn replace_rules(&mut self, v: Vec<Rule>) {
+	pub fn replace_rules(&mut self, rules: Vec<Rule>) {
 		let scope = Scope::root();
+		debug!("replacing root rules: {:?}", &rules);
+		let (implicits, project_rules) = ProjectRule::collate_raw_rules(Default::default(), &scope, rules).unwrap();
 		self.root_rule = Arc::new(ProjectRule::Mutable(RwRef::new(MutableRule::Nested(Nested {
-			rules: v.into_iter().map(|r| ProjectRule::from_rule(r, &scope).unwrap()).collect(),
+			implicits,
+			rules: project_rules,
 			relative_scope: None,
 			absolute_scope: scope,
 			module_path: None,
@@ -905,4 +928,10 @@ pub struct FoundTarget<'a> {
 	pub rel_name: Simple, // the name relative to the build's scope
 	pub build: ResolvedFnSpec<'a>,
 	pub implicits: &'a Implicits,
+}
+
+impl<'a> HasImplicits for Option<FoundTarget<'a>> {
+	fn opt_implicits(&self) -> Option<&Implicits> {
+		self.as_ref().map(|t| t.implicits)
+	}
 }

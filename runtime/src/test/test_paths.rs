@@ -36,10 +36,10 @@ fn test_paths_of_nested_module() -> Result<()> {
 
 		// define a target (which we'll scope under `subdir/`) which is built by nested-build
 		let nested_rule_m = p.new_module().rule_fn(|m, ctx| {
-			Ok(vec!(target("a", function("build").module("../nested-build"))))
+			Ok(vec!(target("a", function("build").path("../nested-build"))))
 		});
 
-		p.inject_rule(include(module(&nested_rule_m.name).scope("subdir")));
+		p.inject_rule(include(&nested_rule_m.name).scope("subdir"));
 		p.inject_module(nested_rule_m);
 		p.inject_module(nested_build_m);
 
@@ -66,7 +66,7 @@ fn test_module_which_is_itself_a_target() -> Result<()> {
 			ctx.write_dest("(not used...)")
 		});
 
-		p.inject_rule(target("a", function("build").module("my.wasm")));
+		p.inject_rule(target("a", function("build").path("my.wasm")));
 		
 		// this isn't going via the FS but we're making sure it gets loaded from the
 		// target path (within .ambl/out)

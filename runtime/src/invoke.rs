@@ -17,18 +17,18 @@ use crate::sync::MutexHandle;
 
 pub fn perform<'a, M: BuildModule>(
 	project: ProjectMutex<'a, M>,
-	module_path: &Unscoped,
 	target_context: &TargetContext,
+	module_path: &Unscoped,
 	token: ActiveBuildToken,
 	request: Invoke,
 ) -> Result<InvokeResponse> {
 	let response = match request {
 		Invoke::Action(action) => {
-			crate::debug::shell_on_failure(perform_invoke(project, module_path, target_context, token, &action))
+			crate::debug::shell_on_failure(perform_invoke(project, target_context, module_path, token, &action))
 		},
 		Invoke::Dependency(request) => {
 			let build_request = BuildRequest::from(request, Some(module_path), &target_context.scope)?;
-			let (project, persist) = Project::build(project, &target_context.options, &build_request, &BuildReason::Dependency(token))?;
+			let (project, persist) = Project::build(project, &target_context.implicits, &build_request, &BuildReason::Dependency(token))?;
 			persist.into_response()
 		},
 	};
@@ -38,8 +38,8 @@ pub fn perform<'a, M: BuildModule>(
 
 fn perform_invoke<M: BuildModule>(
 	mut project: ProjectMutex<M>,
-	module_path: &Unscoped,
 	target_context: &TargetContext,
+	module_path: &Unscoped,
 	token: ActiveBuildToken,
 	action: &InvokeAction,
 ) -> Result<InvokeResponse> {
@@ -114,9 +114,9 @@ fn built_source_path<'a, M: BuildModule>(
 		FileSource::Target(path) => {
 			let request = DependencyRequest::FileDependency(path.to_owned());
 			let build_request = BuildRequest::from(request, Some(module_path), scope)?;
-			let (project_ret, persist) = Project::build(project, &target_context.options, &build_request, &BuildReason::Dependency(token))?;
+			let (project_ret, persist) = Project::build(project, &target_context.implicits, &build_request, &BuildReason::Dependency(token))?;
 			project = project_ret;
-			let target = match persist.result {
+			let target = match persist.result.result {
 				BuildResult::File(t) => t.target,
 				_ => None,
 			};

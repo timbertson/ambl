@@ -185,7 +185,7 @@ impl StateRef {
 			Entry::Vacant(entry) => {
 				entry.insert(TargetContext {
 					scope: f.scope.clone(),
-					options: implicits.clone(),
+					implicits: implicits.clone(),
 				});
 				true
 			}
@@ -262,7 +262,7 @@ impl BuildModule for WasmModule {
 				let target_context = store_innter.target_contexts.get(&token)
 					.ok_or_else(|| anyhow!("invoke called without an active scope; this should be impossible"))?;
 				let project = project_handle.lock("ambl_invoke")?;
-				invoke::perform(project, &module_path, target_context, token, request)
+				invoke::perform(project, target_context, &module_path, token, request)
 			})();
 			debug!("ambl_invoke: returning {:?} to WASM module", response);
 			let result: Result<()> = (|| {

@@ -128,22 +128,15 @@ pub struct PersistFileset {
 // dumb workaround for JSON only allowing string keys
 #[derive(Serialize, Deserialize)]
 struct DepStorePersist {
-	items: Vec<(Implicits, Vec<(BuildRequest, BuildResultWithDeps)>)>,
+	items: Vec<(BuildRequest, BuildResultWithDeps)>,
 }
 
-impl From<HashMap<Implicits, HashMap<BuildRequest, Cached>>> for DepStorePersist {
-	fn from(map: HashMap<Implicits, HashMap<BuildRequest, Cached>>) -> Self {
+impl From<HashMap<BuildRequest, Cached>> for DepStorePersist {
+	fn from(map: HashMap<BuildRequest, Cached>) -> Self {
 		Self {
-			items: map
-				.into_iter()
-				.map(|(implicits, cache)|
-					(implicits,
-						cache.into_iter().map(|(key, value)|
-							(key, value.into_raw())
-						).collect()
-					)
-				)
-				.collect()
+			items: map.into_iter().map(|(key, value)|
+				(key, value.into_raw())
+			).collect()
 		}
 	}
 }
@@ -151,16 +144,9 @@ impl From<HashMap<Implicits, HashMap<BuildRequest, Cached>>> for DepStorePersist
 impl From<DepStorePersist> for DepStore {
 	fn from(store: DepStorePersist) -> Self {
 		Self {
-			cache: store.items
-				.into_iter()
-				.map(|(implicits, cache)|
-					(implicits,
-						cache.into_iter().map(|(key, value)|
-							(key, Cached::Cached(value))
-						).collect()
-					)
-				)
-				.collect()
+			cache: store.items.into_iter().map(|(key, value)|
+				(key, Cached::Cached(value))
+			).collect()
 		}
 	}
 }
@@ -189,7 +175,7 @@ impl Cached {
 
 #[derive(Debug)]
 pub struct DepStore {
-	cache: HashMap<Implicits, HashMap<BuildRequest, Cached>>,
+	cache: HashMap<BuildRequest, Cached>,
 }
 
 const AMBL_CACHE_PATH: &str = ".ambl/cache.json";
@@ -233,25 +219,22 @@ impl DepStore {
 	pub fn invalidate_if<F: Fn(&BuildResultWithDeps) -> bool>(&mut self, f: F) -> () {
 		// Mark all Fresh entries as Cached
 		debug!("Invalidating cache ...");
-		for (_, cache) in self.cache.iter_mut() {
-			for (_,v) in cache.iter_mut() {
-				match v {
-					Cached::Fresh(raw) if f(raw) => *v = Cached::Cached(raw.to_owned()), // TODO can we skip this clone?
-					_ => (),
-				}
+		for (_, v) in self.cache.iter_mut() {
+			match v {
+				Cached::Fresh(raw) if f(raw) => *v = Cached::Cached(raw.to_owned()), // TODO can we skip this clone?
+				_ => (),
 			}
 		}
 	}
 
 	// TODO remove these result types if we don't do IO directly...
-	pub fn update(&mut self, implicits: Implicits, key: BuildRequest, persist: BuildResultWithDeps) -> Result<()> {
-		let cache = self.cache.entry(implicits).or_default();
-		cache.insert(key, Cached::Fresh(persist));
+	pub fn update(&mut self, key: BuildRequest, persist: BuildResultWithDeps) -> Result<()> {
+		self.cache.insert(key, Cached::Fresh(persist));
 		Ok(())
 	}
 
-	pub fn lookup<'a>(&'a self, implicits: &'a Implicits, key: &BuildRequest) -> Result<Option<&'a Cached>> {
-		Ok(self.cache.get(implicits).and_then(|cache| cache.get(key)))
+	pub fn lookup<'a>(&'a self, key: &BuildRequest) -> Result<Option<&'a Cached>> {
+		Ok(self.cache.get(key))
 	}
 }
 
@@ -265,21 +248,50 @@ impl Default for DepStore {
 // we partition up the BuildResult enum types?
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BuildResultWithDeps {
-	pub result: BuildResult, // the result of building this item
+	pub result: ExplicitBuildResult, // the result of building this item
 	pub deps: Option<DepSet>, // direct dependencies which were used to build this item. This will only be populated for Target + WASM deps
 }
 
 impl BuildResultWithDeps {
 	pub fn simple(result: BuildResult) -> BuildResultWithDeps {
-		BuildResultWithDeps { result, deps: None }
+		BuildResultWithDeps { result: ExplicitBuildResult::simple(result), deps: None }
 	}
 }
 
 impl std::ops::Deref for BuildResultWithDeps {
-	type Target = BuildResult;
+	type Target = ExplicitBuildResult;
 
 	fn deref(&self) -> &Self::Target {
 		&self.result
+	}
+}
+
+// TODO rename this BuildResult, and then BuildResult can be BuiltValue or similar
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExplicitBuildResult {
+	pub implicits: Option<Implicits>,
+	pub result: BuildResult, // TODO rename value?
+}
+
+impl ExplicitBuildResult {
+	pub fn new(implicits: Implicits, result: BuildResult) -> Self {
+		Self { result, implicits: Some(implicits) }
+	}
+
+	pub fn simple(result: BuildResult) -> Self {
+		Self { result, implicits: None }
+	}
+
+	pub fn is_equivalent_to(&self, prior: &Self) -> bool {
+		let Self { implicits: self_implicits, result: self_result } = self;
+		let Self { implicits: prior_implicits, result: prior_result } = prior;
+		// TODO the implicits check is overly cautious. If implicits differ
+		// but the result hasn't changed, all we _really_ need to do is update the cache
+		// with the new implicits but not rebuild.
+		// But that's awkward and rare, so we just call it dirty for now.
+		let result = self_implicits == prior_implicits && self_result.is_equivalent_to(prior_result);
+		debug!("is_equivalent_to({:?}, {:?}) -> {:?}", self, prior, result);
+		result
 	}
 }
 
@@ -301,60 +313,56 @@ pub enum BuildResult {
 
 impl BuildResult {
 	pub fn is_equivalent_to(&self, prior: &Self) -> bool {
-		let result = {
-			let incompatible = || {
-				debug!("Comparing incompatible persisted dependencies: ({:?}, {:?})", self, prior);
-				false
-			};
-			use BuildResult::*;
-			match (self, prior) {
-				(File(a), File(b)) => {
-					let PersistFile { checksum: checksum_a, stat: stat_a, target: target_a } = a;
-					let PersistFile { checksum: checksum_b, stat: stat_b, target: target_b } = b;
-					if target_a != target_b {
-						// If the target differs, always consider it changed
-						// We could possibly make this return true under certain conditions
-						// but it's rare enough not to bother.
-						false
-					} else if stat_a == stat_b {
-						// not modified, don't need to test checksums
-						true
-					} else {
-						// file might have changed, compare checksums.
-						match (checksum_a, checksum_b) {
-							// If either old or new is disabled, disregard checksum
-							(PersistChecksum::Disabled, _) | (_, PersistChecksum::Disabled) => false,
-							
-							(checksum_a, checksum_b) => checksum_a == checksum_b,
-						}
-					}
-				},
-				(File(_), _) => incompatible(),
-
-				(Bool(a), Bool(b)) => a == b,
-				(Bool(_), _) => incompatible(),
-
-				(Env(a), Env(b)) => a == b,
-				(Env(_), _) => incompatible(),
-
-				(EnvKeys(a), EnvKeys(b)) => a == b,
-				(EnvKeys(_), _) => incompatible(),
-
-				(Wasm(a), Wasm(b)) => a == b,
-				(Wasm(_), _) => incompatible(),
-
-				(Fileset(a), Fileset(b)) => a == b,
-				(Fileset(_), _) => incompatible(),
-
-				(AlwaysDirty, AlwaysDirty) => false,
-				(AlwaysDirty, _) => incompatible(),
-
-				(AlwaysClean, AlwaysClean) => true,
-				(AlwaysClean, _) => incompatible(),
-			}
+		let incompatible = || {
+			debug!("Comparing incompatible persisted dependencies: ({:?}, {:?})", self, prior);
+			false
 		};
-		debug!("is_equivalent_to({:?}, {:?}) -> {:?}", self, prior, result);
-		result
+		use BuildResult::*;
+		match (self, prior) {
+			(File(a), File(b)) => {
+				let PersistFile { checksum: checksum_a, stat: stat_a, target: target_a } = a;
+				let PersistFile { checksum: checksum_b, stat: stat_b, target: target_b } = b;
+				if target_a != target_b {
+					// If the target differs, always consider it changed
+					// We could possibly make this return true under certain conditions
+					// but it's rare enough not to bother.
+					false
+				} else if stat_a == stat_b {
+					// not modified, don't need to test checksums
+					true
+				} else {
+					// file might have changed, compare checksums.
+					match (checksum_a, checksum_b) {
+						// If either old or new is disabled, disregard checksum
+						(PersistChecksum::Disabled, _) | (_, PersistChecksum::Disabled) => false,
+						
+						(checksum_a, checksum_b) => checksum_a == checksum_b,
+					}
+				}
+			},
+			(File(_), _) => incompatible(),
+
+			(Bool(a), Bool(b)) => a == b,
+			(Bool(_), _) => incompatible(),
+
+			(Env(a), Env(b)) => a == b,
+			(Env(_), _) => incompatible(),
+
+			(EnvKeys(a), EnvKeys(b)) => a == b,
+			(EnvKeys(_), _) => incompatible(),
+
+			(Wasm(a), Wasm(b)) => a == b,
+			(Wasm(_), _) => incompatible(),
+
+			(Fileset(a), Fileset(b)) => a == b,
+			(Fileset(_), _) => incompatible(),
+
+			(AlwaysDirty, AlwaysDirty) => false,
+			(AlwaysDirty, _) => incompatible(),
+
+			(AlwaysClean, AlwaysClean) => true,
+			(AlwaysClean, _) => incompatible(),
+		}
 	}
 }
 
@@ -363,7 +371,7 @@ impl BuildResult {
 // it's stored in Project, keyed by ActiveBuildToken
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DepSet {
-	pub deps: Vec<(BuildRequest, BuildResult)>,
+	pub deps: Vec<(BuildRequest, ExplicitBuildResult)>,
 	pub checksum: ChecksumConfig,
 }
 
@@ -378,7 +386,7 @@ impl DepSet {
 		EMPTY_DEPSET_PTR
 	}
 
-	pub fn add(&mut self, request: BuildRequest, result: BuildResult) {
+	pub fn add(&mut self, request: BuildRequest, result: ExplicitBuildResult) {
 		self.deps.push((request, result));
 	}
 
@@ -386,13 +394,13 @@ impl DepSet {
 		self.deps.len()
 	}
 
-	pub fn iter(&self) -> std::slice::Iter<(BuildRequest, BuildResult)> {
+	pub fn iter(&self) -> std::slice::Iter<(BuildRequest, ExplicitBuildResult)> {
 		self.deps.iter()
 	}
 
-	pub fn get(&self, request: &BuildRequest) -> Option<&BuildResult> {
-		self.deps.iter().find_map(|(key, dep)| {
-			if key == request {
+	pub fn get(&self, request: &BuildRequest) -> Option<&ExplicitBuildResult> {
+		self.deps.iter().find_map(|(dep_request, dep)| {
+			if request == dep_request {
 				Some(dep)
 			} else {
 				None
@@ -439,7 +447,7 @@ impl ActiveBuildState {
 			.map(|t| t.path())
 	}
 	
-	pub fn add(&mut self, request: BuildRequest, result: BuildResult) {
+	pub fn add(&mut self, request: BuildRequest, result: ExplicitBuildResult) {
 		self.deps.add(request, result)
 	}
 

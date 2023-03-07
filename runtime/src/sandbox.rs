@@ -59,9 +59,9 @@ impl Sandbox {
 
 	fn collect_paths<'a, 'b, M: BuildModule>(
 		project: &'a Project<M>,
-		implicits: &'b Implicits,
 		dest: &mut HashMap<Simple, Option<Simple>>,
 		key: &'b BuildRequest,
+		result: &'b BuildResult,
 	) -> Result<()> where 'a : 'b {
 		match key {
 			BuildRequest::FileDependency(cpath) => {
@@ -69,10 +69,7 @@ impl Sandbox {
 					if dest.contains_key(&rel) {
 						return Ok(());
 					}
-					let persist = project.lookup(implicits, &key)?
-						.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
-						.raw();
-					match &persist.result {
+					match result {
 						BuildResult::File(file) => {
 							if let Some(output) = file.target.to_owned() {
 								// don't use `target`, use the shadow path within .ambl/out/`target`
@@ -85,14 +82,18 @@ impl Sandbox {
 								debug!("Adding file to sandbox: {}", &rel);
 								dest.insert(rel, None);
 							}
+
+							let persist = project.lookup(&key)?
+								.ok_or_else(|| anyhow!("Couldn't find result in build cache for: {:?}", key))?
+								.raw();
 							if let Some(deps) = &persist.deps {
 								// don't include transitive deps if there is a checksum,
 								// as that may be impure
 								match deps.checksum {
 									ChecksumConfig::Enabled => (),
 									ChecksumConfig::Disabled => {
-										for (key, _) in deps.iter() {
-											Self::collect_paths(project, implicits, dest, key)?;
+										for (key, result) in deps.iter() {
+											Self::collect_paths(project, dest, key, &result.result)?;
 										}
 									}
 								}
@@ -119,8 +120,8 @@ impl Sandbox {
 	) -> Result<(Mutexed<'a, Project<M>>, TempDir, InvokeResponse)> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
 		let mut rel_paths = Default::default();
-		for (dep, state) in dep_set.deps.iter() {
-			Self::collect_paths(&project, implicits, &mut rel_paths, dep)
+		for (dep, result) in dep_set.deps.iter() {
+			Self::collect_paths(&project, &mut rel_paths, dep, &result.result)
 				.context("initializing command sandbox")?;
 		}
 		
@@ -137,7 +138,7 @@ impl Sandbox {
 				let request = BuildRequest::EnvKeys("NIX_*".to_owned());
 				let (project_ret, value) = Project::<M>::build(project, implicits, &request, reason)?;
 				project = project_ret;
-				match value.result {
+				match value.result.result {
 					BuildResult::EnvKeys(keys) => {
 						for key in keys {
 							env_inherit.insert(key.to_owned());
@@ -162,7 +163,7 @@ impl Sandbox {
 		for k in env_inherit {
 			let request = BuildRequest::EnvVar(k.to_owned());
 			let (project_ret, value) = Project::<M>::build(project, implicits, &request, reason)?;
-			match value.result {
+			match value.result.result {
 				BuildResult::Env(value) => {
 					if let Some(v) = value {
 						cmd.env(k, v);

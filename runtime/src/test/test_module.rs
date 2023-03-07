@@ -13,9 +13,9 @@ use tempdir::TempDir;
 use ambl_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, InvokeResponse, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::build::BuildReason;
+use crate::build::{BuildReason, TargetContext};
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
-use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project};
+use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, Implicits, DEFAULT_IMPLICITS};
 use crate::persist::{PersistFile, BuildResult, BuildResultWithDeps, FileStat, Mtime, PersistChecksum};
 use crate::module::BuildModule;
 use crate::sync::{Mutexed, MutexHandle};
@@ -134,7 +134,7 @@ impl<'a> TestModule<'a> {
 	}
 	
 	pub fn default_build_fn(&self) -> FunctionSpec {
-		dsl::function(DEFAULT_BUILD_FN).module(&self.name)
+		dsl::function(DEFAULT_BUILD_FN).path(&self.name)
 	}
 
 	pub fn rule_fn(mut self, f: fn(&TestModule<'a>, &BaseCtx) -> Result<Vec<Rule>>) -> Self {
@@ -154,10 +154,10 @@ impl<'a> BuildModule for TestModule<'a> {
 		Ok(module.to_owned())
 	}
 
-	fn call<Ctx: AsRef<BaseCtx> + Serialize>(&mut self, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+	fn build<Ctx: AsRef<BaseCtx> + Serialize>(&mut self, implicits: &Implicits, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
 		if f.fn_name == "get_rules" {
 			let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
-			TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
+			TestInvoker::wrap(self.project, implicits, &self.module_path, &f.scope, &mut ctx, |ctx| {
 				self.rules(ctx)
 			})
 		} else {
@@ -172,12 +172,12 @@ impl<'a> BuildModule for TestModule<'a> {
 				let token = ctx.token;
 				debug!("running builder for {} with token {:?}", path, token);
 
-				TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
+				TestInvoker::wrap(self.project, implicits, &self.module_path, &f.scope, &mut ctx, |ctx| {
 					f_impl(self.project, &*ctx)
 				})
 			} else if let Some(f_impl) = self.anon_fns.get(fn_name) {
 				let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
-				TestInvoker::wrap(self.project, &self.module_path, &f.scope, &mut ctx, |ctx| {
+				TestInvoker::wrap(self.project, implicits, &self.module_path, &f.scope, &mut ctx, |ctx| {
 					f_impl(self.project, &*ctx)
 				})
 			} else {
@@ -193,7 +193,7 @@ impl<'a> BuildModule for TestModule<'a> {
 struct BuildState<'a, 'b, 'c> {
 	project: &'a TestProject<'a>,
 	module: &'b Unscoped,
-	scope: &'c Scope<'c>,
+	target_context: &'c TargetContext,
 }
 
 lazy_static::lazy_static! {
@@ -209,6 +209,7 @@ struct TestInvoker {
 impl TestInvoker {
 	fn wrap<'a, 'b, 'c, R: Serialize, C: AsRef<BaseCtx> + AsMut<BaseCtx>, F: FnOnce(&C) -> Result<R>>(
 		project: &'a TestProject<'a>,
+		implicits: &'b Implicits,
 		module: &'b Unscoped,
 		scope: &'c Scope,
 		ctx: &mut C,
@@ -217,11 +218,12 @@ impl TestInvoker {
 		let ctx_mut = ctx.as_mut();
 		let token = ActiveBuildToken::from_raw(ctx_mut.token);
 		ctx_mut._override_invoker(Box::new(TestInvoker { token }));
+		let target_context = TargetContext { scope: scope.clone(), implicits: implicits.clone() };
 		
 		let state = BuildState {
 			module,
 			project,
-			scope,
+			target_context: &target_context,
 		};
 
 		// we can pretend it's 'static, because it never lasts in the map longer than 'a
@@ -258,8 +260,8 @@ impl Invoker for TestInvoker {
 			.unwrap()
 			.to_owned();
 		drop(map);
-		let BuildState { project, module, scope } = build_state;
-		invoke::perform(project.lock(), module, scope, self.token, request)
+		let BuildState { project, module, target_context } = build_state;
+		invoke::perform(project.lock(), target_context, module, self.token, request)
 	}
 }
 
@@ -289,7 +291,7 @@ impl<'a> TestProject<'a> {
 		p.replace_rules(rules.clone());
 
 		p.cache_mut().invalidate_if(|dep| {
-			match dep.result {
+			match dep.result.result {
 				BuildResult::File(ref f) if f == &FAKE_FILE => false,
 				_ => true,
 			}
@@ -355,21 +357,22 @@ impl<'a> TestProject<'a> {
 	}
 	
 	// low-level module / rule modification
-	pub fn inject_rule(&self, v: Rule) -> &Self {
+	pub fn inject_rule<R: Into<Rule>>(&self, v: R) -> &Self {
 		let mut r = self.rules.lock().unwrap();
-		r.push(v);
+		r.push(v.into());
 		let mut p = self.lock();
 		p.replace_rules(r.clone());
 		drop(p);
 		self
 	}
 
+	// injects a module and includes it in the root ruleset
 	pub fn inject_rules_module(&self, m: TestModule<'a>) -> &Self {
-		let mut mod_rule = dsl::module(&m.name);
+		let mut mod_rule = dsl::include(&m.name);
 		if let Some(ref scope) = m.scope {
 			mod_rule = mod_rule.scope(scope);
 		}
-		self.inject_rule(dsl::include(mod_rule));
+		self.inject_rule(mod_rule);
 		self.inject_module(m)
 	}
 
@@ -420,7 +423,7 @@ impl<'a> TestProject<'a> {
 
 	fn build_full(&self, req: &BuildRequest) -> Result<InvokeResponse> {
 		let project = self.lock();
-		let (project, result) = Project::build(project, req, &BuildReason::Explicit)
+		let (project, result) = Project::build(project, &DEFAULT_IMPLICITS, req, &BuildReason::Explicit)
 			.with_context(|| format!("Building {:?}", req))?;
 
 		let response = result.into_response();
@@ -434,7 +437,11 @@ impl<'a> TestProject<'a> {
 
 	fn invoke_full(&self, req: &Invoke) -> Result<InvokeResponse> {
 		let module = Unscoped::new("_fake_root_module".to_owned());
-		let result = invoke::perform(self.lock(), &module, Scope::static_root(), self.token, req.to_owned())
+		let target_context = TargetContext {
+			scope: Scope::root(),
+			implicits: Default::default(),
+		};
+		let result = invoke::perform(self.lock(), &target_context, &module, self.token, req.to_owned())
 			.with_context(|| format!("Building {:?}", req));
 
 		// testcases run multiple builds, make sure we don't short-circuit between them

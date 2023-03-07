@@ -1,8 +1,11 @@
 use std::{fs, sync::{Arc, Mutex}};
 use ambl_common::build::Stdout;
+use ambl_common::ctx::TargetCtx;
+use ambl_common::rule::dsl;
 use serial_test::serial;
 
 use anyhow::*;
+use crate::build::TargetContext;
 use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::Project};
 use ambl_common::{rule::dsl::*, build::{DependencyRequest}};
 use super::util::*;
@@ -47,6 +50,43 @@ fn run_can_only_see_dependencies() -> Result<()> {
 			"mtime",
 			"plain_file_dep",
 		));
+		Ok(())
+	})
+}
+
+
+#[test]
+#[serial]
+fn run_is_influenced_by_implicit_sandbox_config() -> Result<()> {
+	TestProject::in_tempdir(|p: &TestProject| {
+		let builder = |p: &TestProject, c: &TargetCtx| {
+			c.write_dest(
+				c.run_output(cmd("bash").arg("-euc").arg("echo ${NIX_FAKE_ENV:-UNSET}"))?
+			)
+		};
+
+		p.target_builder("fake-env", builder);
+		
+		p.inject_rules_module(p.new_module().rule_fn(|m, ctx| {
+			Ok(vec!(
+				target("nix-fake-env", m.default_build_fn()),
+				sandbox::nix_compat(),
+			))
+		}).builder(builder));
+
+		p.inject_rules_module(p.new_module().rule_fn(|m, ctx| {
+			Ok(vec!(
+				target("allow-fake-env", m.default_build_fn()),
+				sandbox::allow_env("NIX_FAKE_ENV"),
+			))
+		}).builder(builder));
+
+		std::env::set_var("NIX_FAKE_ENV", "test-value");
+
+		eq!("UNSET", p.build_file_contents("fake-env")?);
+		eq!("test-value", p.build_file_contents("nix-fake-env")?);
+		eq!("test-value", p.build_file_contents("allow-fake-env")?);
+
 		Ok(())
 	})
 }
