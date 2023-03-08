@@ -152,15 +152,41 @@ pub struct Implicits {
 }
 
 lazy_static::lazy_static! {
-	pub static ref DEFAULT_IMPLICITS: Implicits = Implicits {
-		sandbox: ProjectSandbox {
-			nix: false,
-			allow_env: BTreeSet::new(),
+	static ref EMPTY_IMPLICITS: Implicits = {
+		Implicits {
+			sandbox: ProjectSandbox {
+				nix: false,
+				allow_env: BTreeSet::new(),
+			}
+		}
+	};
+
+	static ref DEFAULT_IMPLICITS: Implicits = {
+		let use_nix_env = std::env::var("AMBL_INHERIT_NIX");
+		let allow_env = std::env::var("AMBL_INHERIT_ENVVARS");
+		let nix = use_nix_env.as_ref().map(|x|x.as_str()).unwrap_or("false") == "true";
+		let allow_env = allow_env.as_ref().map(|x|
+			x.split_ascii_whitespace()
+			.map(|s| s.to_owned()).collect::<BTreeSet<String>>()
+		).unwrap_or(BTreeSet::new());
+		Implicits {
+			sandbox: ProjectSandbox {
+				nix,
+				allow_env,
+			}
 		}
 	};
 }
 
 impl Implicits {
+	pub fn default_static() -> &'static Self {
+		&DEFAULT_IMPLICITS
+	}
+
+	pub fn none() -> &'static Self {
+		&EMPTY_IMPLICITS
+	}
+
 	pub fn merge_sandbox(&mut self, sandbox: rule::Sandbox) {
 		match sandbox {
 			rule::Sandbox::Nix => { self.sandbox.nix = true; }

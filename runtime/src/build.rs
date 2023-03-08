@@ -8,7 +8,7 @@ use crate::build_request::BuildRequest;
 use crate::module::BuildModule;
 use crate::path_util::{Scoped, Scope, Simple};
 use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile, BuildRecord};
-use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken, Implicits, DEFAULT_IMPLICITS, HasImplicits};
+use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken, Implicits, HasImplicits};
 use crate::sync::{Mutexed, MutexRef};
 
 
@@ -182,7 +182,7 @@ impl BuildCache {
 			
 			// always build the dep (which will be immediate if it's cached and doesn't need rebuilding)
 			// TODO handle failure
-			let implicits = dep_cached.implicits.as_ref().unwrap_or(&DEFAULT_IMPLICITS);
+			let implicits = dep_cached.implicits.as_ref().unwrap_or(Implicits::none());
 			let (project_ret, dep_latest) = match Project::build(project, implicits, dep_key, &reason) {
 				Result::Ok(pair) => pair,
 				Result::Err(e) => {
