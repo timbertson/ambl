@@ -10,8 +10,8 @@ fn init_(is_test: bool, default: &'static str) {
 		.init();
 }
 
-pub fn init() {
-	init_(false, "info")
+pub fn init(verbose: bool) {
+	init_(false, if verbose { "debug" } else { "info" })
 }
 
 pub fn init_for_tests() {

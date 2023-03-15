@@ -5,10 +5,10 @@
         "homepage": "",
         "owner": "nix-community",
         "repo": "fenix",
-        "rev": "dca822b67ddf0af52f9b63feaeefc1668c8635c0",
-        "sha256": "07qnvv42h6ri1vv4rczc4ys2nll4n0l13x19jrgxn065hip3nfiy",
+        "rev": "807817b4b9c5708a2ae952dd4a5e68295f968476",
+        "sha256": "0j98px5a209i4x9w4l37ja3fv6k86jqs4xc1cdk3w76bbqcqcnxy",
         "type": "tarball",
-        "url": "https://github.com/nix-community/fenix/archive/dca822b67ddf0af52f9b63feaeefc1668c8635c0.tar.gz",
+        "url": "https://github.com/nix-community/fenix/archive/807817b4b9c5708a2ae952dd4a5e68295f968476.tar.gz",
         "url_template": "https://github.com/<owner>/<repo>/archive/<rev>.tar.gz"
     },
     "fetlock": {

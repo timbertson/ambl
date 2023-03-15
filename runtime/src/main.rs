@@ -16,11 +16,13 @@ mod fileset;
 mod build_request;
 mod build;
 mod debug;
+mod cli_opts;
 
 use std::{mem::size_of, ops::Deref, cell::{Cell, RefCell, Ref}, rc::Rc, sync::{Arc, RwLock, RwLockReadGuard, LockResult, RwLockWriteGuard, TryLockResult, Mutex}, env, collections::{HashMap, hash_map::Entry}};
 use log::*;
 
 use anyhow::*;
+use wasmtime::*;
 use path_util::{CPath, Unscoped};
 use build_request::BuildRequest;
 use project::{Project, ModuleCache, Implicits};
@@ -31,10 +33,13 @@ use ambl_common::build::*;
 use ambl_common::ffi::ResultFFI;
 use ambl_common::rule::*;
 use wasm::WasmModule;
-use wasmtime::*;
+use cli_opts::CliOpts;
+use clap::Parser;
 
 fn main() -> Result<()> {
-	crate::init::init();
+	let cli = CliOpts::parse();
+	crate::init::init(cli.verbose);
+	debug!("cli = {:?}", &cli);
 	
 	let cwd = CPath::try_from(env::current_dir()?)?.into_absolute()?;
 	let project = Project::<WasmModule>::new(cwd)?;
