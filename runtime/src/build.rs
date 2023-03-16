@@ -11,6 +11,8 @@ use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFi
 use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken, Implicits, HasImplicits};
 use crate::sync::{Mutexed, MutexRef};
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Forced(pub bool);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum BuildReason {
@@ -18,7 +20,7 @@ pub enum BuildReason {
 	Speculative, // speculative execution of a build target, not associated with an active build
 	Import, // Importing a module to evaluate its rules. This doesn't cause
 	// dependencies to be registered, but the get_rules() call may
-	Explicit, // explicit user request, fail if not a target
+	Explicit(Forced), // explicit user request, fail if not a target
 }
 
 impl BuildReason {
@@ -27,7 +29,7 @@ impl BuildReason {
 			BuildReason::Dependency(p) => Some(*p),
 			BuildReason::Speculative => None,
 			BuildReason::Import => None,
-			BuildReason::Explicit => None,
+			BuildReason::Explicit(_) => None,
 		}
 	}
 }
@@ -97,6 +99,13 @@ impl BuildCache {
 			build_fn(project, &ctx, build_token)
 		};
 		let needs_rebuild = |project, ctx: &Ctx, cached: &BuildResultWithDeps| {
+			match reason {
+				BuildReason::Explicit(Forced(true)) => {
+					debug!("Forcing rebuild of {:?}", key);
+					return Ok((project, true))
+				},
+				_ => (),
+			}
 			if cached.record.implicits.as_ref() != ctx.opt_implicits() {
 				debug!("cached {:?} needs rebuild because its implicits have changed", cached);
 				Ok((project, true))

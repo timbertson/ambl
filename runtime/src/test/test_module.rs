@@ -13,9 +13,9 @@ use tempdir::TempDir;
 use ambl_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, InvokeResponse, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::build::{BuildReason, TargetContext};
+use crate::build::{BuildReason, TargetContext, Forced};
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
-use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, Implicits, DEFAULT_IMPLICITS};
+use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, Implicits};
 use crate::persist::{PersistFile, BuildResult, BuildResultWithDeps, FileStat, Mtime, PersistChecksum};
 use crate::module::BuildModule;
 use crate::sync::{Mutexed, MutexHandle};
@@ -418,12 +418,12 @@ impl<'a> TestProject<'a> {
 
 	pub fn build_dep(&self, req: &DependencyRequest) -> Result<InvokeResponse> {
 		let build_request = BuildRequest::from(req.to_owned(), None, &Scope::root())?;
-		self.build_full(&build_request)
+		self.build_full(&build_request, &BuildReason::Explicit(Forced(false)))
 	}
 
-	fn build_full(&self, req: &BuildRequest) -> Result<InvokeResponse> {
+	pub fn build_full(&self, req: &BuildRequest, reason: &BuildReason) -> Result<InvokeResponse> {
 		let project = self.lock();
-		let (project, result) = Project::build(project, &DEFAULT_IMPLICITS, req, &BuildReason::Explicit)
+		let (project, result) = Project::build(project, &Implicits::none(), req, reason)
 			.with_context(|| format!("Building {:?}", req))?;
 
 		let response = result.into_response();

@@ -680,7 +680,7 @@ impl<M: BuildModule> Project<M> {
 						} else {
 							debug!("Treating dependency as a plain file: {:?}", &request);
 							match reason {
-								BuildReason::Explicit => {
+								BuildReason::Explicit(_) => {
 									return Err(anyhow!("Not a buildable target: {}", cpath_ref))
 								},
 								_ => {

@@ -5,7 +5,9 @@ use ambl_common::rule::dsl;
 use serial_test::serial;
 
 use anyhow::*;
+use crate::build::{Forced, BuildReason};
 use crate::build_request::BuildRequest;
+use crate::path_util::Scope;
 use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::Project};
 use ambl_common::{rule::dsl::*, build::{DependencyRequest}};
 use super::util::*;
@@ -309,6 +311,26 @@ fn test_implicits_change_causes_rebuild() -> Result<()> {
 		p.build_file("target")?;
 		eq!(p.log(), vec!("built", "built"));
 
+		Ok(())
+	})
+}
+
+#[test]
+#[serial]
+fn test_force_rebuild() -> Result<()> {
+	TestProject::in_tempdir(|p: &TestProject| {
+		p.target_builder("a", |p, c| {
+			p.record("built");
+			c.empty_dest()
+		});
+
+		let req = DependencyRequest::FileDependency("a".to_owned());
+		let build_request = BuildRequest::from(req.to_owned(), None, &Scope::root())?;
+		let reason = BuildReason::Explicit(Forced(true));
+		p.build_full(&build_request, &reason)?;
+		p.build_full(&build_request, &reason)?;
+
+		eq!(p.log(), vec!("built", "built"));
 		Ok(())
 	})
 }

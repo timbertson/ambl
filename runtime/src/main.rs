@@ -36,6 +36,8 @@ use wasm::WasmModule;
 use cli_opts::CliOpts;
 use clap::Parser;
 
+use crate::build::Forced;
+
 fn main() -> Result<()> {
 	let cli = CliOpts::parse();
 	crate::init::init(cli.verbose);
@@ -49,7 +51,7 @@ fn main() -> Result<()> {
 		let mut project_mutexed = handle.lock("main")?;
 		for arg in args {
 			let request = BuildRequest::FileDependency(Unscoped::new(arg));
-			let reason = BuildReason::Explicit;
+			let reason = BuildReason::Explicit(Forced(cli.force));
 			let (project_ret, _) = Project::build(project_mutexed, &Implicits::default_static(), &request, &reason)?;
 			project_mutexed = project_ret;
 		}
