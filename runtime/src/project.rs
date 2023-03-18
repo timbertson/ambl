@@ -78,43 +78,64 @@ trait TargetVisitor<'a> {
 	
 	// TODO why is this lifetime different?
 	fn should_include<'b>(ctx: Self::Ctx, include: &'b ScopedInclude) -> bool;
-
-	fn handle_import_error(err: Error) -> Result<()>;
 }
 
-// TODO add prefix
-struct ListTargetsVisitor {}
+struct ListTargetsVisitor {
+}
+
+impl ListTargetsVisitor {
+	fn print_target_name(scope: &Scope, name: &str) {
+		let prefix = scope.as_simple().map(|s| s.as_str());
+		print!("  ");
+		if let Some(prefix) = prefix {
+			print!("{}/", prefix);
+		}
+		println!("{}", name);
+	}
+}
 
 impl<'a> TargetVisitor<'a> for ListTargetsVisitor {
-	type Ctx = ();
+	type Ctx = Option<&'a str>;
 
-	fn should_include<'b>(ctx: (), include: &'b ScopedInclude) -> bool {
-		true
+	fn should_include<'b>(ctx: Self::Ctx, include: &'b ScopedInclude) -> bool {
+		if let Some(name) = ctx {
+			FindTargetVisitor::should_include(name, include)
+		} else {
+			true
+		}
 	}
 
-	fn visit_target(ctx: (), scope: &'a Scope, target: &'a Target) -> TargetVisitResult<'a> {
-		let prefix = scope.as_simple().map(|s| s.as_str());
-		for name in target.names.iter() {
-			print!("  ");
-			if let Some(prefix) = prefix {
-				print!("{}/", prefix);
+	fn visit_target(ctx: Self::Ctx, scope: &'a Scope, target: &'a Target) -> TargetVisitResult<'a> {
+		if let Some(name) = ctx {
+			match FindTargetVisitor::visit_target(name, scope, target) {
+				TargetVisitResult::Return(name) => Self::print_target_name(scope, name),
+				TargetVisitResult::Continue => (),
 			}
-			println!("{}", name);
+		} else {
+			for name in target.names.iter() {
+				Self::print_target_name(scope, name);
+			}
 		}
 		TargetVisitResult::Continue
 	}
 
-	fn visit_nested(ctx: (), scope: &'a Scope, nested: &'a Nested) -> NestedVisitResult<'a, ()> {
-		NestedVisitResult::Traverse(&nested.absolute_scope, ())
-	}
-
-	fn handle_import_error(err: Error) -> Result<()> {
-		if log_enabled!(log::Level::Debug) {
-			warn!("Skipping: {:?}", err);
+	fn visit_nested(ctx: Self::Ctx, scope: &'a Scope, nested: &'a Nested) -> NestedVisitResult<'a, Self::Ctx> {
+		use NestedVisitResult::*;
+		if let Some(name) = ctx {
+			match FindTargetVisitor::visit_nested(name, scope, nested) {
+				Ignore => Ignore,
+				Traverse(scope, ctx) => {
+					let ctx = if ctx.is_empty() {
+						None
+					} else {
+						Some(ctx)
+					};
+					Traverse(scope, ctx)
+				},
+			}
 		} else {
-			warn!("Skipping: {}", err);
+			Traverse(&nested.absolute_scope, None)
 		}
-		Result::Ok(())
 	}
 }
 
@@ -143,10 +164,6 @@ impl<'a> TargetVisitor<'a> for FindTargetVisitor {
 		} else {
 			NestedVisitResult::Ignore
 		}
-	}
-
-	fn handle_import_error(err: Error) -> Result<()> {
-		Result::Err(err)
 	}
 }
 
@@ -580,8 +597,7 @@ impl<M: BuildModule> Project<M> {
 					debug!("Loading include {:?}", &include);
 					let mut handle = readable.unlock();
 
-					let mut error_recovery_project_handle = unsafe { project.unsafe_clone() };
-					let loaded = result_block(|| {
+					result_block(|| {
 						handle.with_write(|writeable| {
 							*writeable = MutableRule::Loading();
 							Ok(())
@@ -655,16 +671,7 @@ impl<M: BuildModule> Project<M> {
 
 						// reevaluate after replacing, this will drop into the Rule::Nested branch
 						Self::visit_importable_rule::<V>(project, parent_implicits, rule_ref, scope, source_module, ctx)
-					}).with_context(|| format!("loading include {:?}", &include));
-					loaded.or_else(move |err| {
-						V::handle_import_error(err)
-							.and_then(move |_| {
-								let project = error_recovery_project_handle
-									.lock("after failing to load include")?;
-								let project = unsafe { project.unsafe_cast_lifetime::<'a>() };
-								Ok((project, None))
-						})
-					})
+					}).with_context(|| format!("loading include {:?}", &include))
 				} else {
 					debug!("Skipping irrelevant include: {:?}", &include);
 					Ok((project, None))
@@ -690,7 +697,11 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, target))
 	}
 
-	pub fn list_targets<'a, 'b>(project: ProjectMutex<'a, M>) -> Result<ProjectMutex<'a, M>> {
+	pub fn list_targets<'a, 'b>(
+		project: ProjectMutex<'a, M>,
+		prefix: Option<&'b str>
+	) -> Result<ProjectMutex<'a, M>> {
+		debug!("listing targets for prefix: {:?}", prefix);
 		let root_rule = Arc::clone(&project.root_rule);
 		let (project, _) = Self::expand_and_visit_rule::<ListTargetsVisitor>(
 			project,
@@ -698,7 +709,7 @@ impl<M: BuildModule> Project<M> {
 			&root_rule,
 			Scope::static_root(),
 			None,
-			()
+			prefix,
 		)?;
 		Ok(project)
 	}

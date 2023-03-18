@@ -46,14 +46,20 @@ fn main() -> Result<()> {
 	let cwd = CPath::try_from(env::current_dir()?)?.into_absolute()?;
 	let project = Project::<WasmModule>::new(cwd)?;
 	let result = (|| {
-		let args: Vec<String> = env::args().skip(1).collect();
+		let args = &cli.targets;
 		let mut handle = project.handle();
 		let mut project_mutexed = handle.lock("main")?;
 		if cli.list {
-			Project::list_targets(project_mutexed)?;
+			if args.is_empty() {
+				Project::list_targets(project_mutexed, None)?;
+			} else {
+				for arg in args {
+					project_mutexed = Project::list_targets(project_mutexed, Some(arg.as_str()))?;
+				}
+			}
 		} else {
 			for arg in args {
-				let request = BuildRequest::FileDependency(Unscoped::new(arg));
+				let request = BuildRequest::FileDependency(Unscoped::new(arg.to_owned()));
 				let reason = BuildReason::Explicit(Forced(cli.force));
 				let (project_ret, _) = Project::build(project_mutexed, &Implicits::default_static(), &request, &reason)?;
 				project_mutexed = project_ret;
