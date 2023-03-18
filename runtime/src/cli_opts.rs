@@ -9,4 +9,7 @@ pub struct CliOpts {
 
 	#[arg(long, short)]
 	pub verbose: bool,
+
+	#[arg(long, short)]
+	pub list: bool,
 }

@@ -1,5 +1,5 @@
 #![allow(unreachable_code)]
-use std::borrow::Cow;
+use std::borrow::{Cow, Borrow};
 use std::cell::RefCell;
 use std::collections::{HashMap, LinkedList, HashSet, BTreeSet};
 use std::collections::hash_map::Entry;
@@ -53,6 +53,117 @@ impl ActiveBuildToken {
 	pub fn raw(&self) -> u32 {
 		self.0
 	}
+}
+
+enum VisitTarget<'a> {
+	Nested(&'a Nested),
+	Target(&'a str),
+}
+
+enum TargetVisitResult<'a> {
+	Return(&'a str),
+	Continue,
+}
+
+enum NestedVisitResult<'a, C> {
+	Ignore,
+	Traverse(&'a Scope<'a>, C)
+}
+
+trait TargetVisitor<'a> {
+	type Ctx: Copy;
+	// TODO ctx at end?
+	fn visit_target(ctx: Self::Ctx, scope: &'a Scope, target: &'a Target) -> TargetVisitResult<'a>;
+	fn visit_nested(ctx: Self::Ctx, scope: &'a Scope, nested: &'a Nested) -> NestedVisitResult<'a, Self::Ctx>;
+	
+	// TODO why is this lifetime different?
+	fn should_include<'b>(ctx: Self::Ctx, include: &'b ScopedInclude) -> bool;
+
+	fn handle_import_error(err: Error) -> Result<()>;
+}
+
+// TODO add prefix
+struct ListTargetsVisitor {}
+
+impl<'a> TargetVisitor<'a> for ListTargetsVisitor {
+	type Ctx = ();
+
+	fn should_include<'b>(ctx: (), include: &'b ScopedInclude) -> bool {
+		true
+	}
+
+	fn visit_target(ctx: (), scope: &'a Scope, target: &'a Target) -> TargetVisitResult<'a> {
+		let prefix = scope.as_simple().map(|s| s.as_str());
+		for name in target.names.iter() {
+			print!("  ");
+			if let Some(prefix) = prefix {
+				print!("{}/", prefix);
+			}
+			println!("{}", name);
+		}
+		TargetVisitResult::Continue
+	}
+
+	fn visit_nested(ctx: (), scope: &'a Scope, nested: &'a Nested) -> NestedVisitResult<'a, ()> {
+		NestedVisitResult::Traverse(&nested.absolute_scope, ())
+	}
+
+	fn handle_import_error(err: Error) -> Result<()> {
+		if log_enabled!(log::Level::Debug) {
+			warn!("Skipping: {:?}", err);
+		} else {
+			warn!("Skipping: {}", err);
+		}
+		Result::Ok(())
+	}
+}
+
+struct FindTargetVisitor {
+}
+
+impl<'a> TargetVisitor<'a> for FindTargetVisitor {
+	// Note: name (ctx) is guaranteed to be a valid Simple, but we use a str for efficient slicing
+	type Ctx = &'a str;
+
+	fn should_include<'b>(name: &'a str, include: &'b ScopedInclude) -> bool {
+		include.contains_path(name)
+	}
+
+	fn visit_target(name: &'a str, scope: &'a Scope, target: &'a Target) -> TargetVisitResult<'a> {
+		if target.names.iter().any(|n| n == name) {
+			TargetVisitResult::Return(name)
+		} else {
+			TargetVisitResult::Continue
+		}
+	}
+
+	fn visit_nested(name: &'a str, scope: &'a Scope, nested: &'a Nested) -> NestedVisitResult<'a, &'a str> {
+		if let Some((scope, name)) = nested.projection(name) {
+			NestedVisitResult::Traverse(scope, name)
+		} else {
+			NestedVisitResult::Ignore
+		}
+	}
+
+	fn handle_import_error(err: Error) -> Result<()> {
+		Result::Err(err)
+	}
+}
+
+// TODO builtin?
+struct RuleChain<'a> {
+	value: &'a ProjectRule,
+	parent: Option<&'a RuleChain<'a>>,
+}
+
+struct TargetIter<'a, 'b, M: BuildModule> {
+	project: ProjectMutex<'a, M>,
+	implicits: &'b Implicits,
+	rule: &'b ProjectRule,
+	scope: &'b Scope<'b>,
+	// filter: F,
+	source_module: Option<&'b Unscoped>,
+	state: RuleChain<'a>,
 }
 
 #[derive(Clone, Debug)]
@@ -373,7 +484,7 @@ impl<M: BuildModule> Project<M> {
 			None => Some(name)
 		}
 	}
-
+	
 	/*
 	Although imported modules and YAML files cause targets to be rebuilt, they're not
 	directly registered as dependencies here.
@@ -381,23 +492,21 @@ impl<M: BuildModule> Project<M> {
 	Instead, we rely on the fact that _finding_ the target for a given path will
 	depend on the result of its get_rules(). That is itself a first class cacheable
 	target, which depends on the module file itself.
-
-	Note: name is guaranteed to be a valid Simple, but we use a str for efficient slicing
 	*/
-	fn expand_and_filter_rule<'a, 'b>(
+	fn expand_and_visit_rule<'a, 'b, V: TargetVisitor<'b>>(
 		project: ProjectMutex<'a, M>,
 		implicits: &'b Implicits,
 		rule: &'b ProjectRule,
 		scope: &'b Scope<'b>,
-		name: &'b str,
 		source_module: Option<&Unscoped>,
+		ctx: V::Ctx,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget<'b>>>> {
 		match rule {
-			ProjectRule::Target(t) => {
-				if t.names.iter().any(|n| n == name) {
-					result_block(|| {
+			ProjectRule::Target(target) => {
+				match V::visit_target(ctx, scope, target) {
+					TargetVisitResult::Return(name) => result_block(|| {
 						let rel_name = CPath::new(name.to_owned()).into_simple()?;
-						let module_cpath = t.build.path.as_ref().map(|m| {
+						let module_cpath = target.build.path.as_ref().map(|m| {
 							CPath::new(m.to_owned())
 						});
 						let full_module = ResolveModule {
@@ -409,36 +518,36 @@ impl<M: BuildModule> Project<M> {
 							implicits,
 							build: ResolvedFnSpec {
 								scope: scope.copy(),
-								fn_name: t.build.fn_name.to_owned().unwrap_or_else(|| "build".to_owned()),
+								fn_name: target.build.fn_name.to_owned().unwrap_or_else(|| "build".to_owned()),
 								full_module,
-								config: t.build.config.clone(),
+								config: target.build.config.clone(),
 						},
 						})))
-					}).with_context(|| format!("evaluating target {:?}", t))
-				} else {
-					Ok((project, None))
+					}).with_context(|| format!("evaluating target {:?}", target)),
+
+					TargetVisitResult::Continue => Ok((project, None)),
 				}
 			},
 			ProjectRule::Mutable(rule_ref) => {
-				return Self::handle_importable_rule(project, implicits, rule_ref, scope, name, source_module);
+				return Self::visit_importable_rule::<V>(project, implicits, rule_ref, scope, source_module, ctx);
 			},
 		}
 	}
-	
-	fn handle_importable_rule<'a, 'b>(
+
+	fn visit_importable_rule<'a, 'b, V: TargetVisitor<'b>>(
 		mut project: ProjectMutex<'a, M>,
 		parent_implicits: &'b Implicits,
 		rule_ref: &'b RwRef< MutableRule>,
 		scope: &'b Scope<'b>,
-		name: &'b str,
 		source_module: Option<&Unscoped>,
+		ctx: V::Ctx,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget<'b>>>> {
 		let mut handle = rule_ref.handle();
 		let readable = handle.read()?;
 		match readable.deref() {
 			MutableRule::Loading() => {
 				// TODO when we have concurrency, we can wait if this is being loaded by another fiber
-				debug!("Encountered recursive include searching for target {:?}. Skipping.", name);
+				debug!("Encountered recursive include, skipping.");
 				Ok((project, None))
 			},
 
@@ -447,29 +556,32 @@ impl<M: BuildModule> Project<M> {
 				// So we can unsafely cast it to a plain reference with the same lifetime as rule_ref
 				let nested = unsafe { std::mem::transmute::<&'_ Nested, &'b Nested>(nested) };
 
-				if let Some((scope, name)) = nested.projection(name) {
-					for rule in nested.rules.iter() {
-						let (project_ret, target) = Self::expand_and_filter_rule(
-							project, &nested.implicits, rule, scope, name, nested.module_path.as_ref()
-						)?;
-						project = project_ret;
-						if target.is_some() {
-							return Ok((project, target));
+				match V::visit_nested(ctx, scope, nested) {
+					NestedVisitResult::Ignore => (),
+					NestedVisitResult::Traverse(scope, ctx) => {
+						for rule in nested.rules.iter() {
+							let (project_ret, target) = Self::expand_and_visit_rule::<V>(
+								project, &nested.implicits, rule, scope, nested.module_path.as_ref(), ctx
+							)?;
+							project = project_ret;
+							if target.is_some() {
+								return Ok((project, target));
+							}
 						}
-					}
+					},
 				}
 				Ok((project, None))
 			},
 
 			MutableRule::Include(include) => {
-				if include.contains_path(name) {
+				if V::should_include(ctx, include) {
 					// release borrow of rule
 					let include = include.to_owned();
-					// let name = Scoped::new(scope.copy(), name);
 					debug!("Loading include {:?}", &include);
 					let mut handle = readable.unlock();
 
-					result_block(|| {
+					let mut error_recovery_project_handle = unsafe { project.unsafe_clone() };
+					let loaded = result_block(|| {
 						handle.with_write(|writeable| {
 							*writeable = MutableRule::Loading();
 							Ok(())
@@ -542,8 +654,17 @@ impl<M: BuildModule> Project<M> {
 						})?;
 
 						// reevaluate after replacing, this will drop into the Rule::Nested branch
-						Self::handle_importable_rule(project, parent_implicits, rule_ref, scope, name, source_module)
-					}).with_context(|| format!("loading include {:?}", &include))
+						Self::visit_importable_rule::<V>(project, parent_implicits, rule_ref, scope, source_module, ctx)
+					}).with_context(|| format!("loading include {:?}", &include));
+					loaded.or_else(move |err| {
+						V::handle_import_error(err)
+							.and_then(move |_| {
+								let project = error_recovery_project_handle
+									.lock("after failing to load include")?;
+								let project = unsafe { project.unsafe_cast_lifetime::<'a>() };
+								Ok((project, None))
+						})
+					})
 				} else {
 					debug!("Skipping irrelevant include: {:?}", &include);
 					Ok((project, None))
@@ -551,21 +672,35 @@ impl<M: BuildModule> Project<M> {
 			},
 		}
 	}
-
+	
 	pub fn target<'a, 'b>(
 		project: ProjectMutex<'a, M>,
 		root_rule: &'b ProjectRule,
 		name: &'b Simple,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget<'b>>>> {
-		let (project, target) = Self::expand_and_filter_rule(
+		let (project, target) = Self::expand_and_visit_rule::<FindTargetVisitor>(
 			project,
 			&DEFAULT_IMPLICITS, // we don't inherit implicits, since it doesn't matter where a given target was built from
 			root_rule,
 			Scope::static_root(),
+			None,
 			name.as_str(),
-			None)?;
+		)?;
 		debug!("target for {}: {:?}", &name, target);
 		Ok((project, target))
+	}
+
+	pub fn list_targets<'a, 'b>(project: ProjectMutex<'a, M>) -> Result<ProjectMutex<'a, M>> {
+		let root_rule = Arc::clone(&project.root_rule);
+		let (project, _) = Self::expand_and_visit_rule::<ListTargetsVisitor>(
+			project,
+			&DEFAULT_IMPLICITS,
+			&root_rule,
+			Scope::static_root(),
+			None,
+			()
+		)?;
+		Ok(project)
 	}
 	
 	fn noop_ctx<'a>(implicits: &'a Implicits) -> impl FnOnce(Mutexed<Project<M>>) -> Result<ProjectMutexPair<M, &'a Implicits>> {

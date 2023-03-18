@@ -49,11 +49,15 @@ fn main() -> Result<()> {
 		let args: Vec<String> = env::args().skip(1).collect();
 		let mut handle = project.handle();
 		let mut project_mutexed = handle.lock("main")?;
-		for arg in args {
-			let request = BuildRequest::FileDependency(Unscoped::new(arg));
-			let reason = BuildReason::Explicit(Forced(cli.force));
-			let (project_ret, _) = Project::build(project_mutexed, &Implicits::default_static(), &request, &reason)?;
-			project_mutexed = project_ret;
+		if cli.list {
+			Project::list_targets(project_mutexed)?;
+		} else {
+			for arg in args {
+				let request = BuildRequest::FileDependency(Unscoped::new(arg));
+				let reason = BuildReason::Explicit(Forced(cli.force));
+				let (project_ret, _) = Project::build(project_mutexed, &Implicits::default_static(), &request, &reason)?;
+				project_mutexed = project_ret;
+			}
 		}
 		Ok(())
 	})();
