@@ -22,3 +22,7 @@ clap = { version = "4.1", features = ["derive"] }
 [dev-dependencies]
 ctor = "0.1"
 serial_test = "0.9"
+
+[[bin]]
+name = "ambl"
+path = "src/main.rs"
