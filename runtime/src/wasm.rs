@@ -192,7 +192,7 @@ impl StateRef {
 		};
 		
 		let ffi_name = format!("amblffi_{}", &f.fn_name);
-		let call_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), (), _>(
+		let call_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), ()>(
 			&mut store_ctx, &ffi_name)?;
 			// .with_context(|| {
 			// 	anyhow!("{:?}", state.instance.exports(&mut store_ctx).map(|ex| ex.name()).collect::<Vec<&str>>())
@@ -295,7 +295,7 @@ impl BuildModule for WasmModule {
 		debug!("instantiating...");
 		let instance = linker.instantiate(&mut store, &module.wasm)?;
 
-		let ambl_alloc = instance.get_typed_func::<u32, u32, _>(&mut store, "ambl_alloc")?;
+		let ambl_alloc = instance.get_typed_func::<u32, u32>(&mut store, "ambl_alloc")?;
 
 		let outbox_ptr = offset(ambl_alloc.call(&mut store, U32_SIZE)?);
 		let outbox_len = offset(ambl_alloc.call(&mut store, U32_SIZE)?);
@@ -307,7 +307,7 @@ impl BuildModule for WasmModule {
 				.ok_or(anyhow!("failed to find `memory` export"))?,
 
 			ambl_alloc,
-			ambl_free: instance.get_typed_func::<(u32, u32), (), _>(&mut store, "ambl_free")?,
+			ambl_free: instance.get_typed_func::<(u32, u32), ()>(&mut store, "ambl_free")?,
 
 			outbox_ptr,
 			outbox_len,
@@ -315,9 +315,9 @@ impl BuildModule for WasmModule {
 
 		state.set(inner)?;
 
-		let ambl_api_version: TypedFunc<(), u32> = instance.get_typed_func::<(), u32, _>(&mut store, "ambl_api_version")?;
+		let ambl_api_version: TypedFunc<(), u32> = instance.get_typed_func::<(), u32>(&mut store, "ambl_api_version")?;
 		debug!("API version: {}", ambl_api_version.call(&mut store, ())?);
-		let ambl_init: TypedFunc<u32, ()> = instance.get_typed_func::<u32, (), _>(&mut store, "ambl_init")?;
+		let ambl_init: TypedFunc<u32, ()> = instance.get_typed_func::<u32, ()>(&mut store, "ambl_init")?;
 		ambl_init.call(&mut store, ambl_common::LogLevel::to_int(log::max_level().to_level().unwrap_or(log::Level::Warn)))?;
 		Ok(WasmModule { state, store })
 	}
