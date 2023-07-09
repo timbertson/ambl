@@ -59,7 +59,7 @@ fn cargo(c: &BaseCtx) -> Result<Command> {
 	Ok(raw.arg("--offline"))
 }
 
-#[export]
+// #[export]
 fn build_workspace_meta(c: TargetCtx) -> Result<()> {
 	let meta = c.run(raw_cargo(&c)?.args(vec!(
 		"metadata", "--no-deps", "--format-version", "1"
@@ -76,7 +76,7 @@ fn workspace_meta<C: AsRef<BaseCtx>>(c: C) -> Result<CargoMetaMinimal> {
 	Ok(serde_json::from_str(&contents).with_context(|| contents.clone())?)
 }
 
-#[export]
+// #[export]
 fn build_lockfile(c: TargetCtx) -> Result<()> {
 	// TODO how do we make this fast? I don't want cargo to update the lockfile all the time,
 	// but I also want it to update on demand. Maybe it needs a --force flag at the ambl level.
@@ -85,7 +85,7 @@ fn build_lockfile(c: TargetCtx) -> Result<()> {
 	Ok(())
 }
 
-#[export]
+// #[export]
 pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
 	Ok(vec!(
 		target("workspace-meta", function("build_workspace_meta")),
@@ -94,7 +94,7 @@ pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
 	))
 }
 
-#[export]
+// #[export]
 pub fn module_rules(c: BaseCtx) -> Result<Vec<Rule>> {
 	let meta = workspace_meta(&c)?;
 	
@@ -123,7 +123,7 @@ pub fn module_rules(c: BaseCtx) -> Result<Vec<Rule>> {
 	Ok(result)
 }
 
-#[export]
+// #[export]
 pub fn build_all(c: TargetCtx) -> Result<()> {
 	let meta = workspace_meta(&c)?;
 	for pkg in meta.packages {
@@ -132,7 +132,7 @@ pub fn build_all(c: TargetCtx) -> Result<()> {
 	c.empty_dest()
 }
 
-#[export]
+// #[export]
 pub fn module_build(c: TargetCtx) -> Result<()> {
 	let conf: ModuleConfig = c.parse_config()?;
 	for name in conf.dep_names {
@@ -152,7 +152,7 @@ pub fn module_build(c: TargetCtx) -> Result<()> {
 	Ok(())
 }
 
-#[export]
+// #[export]
 pub fn module_sources(c: TargetCtx) -> Result<()> {
 	// TODO: depend on non-rs files?
 	// TODO "." for scan includes the prefix, but then depending on the returned files includes it again!?
@@ -161,3 +161,35 @@ pub fn module_sources(c: TargetCtx) -> Result<()> {
 	}
 	c.empty_dest()
 }
+
+type WString = wit_bindgen::rt::string::String;
+struct Component;
+impl Builder for Component {
+	fn version() -> u32 {
+		1
+	}
+	
+	fn init(loglevel: u32) {
+		ambl_init(loglevel);
+	}
+
+	fn rules(symbol: Option<WString>, ctx: WString,) -> WString {
+		let result: Result<Vec<Rule>> = (||{
+			let base_ctx: BaseCtx = serde_json::from_str(&ctx)?;
+			match symbol {
+				None => get_rules(base_ctx),
+				Some(symbol) => match symbol.as_str() {
+					"module_rules" => module_rules(base_ctx),
+					other => Err(anyhow!("Unknown rules function: {}", &other)),
+				},
+			}
+		})();
+		ResultFFI::serialize(result)
+	}
+
+	fn invoke(symbol: WString, ctx: WString,) -> WString {
+		// hostlog(1, &format!("invoking: {}", symbol));
+		"{}".to_owned()
+	}
+}
+export_builder!(Component);

@@ -22,5 +22,5 @@ pub trait BuildModule : Sized {
 		f: &ResolvedFnSpec,
 		arg: &Ctx,
 		_unlocked_evidence: &ProjectHandle<Self>
-	) -> Result<Vec<u8>>;
+	) -> Result<String>;
 }

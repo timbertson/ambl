@@ -170,7 +170,7 @@ impl StateRef {
 
 	pub fn build<C: AsContextMut<Data = StoreInner>, Ctx: Serialize + AsRef<BaseCtx>>(
 		&self, mut store: C, implicits: &Implicits, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<WasmModule>
-	) -> Result<Vec<u8>> {
+	) -> Result<String> {
 		debug!("call({:?})", f);
 		let mut write = self.write();
 		let state = write.as_ref()?;
@@ -195,7 +195,7 @@ impl StateRef {
 		let call_ffi = state.instance.get_typed_func::<(u32, u32, u32, u32), ()>(
 			&mut store_ctx, &ffi_name)?;
 			// .with_context(|| {
-			// 	anyhow!("{:?}", state.instance.exports(&mut store_ctx).map(|ex| ex.name()).collect::<Vec<&str>>())
+			//	anyhow!("{:?}", state.instance.exports(&mut store_ctx).map(|ex| ex.name()).collect::<Vec<&str>>())
 		// })?;
 		drop(write);
 		let (mut store, result) = self.call_str(store, call_ffi, &serde_json::to_string(arg)?, |b| Ok(b));
@@ -206,7 +206,8 @@ impl StateRef {
 			store_innter.target_contexts.remove(&token);
 		}
 
-		result
+		// result
+		todo!()
 	}
 }
 
@@ -231,15 +232,16 @@ impl BuildModule for WasmModule {
 
 	fn compile(engine: &Engine, path: &Unscoped) -> Result<Compiled> {
 		let raw_path = &path.0;
-		debug!("Loading {}", raw_path);
+		debug!("Compiling {}", raw_path);
 		Ok(Compiled {
 			wasm: Module::from_file(&engine, raw_path)
 				.with_context(|| format!("Loading file {}", raw_path))?,
 			path: path.clone(),
 		})
 	}
-	
+
 	fn load(engine: &Engine, module: &Compiled, project: ProjectRef<Self>) -> Result<WasmModule> {
+		debug!("loading module {:?}", &module.path);
 		let mut linker = Linker::<StoreInner>::new(&engine);
 
 		let mut state = StateRef::empty();
@@ -288,6 +290,7 @@ impl BuildModule for WasmModule {
 			}
 		})?;
 
+		debug!("creating WASM store");
 		let mut store = Store::new(&engine, StoreInner {
 			name: module.path.as_path().file_name().map(path_util::str_of_os).unwrap_or("wasm").to_string(),
 			target_contexts: Default::default(),
@@ -328,7 +331,7 @@ impl BuildModule for WasmModule {
 		f: &ResolvedFnSpec,
 		arg: &Ctx,
 		_unlocked_evidence: &ProjectHandle<Self>
-	) -> Result<Vec<u8>> {
+	) -> Result<String> {
 		self.state.build(&mut self.store, implicits, f, arg, _unlocked_evidence)
 	}
 }

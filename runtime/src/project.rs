@@ -31,7 +31,7 @@ use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::Sandbox;
 use crate::sync::{MutexRef, Mutexed, MutexHandle, RwRef, RwHandle, RwReadGuard};
-use crate::{wasm::WasmModule, sync::lock_failed};
+use crate::{wasm_component::WasmModule, sync::lock_failed};
 
 pub type ProjectRef<M> = MutexRef<Project<M>>;
 pub type ProjectHandle<M> = MutexHandle<Project<M>>;
@@ -393,7 +393,10 @@ pub struct ModuleCache<M> {
 
 impl<M> ModuleCache<M> {
 	pub fn new() -> Self {
-		let engine = Engine::default();
+		let engine = Engine::new(
+			wasmtime::Config::default()
+				.wasm_component_model(true)
+		).unwrap();
 		let modules = HashMap::new();
 		Self { engine, modules }
 	}

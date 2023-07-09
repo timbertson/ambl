@@ -232,7 +232,8 @@ lazy_static::lazy_static!{
 	static ref BUILTINS_ROOT: PathBuf = {
 		PathBuf::from(match option_env!("PREFIX") {
 			Some(prefix) => format!("{}/share/builtins", prefix),
-			None => format!("{}/../target/wasm32-unknown-unknown/debug", env!("CARGO_MANIFEST_DIR")),
+			// TODO pick a better path for this
+			None => format!("{}/../", env!("CARGO_MANIFEST_DIR")),
 		})
 	};
 }

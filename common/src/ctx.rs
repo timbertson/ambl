@@ -3,22 +3,23 @@ use std::{ops::{Deref}, path::{PathBuf, Path}};
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
-use crate::ffi::{ResultFFI, SizedPtr};
+use crate::ffi::*;
 use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, Invoke, InvokeAction, FilesetDependency, WriteDest, CopyFile, ReadFile, FileSource, Stdout};
 use crate::rule::EnvLookup;
 
-#[cfg(target_arch = "wasm32")]
-extern {
-	pub fn ambl_invoke(data: *const u8, len: u32, out: &mut *mut u8, out_len: &mut u32);
-	pub fn ambl_log(level: u32, data: *const u8, len: u32);
-}
+// #[cfg(target_arch = "wasm32")]
+// extern {
+// 	pub fn ambl_invoke(data: *const u8, len: u32, out: &mut *mut u8, out_len: &mut u32);
+// 	pub fn ambl_log(level: u32, data: *const u8, len: u32);
+// }
 
-// stubs so that code compiles outside wasm
-#[cfg(not(target_arch = "wasm32"))]
-pub unsafe fn ambl_invoke(_: *const u8, _: u32, _: &mut *mut u8, _: &mut u32) { panic!("stub") }
+// // stubs so that code compiles outside wasm
+// #[cfg(not(target_arch = "wasm32"))]
+// pub unsafe fn ambl_invoke(_: *const u8, _: u32, _: &mut *mut u8, _: &mut u32) { panic!("stub") }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub unsafe fn ambl_log(_: u32, _: *const u8, _: u32) {}
+// #[cfg(not(target_arch = "wasm32"))]
+// pub unsafe fn ambl_log(_: u32, _: *const u8, _: u32) {}
+
 
 fn ignore_result<T>(r: Result<T>) -> Result<()> {
 	r.map(|_| ())
@@ -49,13 +50,9 @@ impl BaseCtx {
 
 	fn invoke_ffi(&self, request: Invoke) -> Result<InvokeResponse> {
 		let tagged = TaggedInvoke { token: self.token, request };
-		let buf = serde_json::to_vec(&tagged)?;
-		let mut response = SizedPtr::empty();
-		let response_slice = unsafe {
-			ambl_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
-			response.to_slice()
-		};
-		ResultFFI::deserialize(response_slice)
+		let buf = serde_json::to_string(&tagged)?;
+		let response = amblinvoke(&buf);
+		ResultFFI::deserialize(&response)
 	}
 
 	pub fn invoke(&self, request: Invoke) -> Result<InvokeResponse> {

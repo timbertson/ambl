@@ -1,8 +1,4 @@
 #!bash -eu
-cargo build \
-	--color always \
-	--package ambl-runtime \
-	&& cargo build \
-	--color always \
-	--target=wasm32-unknown-unknown \
-	--package ambl-builtin-cargo
+cargo build --color always --target=wasm32-unknown-unknown --package ambl-builtin-cargo
+cargo build --color always --package ambl-runtime
+wasm-tools component new target/wasm32-unknown-unknown/debug/ambl_builtin_cargo.wasm -o ambl_builtin_cargo.wasm
