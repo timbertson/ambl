@@ -165,31 +165,43 @@ pub fn module_sources(c: TargetCtx) -> Result<()> {
 type WString = wit_bindgen::rt::string::String;
 struct Component;
 impl Builder for Component {
-	fn version() -> u32 {
+	fn version() -> u8 {
 		1
 	}
 	
-	fn init(loglevel: u32) {
+	fn init(loglevel: u8) {
 		ambl_init(loglevel);
 	}
 
-	fn rules(symbol: Option<WString>, ctx: WString,) -> WString {
-		let result: Result<Vec<Rule>> = (||{
-			let base_ctx: BaseCtx = serde_json::from_str(&ctx)?;
-			match symbol {
-				None => get_rules(base_ctx),
-				Some(symbol) => match symbol.as_str() {
-					"module_rules" => module_rules(base_ctx),
-					other => Err(anyhow!("Unknown rules function: {}", &other)),
-				},
-			}
-		})();
-		ResultFFI::serialize(result)
-	}
-
-	fn invoke(symbol: WString, ctx: WString,) -> WString {
-		// hostlog(1, &format!("invoking: {}", symbol));
-		"{}".to_owned()
+	fn invoke(calltype: u8, symbol: WString, ctx: WString) -> WString {
+		info!("invoking {} with ctx {}", &symbol, &ctx);
+		match calltype {
+			0 => {
+				// rules
+				ResultFFI::<Vec<Rule>>::serialize((||{
+					let c: BaseCtx = serde_json::from_str(&ctx)?;
+					match symbol.as_str() {
+						"get_rules" => get_rules(c),
+						"module_rules" => module_rules(c),
+						other => Err(anyhow!("Unknown rules function: {}", &other)),
+					}
+				})())
+			},
+			1 => {
+				// target
+				ResultFFI::<()>::serialize((||{
+					let c: TargetCtx = serde_json::from_str(&ctx)?;
+					match symbol.as_str() {
+						"build_workspace_meta" => build_workspace_meta(c),
+						"build_lockfile" => build_lockfile(c),
+						"module_build" => module_build(c),
+						"module_sources" => module_sources(c),
+						other => Err(anyhow!("Unknown build function: {}", &other)),
+					}
+				})())
+			},
+			other => ResultFFI::<()>::serialize(Err(anyhow!("Unknown calltype: {}", &other)))
+		}
 	}
 }
 export_builder!(Component);

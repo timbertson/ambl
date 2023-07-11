@@ -7,7 +7,7 @@ pub mod ctx;
 use log::*;
 pub struct LogLevel;
 impl LogLevel {
-	pub fn from_int(i: u32) -> log::Level {
+	pub fn from_int(i: u8) -> log::Level {
 		match i {
 			1 => Level::Error,
 			2 => Level::Warn,
@@ -18,7 +18,7 @@ impl LogLevel {
 		}
 	}
 
-	pub fn to_int(level: log::Level) -> u32 {
+	pub fn to_int(level: log::Level) -> u8 {
 		match level {
 			Level::Error => 1,
 			Level::Warn => 2,

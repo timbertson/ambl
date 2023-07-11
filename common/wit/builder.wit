@@ -1,0 +1,10 @@
+package ambl:build
+
+world builder {
+  import ambllog: func(level: u8, msg: string)
+  import amblinvoke: func(dep: string) -> string
+
+  export version: func() -> u8
+  export init: func(loglevel: u8)
+  export invoke: func(calltype: u8, symbol: string, ctx: string) -> string
+}

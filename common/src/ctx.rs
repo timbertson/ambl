@@ -157,7 +157,7 @@ pub struct TargetCtx {
 	dest: PathBuf, // physical file location, relative to CWD (or absolute?)
 
 	#[serde(flatten)]
-	base: BaseCtx,
+	pub base: BaseCtx,
 }
 
 impl TargetCtx {

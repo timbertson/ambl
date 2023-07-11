@@ -6,6 +6,7 @@ use ambl_common::{rule::{Target, Rule, FunctionSpec, Config}, ctx::BaseCtx};
 use wasmtime::Engine;
 
 use crate::build_request::ResolvedFnSpec;
+use crate::ctx::Ctx;
 use crate::project::{FoundTarget, Implicits};
 use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef}, persist::{PersistFile}, path_util::{CPath, Unscoped}};
 
@@ -16,7 +17,7 @@ pub trait BuildModule : Sized {
 	
 	fn load(engine: &Engine, module: &Self::Compiled, project: ProjectRef<Self>) -> Result<Self>;
 
-	fn build<Ctx: AsRef<BaseCtx> + Serialize>(
+	fn build(
 		&mut self,
 		implicits: &Implicits,
 		f: &ResolvedFnSpec,

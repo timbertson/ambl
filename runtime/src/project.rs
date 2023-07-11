@@ -25,6 +25,7 @@ use wasmtime::*;
 
 use crate::build::{BuildCache, BuildReason, BuildResponse};
 use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
+use crate::ctx::Ctx;
 use crate::{err::*, path_util, fileset};
 use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::persist::*;
@@ -786,11 +787,11 @@ impl<M: BuildModule> Project<M> {
 							path_util::rm_rf_and_ensure_parent(&tmp_path)?;
 
 							project.unlocked_block(|project_handle| {
-								let ctx = TargetCtx::new(
+								let ctx = Ctx::Target(TargetCtx::new(
 									found_target.rel_name.as_str().to_owned(),
 									tmp_path.to_owned(),
 									found_target.build.config.0.to_owned(),
-									build_token.raw());
+									build_token.raw()));
 
 								// TODO can we have a FunctionSpec with references?
 								debug!("calling {:?}", found_target.build);
@@ -885,7 +886,7 @@ impl<M: BuildModule> Project<M> {
 					project = project_ret;
 
 					let result: serde_json::Value = project.unlocked_block(|project_handle| {
-						let ctx = BaseCtx::new(spec.config.value().to_owned(), build_token.raw());
+						let ctx = Ctx::Base(BaseCtx::new(spec.config.value().to_owned(), build_token.raw()));
 						let bytes = wasm_module.build(implicits, spec, &ctx, &project_handle)?;
 						let result = ResultFFI::deserialize(&bytes)?;
 						debug!("jvalue from wasm call: {:?}", &result);

@@ -9,6 +9,7 @@ mod sandbox;
 mod path_util;
 mod module;
 mod init;
+mod ctx;
 
 #[cfg(test)]
 mod test;

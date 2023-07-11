@@ -23,7 +23,7 @@ pub use ambl_common::export_builder;
 static AMBL_LOGGER: AmblLogger = AmblLogger;
 
 // #[no_mangle]
-pub fn ambl_init(level_int: u32) {
+pub fn ambl_init(level_int: u8) {
 	let level = LogLevel::from_int(level_int);
 	log::set_max_level(level.to_level_filter());
 	log::set_logger(&AMBL_LOGGER).unwrap();
