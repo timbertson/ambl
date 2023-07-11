@@ -3,7 +3,7 @@ mod persist;
 mod project;
 mod sync;
 // mod wasm;
-mod wasm_component;
+mod wasm;
 mod err;
 mod sandbox;
 mod path_util;
@@ -34,7 +34,7 @@ use serde_json::map::OccupiedEntry;
 use ambl_common::build::*;
 use ambl_common::ffi::ResultFFI;
 use ambl_common::rule::*;
-use wasm_component::WasmModule;
+use wasm::WasmModule;
 use cli_opts::CliOpts;
 use clap::Parser;
 

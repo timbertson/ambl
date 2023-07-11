@@ -32,7 +32,7 @@ use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::Sandbox;
 use crate::sync::{MutexRef, Mutexed, MutexHandle, RwRef, RwHandle, RwReadGuard};
-use crate::{wasm_component::WasmModule, sync::lock_failed};
+use crate::{wasm::WasmModule, sync::lock_failed};
 
 pub type ProjectRef<M> = MutexRef<Project<M>>;
 pub type ProjectHandle<M> = MutexHandle<Project<M>>;
