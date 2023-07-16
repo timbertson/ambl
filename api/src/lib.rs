@@ -11,6 +11,8 @@ use ambl_common::LogLevel;
 
 pub use ambl_common::ambl_export_builder_raw;
 pub use ambl_macros::export;
+pub use anyhow;
+pub use serde_json;
 
 static AMBL_LOGGER: AmblLogger = AmblLogger;
 

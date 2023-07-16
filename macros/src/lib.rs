@@ -110,12 +110,12 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
 				symbol: ::wit_bindgen::rt::string::String,
 				ctx: ::wit_bindgen::rt::string::String
 			) -> ::wit_bindgen::rt::string::String {
-				::log::debug!("invoking {} with ctx {}", &symbol, &ctx);
+				// ::log::debug!("invoking {} with ctx {}", &symbol, &ctx);
 				match calltype {
 					0 => {
 						// rules
 						::ambl_api::ResultFFI::<Vec<::ambl_api::Rule>>::serialize((||{
-							let c: ::ambl_api::BaseCtx = serde_json::from_str(&ctx)?;
+							let c: ::ambl_api::BaseCtx = ::ambl_api::serde_json::from_str(&ctx)?;
 							match symbol.as_str() {
 								#base_match_lines
 								other => Err(::anyhow::anyhow!("Unknown rules function: {}", &other)),
@@ -125,14 +125,14 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
 					1 => {
 						// target
 						::ambl_api::ResultFFI::<()>::serialize((||{
-							let c: ::ambl_api::TargetCtx = ::serde_json::from_str(&ctx)?;
+							let c: ::ambl_api::TargetCtx = ::ambl_api::serde_json::from_str(&ctx)?;
 							match symbol.as_str() {
 								#target_match_lines
-								other => Err(::anyhow::anyhow!("Unknown target function: {}", &other)),
+								other => Err(::ambl_api::anyhow::anyhow!("Unknown target function: {}", &other)),
 							}
 						})())
 					},
-					other => ::ambl_api::ResultFFI::<()>::serialize(Err(::anyhow::anyhow!("Unknown calltype: {}", &other)))
+					other => ::ambl_api::ResultFFI::<()>::serialize(Err(::ambl_api::anyhow::anyhow!("Unknown calltype: {}", &other)))
 				}
 			}
 		}
