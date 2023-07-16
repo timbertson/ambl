@@ -12,7 +12,7 @@ use ambl_common::LogLevel;
 // #[macro_use]
 // extern crate ambl_common;
 
-pub use ambl_common::export_builder;
+pub use ambl_common::ambl_export_builder_raw;
 
 // // used to detect incompatible guest modules
 // #[no_mangle]

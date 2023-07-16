@@ -4,6 +4,7 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned};
 #[cfg(target_arch = "wasm32")]
 wit_bindgen::generate!({
 	world: "builder",
+	export_macro_name: "ambl_export_builder_raw",
 	macro_export,
 });
 
