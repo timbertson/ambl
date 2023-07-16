@@ -120,6 +120,12 @@ impl<'a> Scope<'a> {
 	pub fn borrowed(n: &'a Simple) -> Self {
 		Scope(Some(Cow::Borrowed(n)))
 	}
+	
+	pub fn push_to(&self, path: &mut PathBuf) {
+		if let Some(ref content) = self.0 {
+			path.push(content.as_path())
+		}
+	}
 
 	// Always expensive, removes all lifetime limits
 	pub fn clone(&self) -> Scope<'static> {

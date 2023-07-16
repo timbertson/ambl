@@ -789,7 +789,7 @@ impl<M: BuildModule> Project<M> {
 							project.unlocked_block(|project_handle| {
 								let ctx = Ctx::Target(TargetCtx::new(
 									found_target.rel_name.as_str().to_owned(),
-									tmp_path.to_owned(),
+									path_util::string_of_pathbuf(tmp_path.to_owned()),
 									found_target.build.config.0.to_owned(),
 									build_token.raw()));
 

@@ -1,4 +1,4 @@
-use std::{ops::{Deref}, path::{PathBuf, Path}};
+use std::ops::Deref;
 
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
@@ -154,14 +154,14 @@ pub trait Invoker {
 #[derive(Serialize, Deserialize)]
 pub struct TargetCtx {
 	target: String, // logical target name, relative to module root
-	dest: PathBuf, // physical file location, relative to CWD (or absolute?)
+	dest: String, // physical file location, relative to CWD (or absolute?)
 
 	#[serde(flatten)]
 	pub base: BaseCtx,
 }
 
 impl TargetCtx {
-	pub fn new(target: String, dest: PathBuf, config: Option<serde_json::Value>, token: u32) -> Self {
+	pub fn new(target: String, dest: String, config: Option<serde_json::Value>, token: u32) -> Self {
 		Self {
 			target,
 			dest,
@@ -171,7 +171,7 @@ impl TargetCtx {
 
 	pub fn target(&self) -> &str { &self.target }
 
-	pub fn dest(&self) -> &Path { self.dest.as_path() }
+	pub fn output_path(&self) -> &str { &self.dest }
 
 	pub fn write_dest<C: Into<Vec<u8>>>(&self, contents: C) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
@@ -226,6 +226,13 @@ impl Tempdir {
 		ctx.invoke(Invoke::Action(InvokeAction::ReadFile(ReadFile {
 			source_root: crate::build::FileSource::Tempdir(*self),
 			source_suffix: Some(path.into()),
+		})))?.into_string()
+	}
+
+	pub fn path(&self, ctx: &TargetCtx) -> Result<String> {
+		ctx.invoke(Invoke::Action(InvokeAction::GetPath(ReadFile {
+			source_root: crate::build::FileSource::Tempdir(*self),
+			source_suffix: None,
 		})))?.into_string()
 	}
 }

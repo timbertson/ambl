@@ -224,7 +224,11 @@ impl Sandbox {
 			}
 			cmd.current_dir(&full_cwd);
 
-			info!("+ {:?}", &cmd);
+			if log_enabled!(log::Level::Debug) {
+				debug!("+ {:?}", &cmd);
+			} else {
+				info!("+ {:?}", &exe);
+			}
 
 			let response = result_block(|| {
 				std::fs::create_dir_all(&full_cwd)?;
@@ -245,7 +249,7 @@ impl Sandbox {
 				} else {
 					Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result.code()))
 				}
-			}).with_context(|| format!("running {:?} in {}", &cmd, &full_cwd.display()));
+			});
 
 			let response = crate::debug::shell_on_failure(response)?;
 			Ok((tmp, response))

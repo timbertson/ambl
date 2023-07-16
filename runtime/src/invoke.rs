@@ -10,7 +10,7 @@ use crate::build::{BuildReason, BuildResponse, TargetContext};
 use crate::build_request::BuildRequest;
 use crate::err::result_block;
 use crate::module::BuildModule;
-use crate::path_util::{lexists, Unscoped, CPath, Scope, Simple, Scoped};
+use crate::path_util::{lexists, Unscoped, CPath, Scope, Simple, Scoped, self, string_of_pathbuf};
 use crate::persist::BuildResult;
 use crate::project::{Project, ActiveBuildToken, ProjectMutex, ProjectMutexPair, Implicits};
 use crate::sync::MutexHandle;
@@ -95,6 +95,11 @@ fn perform_invoke<M: BuildModule>(
 					.with_context(|| format!("Reading file {}", src.display()))?;
 				Ok(InvokeResponse::Bytes(bytes))
 			},
+
+			InvokeAction::GetPath(f) => {
+				let (project, src) = built_source_path(project, target_context, module_path, token, &f.source_root, f.source_suffix.as_deref())?;
+				Ok(InvokeResponse::Str(string_of_pathbuf(src)))
+			},
 		}
 	}).with_context(|| format!("Invoking action: {:?}", action))
 }
@@ -128,12 +133,14 @@ fn built_source_path<'a, M: BuildModule>(
 		},
 		FileSource::Tempdir(tempdir) => {
 			let temp_root: &Path = project.get_tempdir(token, *tempdir)?;
-			PathBuf::from(temp_root)
+			let mut ret = PathBuf::from(temp_root);
+			scope.push_to(&mut ret);
+			ret
 		}
 	};
 
 	if let Some(suffix) = suffix {
-		src.push(Unscoped::from_string(suffix.to_owned(), scope).0);
+		src.push(suffix.to_owned())
 	}
 	Ok((project, src))
 }

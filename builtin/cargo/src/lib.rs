@@ -1,4 +1,4 @@
-#[ambl_api::ambl_module]
+#[ambl_api::export]
 mod build {
 	use anyhow::*;
 	use serde::{Deserialize, Serialize};
@@ -40,6 +40,10 @@ mod build {
 		let exe = c.lookup(exe_lookup("cargo"))?.ok_or_else(|| anyhow!("cargo not on $PATH"))?;
 		minimal_cargo_files(c)?;
 		Ok(cmd(exe))
+	}
+
+	fn wasmtools(c: &BaseCtx) -> Result<Command> {
+		Ok(cmd(c.lookup(exe_lookup("wasm-tools"))?.ok_or_else(|| anyhow!("wasm-tools not on $PATH"))?))
 	}
 
 	fn minimal_cargo_files(c: &BaseCtx) -> Result<()> {
@@ -143,8 +147,19 @@ mod build {
 			.impure_share_dir("target")
 		)?.into_tempdir()?;
 
+		let tmp_path = tmp.path(&c)?;
+
 		// TODO full cargo substitution logic
-		tmp.copy_to_dest(&c, format!("target/wasm32-unknown-unknown/debug/{}.wasm", conf.name.replace("-", "_")))?;
+		let raw_wasm_name = format!("{}/target/wasm32-unknown-unknown/debug/{}.wasm", tmp_path, conf.name.replace("-", "_"));
+
+		// tmp.copy_to_dest(&c, raw_wasm_name)?;
+		c.run(wasmtools(&c)?
+			.arg("component")
+			.arg("new")
+			.arg(raw_wasm_name)
+			.arg("-o")
+			.arg(&c.output_path())
+		)?;
 		Ok(())
 	}
 
@@ -156,49 +171,4 @@ mod build {
 		}
 		c.empty_dest()
 	}
-
-	// type WString = wit_bindgen::rt::string::String;
-	// struct Component;
-	// impl Builder for Component {
-	// 	fn version() -> u8 {
-	// 		1
-	// 	}
-		
-	// 	fn init(loglevel: u8) {
-	// 		ambl_init(loglevel);
-	// 	}
-
-	// 	fn invoke(calltype: u8, symbol: WString, ctx: WString) -> WString {
-	// 		info!("invoking {} with ctx {}", &symbol, &ctx);
-	// 		match calltype {
-	// 			0 => {
-	// 				// rules
-	// 				ResultFFI::<Vec<Rule>>::serialize((||{
-	// 					let c: BaseCtx = serde_json::from_str(&ctx)?;
-	// 					match symbol.as_str() {
-	// 						"get_rules" => get_rules(c),
-	// 						"module_rules" => module_rules(c),
-	// 						other => Err(anyhow!("Unknown rules function: {}", &other)),
-	// 					}
-	// 				})())
-	// 			},
-	// 			1 => {
-	// 				// target
-	// 				ResultFFI::<()>::serialize((||{
-	// 					let c: TargetCtx = serde_json::from_str(&ctx)?;
-	// 					match symbol.as_str() {
-	// 						"build_workspace_meta" => build_workspace_meta(c),
-	// 						"build_lockfile" => build_lockfile(c),
-	// 						"module_build" => module_build(c),
-	// 						"module_sources" => module_sources(c),
-	// 						other => Err(anyhow!("Unknown build function: {}", &other)),
-	// 					}
-	// 				})())
-	// 			},
-	// 			other => ResultFFI::<()>::serialize(Err(anyhow!("Unknown calltype: {}", &other)))
-	// 		}
-	// 	}
-	// }
-	 
-	// export_builder!(Component);
 }
