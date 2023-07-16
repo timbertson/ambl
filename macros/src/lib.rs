@@ -93,7 +93,6 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
 	// eprintln!("Base: {:?}", base_match_lines);
 	// eprintln!("Target: {:?}", target_match_lines);
 
-	// type WString = ::wit_bindgen::rt::string::String;
 	let boilerplate: proc_macro2::TokenStream = quote::quote!{
 		struct _BuilderImpl;
 		impl ::ambl_api::Builder for _BuilderImpl {
@@ -107,9 +106,9 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 			fn invoke(
 				calltype: u8,
-				symbol: ::wit_bindgen::rt::string::String,
-				ctx: ::wit_bindgen::rt::string::String
-			) -> ::wit_bindgen::rt::string::String {
+				symbol: ::ambl_api::WitString,
+				ctx: ::ambl_api::WitString
+			) -> ::ambl_api::WitString {
 				// ::log::debug!("invoking {} with ctx {}", &symbol, &ctx);
 				match calltype {
 					0 => {

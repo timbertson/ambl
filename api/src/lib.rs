@@ -14,6 +14,9 @@ pub use ambl_macros::export;
 pub use anyhow;
 pub use serde_json;
 
+#[cfg(target_arch = "wasm32")]
+pub type WitString = wit_bindgen::rt::string::String;
+
 static AMBL_LOGGER: AmblLogger = AmblLogger;
 
 pub fn ambl_init(level_int: u8) {

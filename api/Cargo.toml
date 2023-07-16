@@ -10,3 +10,6 @@ ambl-common = { path = "../common" }
 ambl-macros = { path = "../macros" }
 anyhow = "1"
 log = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = { git = "https://github.com/bytecodealliance/wit-bindgen", version = "0.9.0" }
