@@ -66,9 +66,9 @@ mod build {
 	}
 
 	pub fn build_workspace_meta(c: TargetCtx) -> Result<()> {
-		let meta = c.run(raw_cargo(&c)?.args(vec!(
+		let meta = c.run_output(raw_cargo(&c)?.args(vec!(
 			"metadata", "--no-deps", "--format-version", "1"
-		)).stdout(Stdout::String))?.into_string().context("cargo metadata output")?;
+		))).context("cargo metadata output")?;
 		// debug(&format!("META: {}", &meta));
 		warn!("META: {}", &meta);
 		c.write_dest(meta)?;
@@ -153,13 +153,12 @@ mod build {
 		let raw_wasm_name = format!("{}/target/wasm32-unknown-unknown/debug/{}.wasm", tmp_path, conf.name.replace("-", "_"));
 
 		// tmp.copy_to_dest(&c, raw_wasm_name)?;
-		c.run(wasmtools(&c)?
+		let component_bytes = c.run_output_bytes(wasmtools(&c)?
 			.arg("component")
 			.arg("new")
 			.arg(raw_wasm_name)
-			.arg("-o")
-			.arg(&c.output_path())
 		)?;
+		c.write_dest(component_bytes)?;
 		Ok(())
 	}
 

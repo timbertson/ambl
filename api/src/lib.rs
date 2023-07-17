@@ -9,13 +9,15 @@ pub use ambl_macros::*;
 use log::*;
 use ambl_common::LogLevel;
 
-pub use ambl_common::ambl_export_builder_raw;
 pub use ambl_macros::export;
 pub use anyhow;
 pub use serde_json;
 
 #[cfg(target_arch = "wasm32")]
 pub type WitString = wit_bindgen::rt::string::String;
+
+#[cfg(target_arch = "wasm32")]
+pub use ambl_common::ambl_export_builder_raw;
 
 static AMBL_LOGGER: AmblLogger = AmblLogger;
 

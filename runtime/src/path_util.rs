@@ -41,12 +41,14 @@ pub fn rm_rf_and_ensure_parent<P: AsRef<Path>>(p: P) -> Result<()> {
 	let p = p.as_ref();
 	rm_rf(p)?;
 	if let Some(parent) = p.parent() {
+		debug!("create_dir_all({})", parent.display());
 		fs::create_dir_all(parent)?;
 	}
 	Ok(())
 }
 
 fn rm_rf(p: &Path) -> Result<()> {
+	debug!("rm_rf({})", p.display());
 	if let Some(stat) = lstat_opt(p)? {
 		ensure_writeable(p, &stat)?;
 		if stat.is_dir() {

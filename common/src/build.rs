@@ -348,11 +348,9 @@ impl Default for Stdio {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Stdout {
-	String,
+	Collect,
 	Inherit,
 	Ignore,
-	WriteTo(String),
-	AppendTo(String),
 }
 impl Default for Stdout {
 	fn default() -> Self {
@@ -375,7 +373,7 @@ impl Default for Stderr {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Stdin {
 	Inherit, // TODO should we allow this?
-	Value(String),
+	Value(Vec<u8>),
 	Null,
 }
 impl Default for Stdin {

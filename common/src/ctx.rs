@@ -110,7 +110,14 @@ impl BaseCtx {
 	}
 
 	pub fn run_output(&self, cmd: Command) -> Result<String> {
-		self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::String)))?.into_string()
+		Ok(
+			self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Collect)))?
+				.into_string()?.trim_end().to_owned()
+		)
+	}
+
+	pub fn run_output_bytes(&self, cmd: Command) -> Result<Vec<u8>> {
+		self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Collect)))?.into_bytes()
 	}
 
 	pub fn lookup(&self, lookup: EnvLookup) -> Result<Option<String>> {
