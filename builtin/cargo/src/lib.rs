@@ -42,10 +42,6 @@ mod build {
 		Ok(cmd(exe))
 	}
 
-	fn wasmtools(c: &BaseCtx) -> Result<Command> {
-		Ok(cmd(c.lookup(exe_lookup("wasm-tools"))?.ok_or_else(|| anyhow!("wasm-tools not on $PATH"))?))
-	}
-
 	fn minimal_cargo_files(c: &BaseCtx) -> Result<()> {
 		c.build("Cargo.toml")?;
 		// We need src/{lib,main} for cargo to evaluate.
@@ -147,19 +143,29 @@ mod build {
 			.impure_share_dir("target")
 		)?.into_tempdir()?;
 
-		let tmp_path = tmp.path(&c)?;
-
 		// TODO full cargo substitution logic
-		let raw_wasm_name = format!("{}/target/wasm32-unknown-unknown/debug/{}.wasm", tmp_path, conf.name.replace("-", "_"));
-
-		// tmp.copy_to_dest(&c, raw_wasm_name)?;
-		let component_bytes = c.run_output_bytes(wasmtools(&c)?
-			.arg("component")
-			.arg("new")
-			.arg(raw_wasm_name)
-		)?;
+		let raw_wasm_name = format!("target/wasm32-unknown-unknown/debug/{}.wasm", conf.name.replace("-", "_"));
+		
+		let wasm_bytes = tmp.read_file_bytes(&c, raw_wasm_name)?;
+		let component_bytes = convert_wasm_to_component(&wasm_bytes)?;
 		c.write_dest(component_bytes)?;
+
 		Ok(())
+	}
+	
+	fn convert_wasm_to_component(contents: &[u8]) -> Result<Vec<u8>> {
+		use wit_component::ComponentEncoder;
+
+		let wasm = wat::parse_bytes(contents)?;
+		let encoder = ComponentEncoder::default()
+				.validate(true)
+				.module(&wasm)?;
+
+		let bytes = encoder
+				.encode()
+				.context("failed to encode a component from module")?;
+
+		Ok(bytes)
 	}
 
 	pub fn module_sources(c: TargetCtx) -> Result<()> {

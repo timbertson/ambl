@@ -229,11 +229,18 @@ impl Tempdir {
 		}))))
 	}
 
-	pub fn read_file<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<String> {
+	fn read_file_base<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<InvokeResponse> {
 		ctx.invoke(Invoke::Action(InvokeAction::ReadFile(ReadFile {
 			source_root: crate::build::FileSource::Tempdir(*self),
 			source_suffix: Some(path.into()),
-		})))?.into_string()
+		})))
+	}
+	pub fn read_file<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<String> {
+		self.read_file_base(ctx, path)?.into_string()
+	}
+
+	pub fn read_file_bytes<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<Vec<u8>> {
+		self.read_file_base(ctx, path)?.into_bytes()
 	}
 
 	pub fn path(&self, ctx: &TargetCtx) -> Result<String> {
