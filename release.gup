@@ -1,10 +1,2 @@
 #!bash -eu
-cargo build \
-	--release \
-	--color always \
-	--package ambl-runtime \
-	&& cargo build \
-	--release \
-	--color always \
-	--target=wasm32-unknown-unknown \
-	--package ambl-builtin-cargo
+exec env PROFILE=release ./compile.gup.sh "$@"

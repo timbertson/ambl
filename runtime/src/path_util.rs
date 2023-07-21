@@ -236,12 +236,18 @@ lazy_static::lazy_static! {
 	static ref CWD_PATH: PathBuf = PathBuf::from(".");
 }
 
+#[cfg(debug_assertions)]
+const PROFILE: &'static str = "debug";
+
+#[cfg(not(debug_assertions))]
+const PROFILE: &'static str = "release";
+
 lazy_static::lazy_static!{
 	static ref BUILTINS_ROOT: PathBuf = {
 		PathBuf::from(match option_env!("PREFIX") {
 			Some(prefix) => format!("{}/share/builtins", prefix),
 			// TODO pick a better path for this
-			None => format!("{}/../", env!("CARGO_MANIFEST_DIR")),
+			None => format!("{}/../target/wasm32-unknown-unknown/{}/component/", env!("CARGO_MANIFEST_DIR"), PROFILE),
 		})
 	};
 }
