@@ -195,11 +195,9 @@ impl Sandbox {
 			});
 
 			cmd.stdout(match output.stdout {
-				build::Stdout::String => Stdio::piped(),
+				build::Stdout::Collect => Stdio::piped(),
 				build::Stdout::Inherit => Stdio::inherit(),
 				build::Stdout::Ignore => Stdio::null(),
-				build::Stdout::WriteTo(_) => todo!(),
-				build::Stdout::AppendTo(_) => todo!(),
 			});
 			
 			// TODO: actual sandboxing.
@@ -224,16 +222,20 @@ impl Sandbox {
 			}
 			cmd.current_dir(&full_cwd);
 
-			info!("+ {:?}", &cmd);
+			if log_enabled!(log::Level::Debug) {
+				debug!("+ {:?}", &cmd);
+			} else {
+				info!("+ {:?}", &exe);
+			}
 
 			let response = result_block(|| {
 				std::fs::create_dir_all(&full_cwd)?;
 				let mut proc = cmd.spawn()?;
 				let response = match output.stdout {
-					build::Stdout::String => {
-						let mut s: String = String::new();
-						proc.stdout.take().expect("stdout pipe").read_to_string(&mut s)?;
-						InvokeResponse::Str(s.trim_end().to_owned())
+					build::Stdout::Collect => {
+						let mut s: Vec<u8> = Vec::new();
+						proc.stdout.take().expect("stdout pipe").read_to_end(&mut s)?;
+						InvokeResponse::Bytes(s)
 					},
 					_ => InvokeResponse::Unit,
 				};
@@ -245,7 +247,7 @@ impl Sandbox {
 				} else {
 					Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result.code()))
 				}
-			}).with_context(|| format!("running {:?} in {}", &cmd, &full_cwd.display()));
+			});
 
 			let response = crate::debug::shell_on_failure(response)?;
 			Ok((tmp, response))

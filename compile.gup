@@ -1,8 +1,2 @@
 #!bash -eu
-cargo build \
-	--color always \
-	--package ambl-runtime \
-	&& cargo build \
-	--color always \
-	--target=wasm32-unknown-unknown \
-	--package ambl-builtin-cargo
+env PROFILE=debug ./compile.gup.sh "$@"

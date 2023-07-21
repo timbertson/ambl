@@ -2,12 +2,14 @@
 mod persist;
 mod project;
 mod sync;
+// mod wasm;
 mod wasm;
 mod err;
 mod sandbox;
 mod path_util;
 mod module;
 mod init;
+mod ctx;
 
 #[cfg(test)]
 mod test;

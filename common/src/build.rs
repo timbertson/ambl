@@ -1,5 +1,7 @@
 use anyhow::*;
 use std::collections::BTreeSet;
+use std::fmt::Debug;
+use std::path::Path;
 use std::{collections::BTreeMap, ops::{DerefMut, Deref}};
 
 use serde::{Serialize, Deserialize};
@@ -180,7 +182,7 @@ pub enum FileSelection {
 	ExcludeGlob(String),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct GenCommand<Path> {
 	pub exe: Path,
 	pub args: Vec<String>,
@@ -200,6 +202,27 @@ pub struct GenCommand<Path> {
 	// Then you could have varying levels of correctness, from internal (built with ambl), to nix (checksum the path), to
 	// impure system deps (look at $PATH and hope for the best)
 	// Also: how do outputs work? Ideally only declared outputs will be allowed back into the project root, but how to declare.
+}
+
+// Suppress most noise at the default log level, as this struct often appears in error traces
+impl <T: Debug> Debug for GenCommand<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let mut out = f.debug_struct("Command");
+		out
+			.field("exe", &self.exe)
+			.field("args", &self.args);
+
+		if log::log_enabled!(log::Level::Debug) {
+			out
+				.field("cwd", &self.cwd)
+				.field("env", &self.env)
+				.field("env_inherit", &self.env_inherit)
+				.field("impure_share_dirs", &self.impure_share_dirs)
+				.field("output", &self.output)
+				.field("input", &self.input);
+		}
+		out.finish()
+	}
 }
 
 impl<T> GenCommand<T> {
@@ -243,6 +266,15 @@ impl Command {
 
 	pub fn arg<S: ToString>(mut self, s: S) -> Self {
 		self.args.push(s.to_string());
+		self
+	}
+
+	pub fn path_arg<S: AsRef<Path>>(mut self, s: S) -> Self {
+		let path_ref = s.as_ref();
+		self.args.push(path_ref.as_os_str().to_str()
+			.unwrap_or_else(|| panic!("non-UTF8 path: {:?}", path_ref))
+			.to_owned()
+		);
 		self
 	}
 
@@ -316,11 +348,9 @@ impl Default for Stdio {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Stdout {
-	String,
+	Collect,
 	Inherit,
 	Ignore,
-	WriteTo(String),
-	AppendTo(String),
 }
 impl Default for Stdout {
 	fn default() -> Self {
@@ -343,7 +373,7 @@ impl Default for Stderr {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Stdin {
 	Inherit, // TODO should we allow this?
-	Value(String),
+	Value(Vec<u8>),
 	Null,
 }
 impl Default for Stdin {
@@ -369,6 +399,7 @@ pub enum InvokeAction {
 	WriteDest(WriteDest),
 	ReadFile(ReadFile),
 	CopyFile(CopyFile),
+	GetPath(ReadFile),
 	ConfigureChecksum(bool),
 }
 

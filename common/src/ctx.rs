@@ -1,24 +1,25 @@
-use std::{ops::{Deref}, path::{PathBuf, Path}};
+use std::ops::Deref;
 
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
-use crate::ffi::{ResultFFI, SizedPtr};
+use crate::ffi::*;
 use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, Invoke, InvokeAction, FilesetDependency, WriteDest, CopyFile, ReadFile, FileSource, Stdout};
 use crate::rule::EnvLookup;
 
-#[cfg(target_arch = "wasm32")]
-extern {
-	pub fn ambl_invoke(data: *const u8, len: u32, out: &mut *mut u8, out_len: &mut u32);
-	pub fn ambl_log(level: u32, data: *const u8, len: u32);
-}
+// #[cfg(target_arch = "wasm32")]
+// extern {
+// 	pub fn ambl_invoke(data: *const u8, len: u32, out: &mut *mut u8, out_len: &mut u32);
+// 	pub fn ambl_log(level: u32, data: *const u8, len: u32);
+// }
 
-// stubs so that code compiles outside wasm
-#[cfg(not(target_arch = "wasm32"))]
-pub unsafe fn ambl_invoke(_: *const u8, _: u32, _: &mut *mut u8, _: &mut u32) { panic!("stub") }
+// // stubs so that code compiles outside wasm
+// #[cfg(not(target_arch = "wasm32"))]
+// pub unsafe fn ambl_invoke(_: *const u8, _: u32, _: &mut *mut u8, _: &mut u32) { panic!("stub") }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub unsafe fn ambl_log(_: u32, _: *const u8, _: u32) {}
+// #[cfg(not(target_arch = "wasm32"))]
+// pub unsafe fn ambl_log(_: u32, _: *const u8, _: u32) {}
+
 
 fn ignore_result<T>(r: Result<T>) -> Result<()> {
 	r.map(|_| ())
@@ -49,13 +50,9 @@ impl BaseCtx {
 
 	fn invoke_ffi(&self, request: Invoke) -> Result<InvokeResponse> {
 		let tagged = TaggedInvoke { token: self.token, request };
-		let buf = serde_json::to_vec(&tagged)?;
-		let mut response = SizedPtr::empty();
-		let response_slice = unsafe {
-			ambl_invoke(buf.as_ptr(), buf.len() as u32, &mut response.ptr, &mut response.len);
-			response.to_slice()
-		};
-		ResultFFI::deserialize(response_slice)
+		let buf = serde_json::to_string(&tagged)?;
+		let response = amblinvoke(&buf);
+		ResultFFI::deserialize(&response)
 	}
 
 	pub fn invoke(&self, request: Invoke) -> Result<InvokeResponse> {
@@ -113,7 +110,14 @@ impl BaseCtx {
 	}
 
 	pub fn run_output(&self, cmd: Command) -> Result<String> {
-		self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::String)))?.into_string()
+		Ok(
+			self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Collect)))?
+				.into_string()?.trim_end().to_owned()
+		)
+	}
+
+	pub fn run_output_bytes(&self, cmd: Command) -> Result<Vec<u8>> {
+		self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Collect)))?.into_bytes()
 	}
 
 	pub fn lookup(&self, lookup: EnvLookup) -> Result<Option<String>> {
@@ -157,14 +161,14 @@ pub trait Invoker {
 #[derive(Serialize, Deserialize)]
 pub struct TargetCtx {
 	target: String, // logical target name, relative to module root
-	dest: PathBuf, // physical file location, relative to CWD (or absolute?)
+	dest: String, // physical file location, relative to CWD (or absolute?)
 
 	#[serde(flatten)]
-	base: BaseCtx,
+	pub base: BaseCtx,
 }
 
 impl TargetCtx {
-	pub fn new(target: String, dest: PathBuf, config: Option<serde_json::Value>, token: u32) -> Self {
+	pub fn new(target: String, dest: String, config: Option<serde_json::Value>, token: u32) -> Self {
 		Self {
 			target,
 			dest,
@@ -174,7 +178,7 @@ impl TargetCtx {
 
 	pub fn target(&self) -> &str { &self.target }
 
-	pub fn dest(&self) -> &Path { self.dest.as_path() }
+	pub fn output_path(&self) -> &str { &self.dest }
 
 	pub fn write_dest<C: Into<Vec<u8>>>(&self, contents: C) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
@@ -225,10 +229,24 @@ impl Tempdir {
 		}))))
 	}
 
-	pub fn read_file<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<String> {
+	fn read_file_base<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<InvokeResponse> {
 		ctx.invoke(Invoke::Action(InvokeAction::ReadFile(ReadFile {
 			source_root: crate::build::FileSource::Tempdir(*self),
 			source_suffix: Some(path.into()),
+		})))
+	}
+	pub fn read_file<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<String> {
+		self.read_file_base(ctx, path)?.into_string()
+	}
+
+	pub fn read_file_bytes<S: Into<String>>(&self, ctx: &TargetCtx, path: S) -> Result<Vec<u8>> {
+		self.read_file_base(ctx, path)?.into_bytes()
+	}
+
+	pub fn path(&self, ctx: &TargetCtx) -> Result<String> {
+		ctx.invoke(Invoke::Action(InvokeAction::GetPath(ReadFile {
+			source_root: crate::build::FileSource::Tempdir(*self),
+			source_suffix: None,
 		})))?.into_string()
 	}
 }

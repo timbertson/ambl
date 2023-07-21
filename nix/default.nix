@@ -9,6 +9,7 @@ let
 
 in with pkgs;
 mkShell {
+	LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
 	buildInputs = [
 		libiconv
 		wasm-pack

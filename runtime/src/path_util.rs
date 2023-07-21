@@ -41,12 +41,14 @@ pub fn rm_rf_and_ensure_parent<P: AsRef<Path>>(p: P) -> Result<()> {
 	let p = p.as_ref();
 	rm_rf(p)?;
 	if let Some(parent) = p.parent() {
+		debug!("create_dir_all({})", parent.display());
 		fs::create_dir_all(parent)?;
 	}
 	Ok(())
 }
 
 fn rm_rf(p: &Path) -> Result<()> {
+	debug!("rm_rf({})", p.display());
 	if let Some(stat) = lstat_opt(p)? {
 		ensure_writeable(p, &stat)?;
 		if stat.is_dir() {
@@ -119,6 +121,12 @@ impl<'a> Scope<'a> {
 
 	pub fn borrowed(n: &'a Simple) -> Self {
 		Scope(Some(Cow::Borrowed(n)))
+	}
+	
+	pub fn push_to(&self, path: &mut PathBuf) {
+		if let Some(ref content) = self.0 {
+			path.push(content.as_path())
+		}
 	}
 
 	// Always expensive, removes all lifetime limits
@@ -228,11 +236,18 @@ lazy_static::lazy_static! {
 	static ref CWD_PATH: PathBuf = PathBuf::from(".");
 }
 
+#[cfg(debug_assertions)]
+const PROFILE: &'static str = "debug";
+
+#[cfg(not(debug_assertions))]
+const PROFILE: &'static str = "release";
+
 lazy_static::lazy_static!{
 	static ref BUILTINS_ROOT: PathBuf = {
 		PathBuf::from(match option_env!("PREFIX") {
 			Some(prefix) => format!("{}/share/builtins", prefix),
-			None => format!("{}/../target/wasm32-unknown-unknown/debug", env!("CARGO_MANIFEST_DIR")),
+			// TODO pick a better path for this
+			None => format!("{}/../target/wasm32-unknown-unknown/{}/component/", env!("CARGO_MANIFEST_DIR"), PROFILE),
 		})
 	};
 }

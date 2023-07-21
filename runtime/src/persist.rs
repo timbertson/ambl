@@ -202,7 +202,7 @@ impl DepStore {
 	}
 
 	pub fn save(&self) -> Result<()> {
-		debug!("Writing cache: {:?}", &self);
+		debug!("Writing cache ...");
 		let persist: DepStorePersist = self.cache.clone().into();
 		let str = serde_json::to_string(&persist).context("serializing build cache")?;
 		let cache_path = PathBuf::from(AMBL_CACHE_PATH);

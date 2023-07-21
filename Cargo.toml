@@ -1,5 +1,6 @@
 [workspace]
 members = [ "common", "api", "macros", "runtime", "builtin/cargo" ]
+exclude = [ "example" ]
 
 [profile.release]
 panic = "abort"
