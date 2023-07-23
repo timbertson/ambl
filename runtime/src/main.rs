@@ -10,6 +10,7 @@ mod path_util;
 mod module;
 mod init;
 mod ctx;
+mod ui;
 
 #[cfg(test)]
 mod test;
@@ -42,11 +43,12 @@ use crate::build::Forced;
 
 fn main() -> Result<()> {
 	let cli = CliOpts::parse();
-	crate::init::init(cli.verbose);
+	let ui = ui::Ui::new();
+	crate::init::init(ui.writer(), cli.verbose);
 	debug!("cli = {:?}", &cli);
 	
 	let cwd = CPath::try_from(env::current_dir()?)?.into_absolute()?;
-	let project = Project::<WasmModule>::new(cwd)?;
+	let project = Project::<WasmModule>::new(cwd, ui.writer())?;
 	let result = (|| {
 		let args = &cli.targets;
 		let mut handle = project.handle();

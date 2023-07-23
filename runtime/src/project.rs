@@ -26,7 +26,7 @@ use wasmtime::*;
 use crate::build::{BuildCache, BuildReason, BuildResponse};
 use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
 use crate::ctx::Ctx;
-use crate::{err::*, path_util, fileset};
+use crate::{err::*, path_util, fileset, ui};
 use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::persist::*;
 use crate::module::*;
@@ -411,13 +411,14 @@ pub struct Project<M: BuildModule> {
 	active_tasks: HashMap<ActiveBuildToken, ActiveBuildState>,
 	root_rule: Arc<ProjectRule>,
 	self_ref: Option<ProjectRef<M>>,
+	writer: ui::Writer,
 }
 
 pub type ProjectMutex<'a, M> = Mutexed<'a, Project<M>>;
 pub type ProjectMutexPair<'a, M, T> = (Mutexed<'a, Project<M>>, T);
 
 impl<M: BuildModule> Project<M> {
-	pub fn new(root: Absolute) -> Result<ProjectRef<M>> {
+	pub fn new(root: Absolute, writer: ui::Writer) -> Result<ProjectRef<M>> {
 		let project = MutexRef::new(Project {
 			root,
 			build_cache: DepStore::load(),
@@ -425,6 +426,7 @@ impl<M: BuildModule> Project<M> {
 			module_cache: ModuleCache::new(),
 			self_ref: None,
 			root_rule: Arc::new(ProjectRule::from_rule(NonConfigRule::Include(dsl::include("ambl.yaml")), Scope::static_root())?),
+			writer,
 		});
 
 		// lock the project to populate self_ref
@@ -1044,6 +1046,10 @@ impl<M: BuildModule> Project<M> {
 	
 	pub fn invalidate_cache(&mut self) -> () {
 		self.build_cache.invalidate()
+	}
+	
+	pub fn writer(&self) -> &ui::Writer {
+		&self.writer
 	}
 	
 	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<Unscoped> {

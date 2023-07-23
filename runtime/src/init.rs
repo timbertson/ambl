@@ -1,19 +1,23 @@
 use log::LevelFilter;
 
-fn init_(is_test: bool, default: &'static str) {
+use crate::ui;
+
+fn init_(writer: ui::Writer, is_test: bool, default: &'static str) {
 	let env = env_logger::Env::new().default_filter_or(default);
-	env_logger::builder()
+	let target: env_logger::fmt::Target = env_logger::fmt::Target::Pipe(Box::new(writer));
+	let log_builder = env_logger::builder()
 		.is_test(is_test)
 		.parse_env(env)
 		.filter_module("cranelift_codegen", LevelFilter::Info)
 		.filter_module("wasmtime_cranelift", LevelFilter::Info)
+		.target(target)
 		.init();
 }
 
-pub fn init(verbose: bool) {
-	init_(false, if verbose { "debug" } else { "info" })
+pub fn init(writer: ui::Writer, verbose: bool) {
+	init_(writer, false, if verbose { "debug" } else { "info" })
 }
 
 pub fn init_for_tests() {
-	init_(true, "debug")
+	init_(panic!(), true, "debug")
 }
