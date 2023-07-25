@@ -19,5 +19,5 @@ pub fn init(writer: ui::Writer, verbose: bool) {
 }
 
 pub fn init_for_tests() {
-	init_(panic!(), true, "debug")
+	init_(ui::Ui::test().writer(), true, "debug")
 }

@@ -312,7 +312,7 @@ impl OutputProxy {
 					if len == 0 {
 						break;
 					}
-					writer.emit(ui::Event::Line(&buf));
+					writer.emit(ui::Event::Line(&buf)).expect("emitting output");
 					buf.clear();
 				}
 		})

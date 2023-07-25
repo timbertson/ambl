@@ -2,7 +2,6 @@
 mod persist;
 mod project;
 mod sync;
-// mod wasm;
 mod wasm;
 mod err;
 mod sandbox;
@@ -75,5 +74,10 @@ fn main() -> Result<()> {
 	// TODO: persist as we go, probably?
 	project.handle().lock("save")?.save()?;
 
-	result
+	if let Err(err) = result {
+		error!("{:?}", err)
+	}
+	
+	ui.finalize()?;
+	Ok(())
 }

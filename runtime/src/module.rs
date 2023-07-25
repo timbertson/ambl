@@ -8,7 +8,7 @@ use wasmtime::Engine;
 use crate::build_request::ResolvedFnSpec;
 use crate::ctx::Ctx;
 use crate::project::{FoundTarget, Implicits};
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef}, persist::{PersistFile}, path_util::{CPath, Unscoped}};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef}, persist::PersistFile, path_util::{CPath, Unscoped}};
 
 pub trait BuildModule : Sized {
 	type Compiled: ToOwned;

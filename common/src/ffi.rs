@@ -9,7 +9,7 @@ wit_bindgen::generate!({
 });
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn ambllog(_: u32, _: &str) {}
+pub fn ambllog(_: u8, _: &str) {}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn amblinvoke(_: &str) -> String { panic!("stub") }

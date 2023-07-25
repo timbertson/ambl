@@ -246,7 +246,7 @@ impl TestInvoker {
 			Some(old) => { map.insert(token, old); },
 			None => { map.remove(&token); },
 		}
-		let serialized = ResultFFI::serialize(result)?;
+		let serialized = ResultFFI::serialize(result);
 		debug!("invoker::return( {} )", &serialized);
 		Ok(serialized.into_bytes())
 	}
