@@ -94,7 +94,11 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
 	// eprintln!("Target: {:?}", target_match_lines);
 
 	let boilerplate: proc_macro2::TokenStream = quote::quote!{
+
 		struct _BuilderImpl;
+
+		// within the generated macro, only generate an impl on wasm
+		#[cfg(target_arch = "wasm32")]
 		impl ::ambl_api::Builder for _BuilderImpl {
 			fn version() -> u8 {
 				1
@@ -134,7 +138,37 @@ pub fn export(attr: TokenStream, item: TokenStream) -> TokenStream {
 					other => ::ambl_api::ResultFFI::<()>::serialize(Err(::ambl_api::anyhow::anyhow!("Unknown calltype: {}", &other)))
 				}
 			}
+
+			fn rules(
+				symbol: ::ambl_api::WitString,
+				ctx: ::ambl_api::WitString
+			) -> ::ambl_api::WitString {
+				::ambl_api::ResultFFI::<Vec<::ambl_api::Rule>>::serialize((||{
+					let c: ::ambl_api::BaseCtx = ::ambl_api::serde_json::from_str(&ctx)?;
+					match symbol.as_str() {
+						#base_match_lines
+						other => Err(::anyhow::anyhow!("Unknown rules function: {}", &other)),
+					}
+				})())
+			}
+
+			fn build(
+				symbol: ::ambl_api::WitString,
+				ctx: ::ambl_api::WitString
+			) -> ::ambl_api::WitString {
+				::ambl_api::ResultFFI::<()>::serialize((||{
+					let c: ::ambl_api::TargetCtx = ::ambl_api::serde_json::from_str(&ctx)?;
+					match symbol.as_str() {
+						#target_match_lines
+						other => Err(::ambl_api::anyhow::anyhow!("Unknown target function: {}", &other)),
+					}
+				})())
+			}
+
 		}
+
+		// within the generated macro, only generate an impl on wasm
+		#[cfg(target_arch = "wasm32")]
 		mod _ambl_api_export {
 			use ambl_api::*;
 			use super::_BuilderImpl;

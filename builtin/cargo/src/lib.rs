@@ -1,5 +1,5 @@
 #[ambl_api::export]
-mod build {
+pub mod build {
 	use anyhow::*;
 	use serde::{Deserialize, Serialize};
 	use ambl_api::*;
@@ -87,9 +87,9 @@ mod build {
 
 	pub fn get_rules(_: BaseCtx) -> Result<Vec<Rule>> {
 		Ok(vec!(
-			target("workspace-meta", function("build_workspace_meta")),
-			target("Cargo.lock", function("build_lockfile")),
-			rule(this_module().function("module_rules")),
+			target("workspace-meta", target_fn!(build_workspace_meta)),
+			target("Cargo.lock", target_fn!(build_lockfile)),
+			include(rule_fn!(module_rules)),
 		))
 	}
 
@@ -98,7 +98,7 @@ mod build {
 		
 		let mut result: Vec<Rule> = vec!();
 		let module_names: Vec<String> = meta.packages.iter().map(|p| p.name.to_owned()).collect();
-		result.push(target("build", function("build_all").config(&module_names)?));
+		result.push(target("build", target_fn!(build_all).config(&module_names)?));
 
 		for p in meta.packages {
 			let dep_names: Vec<String> = p.dependencies.iter()
@@ -110,12 +110,12 @@ mod build {
 			};
 			result.push(target(
 					format!("sources/{}", &p.name),
-					function("module_sources")
+					target_fn!(module_sources)
 						.config(&conf)?));
 
 			result.push(target(
 					format!("module/{}", &p.name),
-					function("module_build")
+					target_fn!(module_build)
 						.config(&conf)?));
 		}
 		Ok(result)

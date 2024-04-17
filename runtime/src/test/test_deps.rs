@@ -1,7 +1,7 @@
 use ambl_common::ctx::TargetCtx;
 use log::*;
 use std::{fs, sync::{Arc, Mutex}};
-use ambl_common::rule::dsl;
+use ambl_common::rule::{dsl, Module};
 use serial_test::serial;
 
 use anyhow::*;
@@ -134,7 +134,9 @@ fn rule_change_causes_rebuild() -> Result<()> {
 
 		let rule_m = p.new_module().rule_fn(|m, ctx| {
 			m.project.record("get_rules");
-			Ok(vec!(target("a", function("build").path("builder"))))
+			Ok(vec!(
+				target("a", module("builder").function("build")),
+			))
 		});
 		let m_name = rule_m.name.to_owned();
 		p.inject_rules_module(rule_m);
@@ -162,7 +164,7 @@ fn equivalent_rule_module_does_not_cause_rebuild() -> Result<()> {
 
 		let rule_m = p.new_module().rule_fn(|m, ctx| {
 			m.project.record("get_rules");
-			Ok(vec!(target("a", function("build").path("builder"))))
+			Ok(vec!(target("a", module("builder").function("build"))))
 		});
 		let m_name = rule_m.name.to_owned();
 		p.inject_rules_module(rule_m);
@@ -186,13 +188,13 @@ fn rebuild_on_transitive_dep_change() -> Result<()> {
 		p.target_builder("b", |p, c| {
 			let contents = c.read_file("a")?;
 			p.record("build b");
-			fs::write(c.dest(), format!("{} -> b", contents))?;
+			fs::write(c.output_path(), format!("{} -> b", contents))?;
 			Ok(())
 		});
 		p.target_builder("c", |p, c| {
 			let contents = c.read_file("b")?;
 			p.record("build c");
-			fs::write(c.dest(), format!("{} -> c", contents))?;
+			fs::write(c.output_path(), format!("{} -> c", contents))?;
 			Ok(())
 		});
 		p.write_file("a", "1")?;
@@ -218,7 +220,7 @@ fn rebuild_on_fileset_change() -> Result<()> {
 		p.target_builder("list", |p, c| {
 			let files: Vec<String> = c.list_fileset(fileset(".").include_files("*.txt"))?;
 			p.record("build");
-			fs::write(c.dest(), format!("{}", files.join("\n")))?;
+			fs::write(c.output_path(), format!("{}", files.join("\n")))?;
 			Ok(())
 		});
 		p.write_file("a.txt", "1")?;
@@ -276,7 +278,7 @@ fn test_does_not_cache_wasm_call_failures() -> Result<()> {
 				Ok(())
 			}
 		});
-		let req = DependencyRequest::WasmCall(dsl::function("fn").path(&module.name));
+		let req = DependencyRequest::WasmCall(dsl::module(&module.name).function("fn"));
 
 		p.inject_module(module);
 

@@ -348,7 +348,7 @@ impl Default for Stdio {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Stdout {
-	Collect,
+	Return,
 	Inherit,
 	Ignore,
 }

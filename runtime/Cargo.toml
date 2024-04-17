@@ -23,6 +23,7 @@ superconsole = "0.2"
 [dev-dependencies]
 ctor = "0.1"
 serial_test = "0.9"
+ambl-api = { path = "../api" }
 
 [[bin]]
 name = "ambl"

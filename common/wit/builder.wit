@@ -1,5 +1,9 @@
 package ambl:build
 
+interface buildfn {
+  build: func(ctx: string) -> string
+}
+
 world builder {
   import ambllog: func(level: u8, msg: string)
   import amblinvoke: func(dep: string) -> string
@@ -7,4 +11,7 @@ world builder {
   export version: func() -> u8
   export init: func(loglevel: u8)
   export invoke: func(calltype: u8, symbol: string, ctx: string) -> string
+
+  export rules: func(symbol: string, ctx: string) -> string
+  export build: func(symbol: string, ctx: string) -> string
 }

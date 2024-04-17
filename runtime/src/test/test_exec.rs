@@ -35,7 +35,7 @@ fn run_can_only_see_dependencies() -> Result<()> {
 			c.build("mtime")?;
 			c.build("checksum")?;
 			c.build("plain_file_dep")?;
-			let files = c.run(cmd("ls").arg("-1").stdout(Stdout::String))?.into_string()?;
+			let files = c.run(cmd("ls").arg("-1").stdout(Stdout::Return))?.into_string()?;
 			let mut lines: Vec<&str> = files.lines().filter(|l| !l.ends_with(".wasm")).collect();
 			lines.sort();
 			for line in lines {

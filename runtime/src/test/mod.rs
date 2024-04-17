@@ -7,6 +7,7 @@ mod test_deps;
 mod test_paths;
 mod test_exec;
 mod test_checksum;
+mod test_dsl;
 
 #[ctor::ctor]
 fn init() {

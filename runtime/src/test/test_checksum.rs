@@ -71,7 +71,7 @@ fn broken_symlink_is_dirty_only_if_it_changes_destination() -> Result<()> {
 
 		p.target_builder("dep", |p, c| {
 			let dest = c.read_file("_dest")?;
-			c.run(cmd("ln").arg("-sfn").arg(&dest).arg(c.output_path().display()))?;
+			c.run(cmd("ln").arg("-sfn").arg(&dest).arg(c.output_path_str()))?;
 			p.record(format!("build dep ({})", &dest));
 			c.empty_dest()
 		});

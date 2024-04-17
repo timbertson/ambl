@@ -42,3 +42,24 @@ impl log::Log for AmblLogger {
 		// noop
 	}
 }
+
+#[macro_export]
+macro_rules! target_fn {
+	($f:ident) => {
+		::ambl_api::TypedFnSymbol::<
+			::ambl_api::TargetCtx,
+			::anyhow::Result<()>
+		>::unsafe_from_string(stringify!($f).to_owned(), $f)
+	}
+}
+
+#[macro_export]
+macro_rules! rule_fn {
+	($f:ident) => {
+		::ambl_api::TypedFnSymbol::<
+			::ambl_api::BaseCtx,
+			::anyhow::Result<::std::vec::Vec<::ambl_api::Rule>>
+		>::unsafe_from_string(stringify!($f).to_owned(), $f)
+	}
+}
+

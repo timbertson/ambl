@@ -201,7 +201,7 @@ impl Sandbox {
 			});
 
 			cmd.stdout(match output.stdout {
-				build::Stdout::Collect => Stdio::piped(),
+				build::Stdout::Return => Stdio::piped(),
 				build::Stdout::Inherit => {
 					output_proxy.source.replace(OutputStream::Stdout);
 					Stdio::piped()
@@ -259,7 +259,7 @@ impl Sandbox {
 				
 				let otuput_proxy_handle = output_proxy.spawn(writer, &mut proc)?;
 				let response = match output.stdout {
-					build::Stdout::Collect => {
+					build::Stdout::Return => {
 						let mut s: Vec<u8> = Vec::new();
 						proc.stdout.take().expect("stdout pipe").read_to_end(&mut s)?;
 						InvokeResponse::Bytes(s)

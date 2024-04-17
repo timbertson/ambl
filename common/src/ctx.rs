@@ -1,4 +1,5 @@
 use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
@@ -111,13 +112,13 @@ impl BaseCtx {
 
 	pub fn run_output(&self, cmd: Command) -> Result<String> {
 		Ok(
-			self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Collect)))?
+			self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Return)))?
 				.into_string()?.trim_end().to_owned()
 		)
 	}
 
 	pub fn run_output_bytes(&self, cmd: Command) -> Result<Vec<u8>> {
-		self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Collect)))?.into_bytes()
+		self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Return)))?.into_bytes()
 	}
 
 	pub fn lookup(&self, lookup: EnvLookup) -> Result<Option<String>> {
@@ -158,17 +159,32 @@ pub trait Invoker {
 	fn invoke(&self, request: Invoke) -> Result<InvokeResponse>;
 }
 
+mod pathbuf_serde {
+	use std::path::PathBuf;
+	use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+	pub fn serialize<S: Serializer>(p: &PathBuf, s: S) -> Result<S::Ok, S::Error> {
+		Ok(str::serialize(p.to_str().expect("non-utf8 path"), s)?)
+	}
+
+	pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PathBuf, D::Error> {
+		Ok(PathBuf::from(String::deserialize(d)?))
+	}
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TargetCtx {
 	target: String, // logical target name, relative to module root
-	dest: String, // physical file location, relative to CWD (or absolute?)
+
+	#[serde(with = "pathbuf_serde")]
+	dest: PathBuf, // physical file location, relative to CWD (or absolute?)
 
 	#[serde(flatten)]
 	pub base: BaseCtx,
 }
 
 impl TargetCtx {
-	pub fn new(target: String, dest: String, config: Option<serde_json::Value>, token: u32) -> Self {
+	pub fn new(target: String, dest: PathBuf, config: Option<serde_json::Value>, token: u32) -> Self {
 		Self {
 			target,
 			dest,
@@ -178,7 +194,11 @@ impl TargetCtx {
 
 	pub fn target(&self) -> &str { &self.target }
 
-	pub fn output_path(&self) -> &str { &self.dest }
+	// TODO make part of struct and return a pointer, don't clone
+	pub fn output_path(&self) -> &Path { &self.dest }
+
+	// convenience
+	pub fn output_path_str(&self) -> &str { self.dest.to_str().expect("non-UTF8 path") }
 
 	pub fn write_dest<C: Into<Vec<u8>>>(&self, contents: C) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {

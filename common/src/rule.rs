@@ -1,6 +1,9 @@
 use anyhow::*;
 use serde::{Serialize, Deserialize};
 use std::hash::Hash;
+use std::marker::PhantomData;
+
+use crate::ctx::{BaseCtx};
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IncludeMode { YAML, WASM }
@@ -48,10 +51,9 @@ pub struct Include {
 }
 
 impl Include {
-	// TODO: typed variant which takes a Serializable
-	pub fn config(mut self, v: serde_json::Value) -> Self {
-		self.config = Config(Some(v));
-		self
+	pub fn config<C: Serialize>(mut self, c: C) -> Result<Self> {
+		self.config = Config(Some(serde_json::to_value(c)?));
+		Ok(self)
 	}
 
 	pub fn scope<S: Into<String>>(mut self, s: S) -> Self {
@@ -98,11 +100,12 @@ impl Into<Rule> for Include {
 	}
 }
 
+// Raw function spec, used in runtime (serialized over JSON so it can't be type safe)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FunctionSpec {
 	#[serde(rename = "fn", default)]
-	pub fn_name: Option<String>,
+	pub fn_name: String,
 
 	#[serde(default)]
 	pub path: Option<String>,
@@ -116,10 +119,20 @@ impl FunctionSpec {
 		self.config = Config(Some(serde_json::to_value(c)?));
 		Ok(self)
 	}
-
-	pub fn path<S: Into<String>>(mut self, s: S) -> Self {
-		self.path = Some(s.into());
-		self
+	
+	pub fn scope<S: Into<String>>(self, s: S) -> Include {
+		let Self {
+			fn_name,
+			path,
+			config,
+		} = self;
+		Include {
+			fn_name: Some(fn_name),
+			scope: Some(s.into()),
+			path,
+			config,
+			mode: Some(IncludeMode::WASM),
+		}
 	}
 }
 
@@ -175,6 +188,117 @@ pub struct NestedRule {
 	pub rules: Vec<Rule>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TypedFnSymbol<I, O> {
+	symbol: String,
+	_impl: PhantomData<fn(I) -> O>
+}
+impl<I,O> TypedFnSymbol<I, O> {
+	pub fn unsafe_from_string(symbol: String, _impl: fn(I) -> O) -> TypedFnSymbol<I, O> {
+		TypedFnSymbol {
+			symbol,
+			_impl: PhantomData
+		}
+	}
+
+	// implement the same methods as FunctionSpec
+	pub fn config<C: Serialize>(self, c: C) -> Result<FunctionSpec> {
+		Into::<FunctionSpec>::into(self).config(c)
+	}
+}
+
+impl<I,O> Into<FunctionSpec> for TypedFnSymbol<I,O> {
+	fn into(self) -> FunctionSpec {
+		FunctionSpec {
+			fn_name: self.symbol,
+			path: None,
+			config: Default::default(),
+		}
+	}
+}
+
+pub struct FnSymbol(String);
+
+// module can be used either for Include or to build a FunctionSpec
+pub struct Module(String);
+
+impl Module {
+	pub fn function<S: Into<String>>(self, name: S) -> FunctionSpec {
+		FunctionSpec {
+			fn_name: name.into(),
+			path: Some(self.0),
+			config: Default::default(),
+		}
+	}
+	
+	pub fn scope<S: Into<String>>(self, scope: S) -> Include {
+		Include {
+			path: Some(self.0),
+			scope: Some(scope.into()),
+			config: Default::default(),
+			fn_name: Default::default(),
+			mode: Default::default(),
+		}
+	}
+}
+
+// Things that can be included:
+// - str / string, names a module
+// - function symbol, names a symbol in the current module
+// - function spec, e.g. rule_fn(foo).config(bar)
+impl Into<Include> for &str {
+	fn into(self) -> Include {
+		self.to_owned().into()
+	}
+}
+
+impl Into<Include> for String {
+	fn into(self) -> Include {
+		Include {
+			path: Some(self),
+			scope: Default::default(),
+			config: Default::default(),
+			fn_name: Default::default(),
+			mode: Default::default(),
+		}
+	}
+}
+
+impl Into<Include> for Module {
+	fn into(self) -> Include {
+		self.0.into()
+	}
+}
+
+// a raw symbol, like rule_fn(foo_rules)
+impl Into<Include> for TypedFnSymbol<BaseCtx, Result<Vec<Rule>>> {
+	fn into(self) -> Include {
+		Include {
+			path: Default::default(),
+			scope: Default::default(),
+			config: Default::default(),
+			fn_name: Some(self.symbol),
+			mode: Default::default(),
+		}
+	}
+}
+
+impl Into<Include> for FunctionSpec {
+	fn into(self) -> Include {
+		let FunctionSpec {
+			fn_name,
+			path,
+			config,
+		} = self;
+		Include {
+			path,
+			scope: Default::default(),
+			config,
+			fn_name: Some(fn_name),
+			mode: Some(IncludeMode::WASM),
+		}
+	}
+}
 
 pub mod dsl {
 	use crate::build::{Command, GenCommand, FilesetDependency};
@@ -182,17 +306,17 @@ pub mod dsl {
 
 	// Rule builder functions. Strictly these are just part of the API,
 	// but they live here for locality with the instance methods
-	pub fn target<S: Into<String>>(s: S, entrypoint: FunctionSpec) -> Rule {
+	pub fn target<S: Into<String>, F: Into<FunctionSpec>>(s: S, entrypoint: F) -> Rule {
 		Rule::Target(Target {
 			names: vec!(s.into()),
-			build: entrypoint,
+			build: entrypoint.into(),
 		})
 	}
 
-	pub fn targets<S: Into<String>>(s: Vec<S>, entrypoint: FunctionSpec) -> Rule {
+	pub fn targets<S: Into<String>, F: Into<FunctionSpec>>(s: Vec<S>, entrypoint: FunctionSpec) -> Rule {
 		Rule::Target(Target {
 			names: s.into_iter().map(|s| s.into()).collect(),
-			build: entrypoint,
+			build: entrypoint.into(),
 		})
 	}
 
@@ -200,50 +324,14 @@ pub mod dsl {
 		r.into()
 	}
 
-	pub fn include<S: Into<String>>(path: S) -> Include {
-		Include {
-			path: Some(path.into()),
-			fn_name: None,
-			scope: None,
-			config: Default::default(),
-			mode: Default::default(),
-		}
+	pub fn include<S: Into<Include>>(incl: S) -> Rule {
+		Rule::Include(incl.into())
 	}
 
-	pub fn this_module() -> Include {
-		Include {
-			path: None,
-			fn_name: None,
-			scope: None,
-			config: Default::default(),
-			mode: Some(IncludeMode::WASM)
-		}
+	pub fn module<S: Into<String>>(path: S) -> Module {
+		Module(path.into())
 	}
 
-	pub fn function<S: Into<String>>(fn_name: S) -> FunctionSpec {
-		FunctionSpec {
-			fn_name: Some(fn_name.into()),
-			path: None,
-			config: Default::default()
-		}
-	}
-
-	pub fn default_function() -> FunctionSpec {
-		FunctionSpec {
-			path: None,
-			fn_name: None,
-			config: Default::default()
-		}
-	}
-
-	pub fn build_via<S: Into<String>, S2: Into<String>>(path: S, fn_name: S2) -> FunctionSpec {
-		FunctionSpec {
-			fn_name: Some(fn_name.into()),
-			path: Some(path.into()),
-			config: Default::default()
-		}
-	}
-	
 	pub fn cmd<S: Into<String>>(exe: S) -> Command {
 		Command::from(GenCommand::<String> {
 			exe: exe.into(),

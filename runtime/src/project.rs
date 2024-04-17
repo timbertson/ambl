@@ -425,7 +425,7 @@ impl<M: BuildModule> Project<M> {
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
 			self_ref: None,
-			root_rule: Arc::new(ProjectRule::from_rule(NonConfigRule::Include(dsl::include("ambl.yaml")), Scope::static_root())?),
+			root_rule: Arc::new(ProjectRule::from_rule(NonConfigRule::Include(dsl::module("ambl.yaml").into()), Scope::static_root())?),
 			writer,
 		});
 
@@ -541,7 +541,7 @@ impl<M: BuildModule> Project<M> {
 							implicits,
 							build: ResolvedFnSpec {
 								scope: scope.copy(),
-								fn_name: target.build.fn_name.to_owned().unwrap_or_else(|| "build".to_owned()),
+								fn_name: target.build.fn_name.to_owned(),
 								full_module,
 								config: target.build.config.clone(),
 						},
@@ -791,7 +791,7 @@ impl<M: BuildModule> Project<M> {
 							project.unlocked_block(|project_handle| {
 								let ctx = Ctx::Target(TargetCtx::new(
 									found_target.rel_name.as_str().to_owned(),
-									path_util::string_of_pathbuf(tmp_path.to_owned()),
+									tmp_path.to_owned(),
 									found_target.build.config.0.to_owned(),
 									build_token.raw()));
 

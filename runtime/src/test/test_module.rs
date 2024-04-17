@@ -15,6 +15,7 @@ use wasmtime::Engine;
 
 use crate::build::{BuildReason, TargetContext, Forced};
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
+use crate::ctx::Ctx;
 use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, Implicits};
 use crate::persist::{PersistFile, BuildResult, BuildResultWithDeps, FileStat, Mtime, PersistChecksum};
 use crate::module::BuildModule;
@@ -22,6 +23,7 @@ use crate::sync::{Mutexed, MutexHandle};
 use crate::err::result_block;
 use crate::path_util::{Scoped, Scope, CPath, Unscoped};
 use crate::invoke;
+use crate::ui::{Ui, Writer};
 
 type BuilderFn = fn(&TestProject, &TargetCtx) -> Result<()>;
 type CtxFn = fn(&TestProject, &BaseCtx) -> Result<()>;
@@ -134,7 +136,7 @@ impl<'a> TestModule<'a> {
 	}
 	
 	pub fn default_build_fn(&self) -> FunctionSpec {
-		dsl::function(DEFAULT_BUILD_FN).path(&self.name)
+		dsl::module(&self.name).function(DEFAULT_BUILD_FN)
 	}
 
 	pub fn rule_fn(mut self, f: fn(&TestModule<'a>, &BaseCtx) -> Result<Vec<Rule>>) -> Self {
@@ -154,14 +156,14 @@ impl<'a> BuildModule for TestModule<'a> {
 		Ok(module.to_owned())
 	}
 
-	fn build<Ctx: AsRef<BaseCtx> + Serialize>(&mut self, implicits: &Implicits, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<Vec<u8>> {
+	fn build(&mut self, implicits: &Implicits, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<String> {
 		if f.fn_name == "get_rules" {
-			let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
+			let mut ctx: BaseCtx = serde_json::from_str(&arg.json_string()?)?;
 			TestInvoker::wrap(self.project, implicits, &self.module_path, &f.scope, &mut ctx, |ctx| {
 				self.rules(ctx)
 			})
 		} else {
-			let serialized = serde_json::to_string(arg)?;
+			let serialized = arg.json_string()?;
 			let fn_name = &f.fn_name;
 			if let Some(f_impl) = self.builders.get(fn_name) {
 				// go to and from JSON so I can have an owned version (and avoid unsafe casts)
@@ -176,7 +178,7 @@ impl<'a> BuildModule for TestModule<'a> {
 					f_impl(self.project, &*ctx)
 				})
 			} else if let Some(f_impl) = self.anon_fns.get(fn_name) {
-				let mut ctx: BaseCtx = serde_json::from_slice(&serde_json::to_vec(arg)?)?;
+				let mut ctx: BaseCtx = serde_json::from_str(&arg.json_string()?)?;
 				TestInvoker::wrap(self.project, implicits, &self.module_path, &f.scope, &mut ctx, |ctx| {
 					f_impl(self.project, &*ctx)
 				})
@@ -214,7 +216,7 @@ impl TestInvoker {
 		scope: &'c Scope,
 		ctx: &mut C,
 		f: F
-	) -> Result<Vec<u8>> {
+	) -> Result<String> {
 		let ctx_mut = ctx.as_mut();
 		let token = ActiveBuildToken::from_raw(ctx_mut.token);
 		ctx_mut._override_invoker(Box::new(TestInvoker { token }));
@@ -248,7 +250,7 @@ impl TestInvoker {
 		}
 		let serialized = ResultFFI::serialize(result);
 		debug!("invoker::return( {} )", &serialized);
-		Ok(serialized.into_bytes())
+		Ok(serialized)
 	}
 }
 impl Invoker for TestInvoker {
@@ -300,9 +302,10 @@ impl<'a> TestProject<'a> {
 
 	fn new() -> Result<Self> {
 		let root = TempDir::new("ambltest")?;
+		let ui = Ui::new();
 		// silly mac has a /tmp symlink
 		let root_abs = fs::canonicalize(root.path())?;
-		let project = Project::new(CPath::new(root_abs.to_str().unwrap().to_owned()).into_absolute()?)?;
+		let project = Project::new(CPath::new(root_abs.to_str().unwrap().to_owned()).into_absolute()?, ui.writer())?;
 		let token = ActiveBuildToken::generate();
 
 		let handle = project.handle();
@@ -352,7 +355,7 @@ impl<'a> TestProject<'a> {
 		let target_name = target_name.to_string();
 		let m = self.new_module().builder(f);
 		self
-			.inject_rule(dsl::target(&target_name, dsl::build_via(&m.name, DEFAULT_BUILD_FN)))
+			.inject_rule(dsl::target(&target_name, dsl::module(&m.name).function(DEFAULT_BUILD_FN)))
 			.inject_module(m)
 	}
 	
@@ -368,11 +371,12 @@ impl<'a> TestProject<'a> {
 
 	// injects a module and includes it in the root ruleset
 	pub fn inject_rules_module(&self, m: TestModule<'a>) -> &Self {
-		let mut mod_rule = dsl::include(&m.name);
-		if let Some(ref scope) = m.scope {
-			mod_rule = mod_rule.scope(scope);
-		}
-		self.inject_rule(mod_rule);
+		let mod_dsl = dsl::module(&m.name);
+		let rule = match m.scope {
+			None => dsl::include(mod_dsl),
+			Some(ref scope) => dsl::include(mod_dsl.scope(scope)),
+		};
+		self.inject_rule(rule);
 		self.inject_module(m)
 	}
 
