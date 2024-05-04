@@ -465,6 +465,24 @@ impl<'a> TestProject<'a> {
 		fs::write(path, contents).with_context(|| format!("Writing file {:?}", path))?;
 		Ok(self)
 	}
+	
+	pub fn lexists<F: AsRef<Path>>(&self, path: F) -> Result<bool> {
+		Ok(crate::path_util::lexists(path.as_ref()).with_context(|| format!("Checking file presence {:?}", path.as_ref()))?)
+	}
+
+	pub fn read_file<F: AsRef<Path>>(&self, path: F) -> Result<String> {
+		Ok(fs::read_to_string(path.as_ref()).with_context(|| format!("Reading file {:?}", path.as_ref()))?)
+	}
+
+	pub fn mkdirp<F: AsRef<Path>>(&self, path: F) -> Result<&Self> {
+		debug!("Testcase: mkdirp {} within {}",
+			path.as_ref().display(),
+			env::current_dir()?.display()
+		);
+		let pb = path.as_ref().to_owned();
+		fs::create_dir_all(pb)?;
+		Ok(self)
+	}
 
 	pub fn write_symlink<P1: AsRef<Path>, P2: AsRef<Path>>(&self, path: P1, dest: P2) -> Result<&Self> {
 		debug!("Testcase is writing symlink {} -> {}",

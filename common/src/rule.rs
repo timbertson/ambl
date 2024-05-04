@@ -339,7 +339,7 @@ pub mod dsl {
 			cwd: Default::default(),
 			env: Default::default(),
 			env_inherit: Default::default(),
-			impure_share_dirs: Default::default(),
+			impure_share_paths: Default::default(),
 			output: Default::default(),
 			input: Default::default(),
 		})

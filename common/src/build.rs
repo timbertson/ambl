@@ -182,6 +182,31 @@ pub enum FileSelection {
 	ExcludeGlob(String),
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ImpureShare<T> {
+	Dir(T),
+	File(T),
+}
+
+impl<T> ImpureShare<T> {
+	pub fn map<R, F: FnOnce(T) -> R>(self, f: F) -> ImpureShare<R> {
+		use ImpureShare::*;
+		match self {
+			Dir(t) => Dir(f(t)),
+			File(t) => File(f(t)),
+		}
+	}
+}
+
+impl<T> ImpureShare<T> {
+	pub fn value(&self) -> &T {
+		match self {
+			Self::Dir(p) => p,
+			Self::File(p) => p,
+		}
+	}
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct GenCommand<Path> {
 	pub exe: Path,
@@ -189,7 +214,7 @@ pub struct GenCommand<Path> {
 	pub cwd: Option<Path>,
 	pub env: BTreeMap<String, String>,
 	pub env_inherit: BTreeSet<String>,
-	pub impure_share_dirs: Vec<Path>,
+	pub impure_share_paths: Vec<ImpureShare<Path>>,
 	pub output: Stdio,
 	pub input: Stdin,
 	// TODO add hermeticity by default, with an opt-out. Biggest challenge is being able to declare (transitive) available files,
@@ -217,7 +242,7 @@ impl <T: Debug> Debug for GenCommand<T> {
 				.field("cwd", &self.cwd)
 				.field("env", &self.env)
 				.field("env_inherit", &self.env_inherit)
-				.field("impure_share_dirs", &self.impure_share_dirs)
+				.field("impure_share_paths", &self.impure_share_paths)
 				.field("output", &self.output)
 				.field("input", &self.input);
 		}
@@ -227,15 +252,18 @@ impl <T: Debug> Debug for GenCommand<T> {
 
 impl<T> GenCommand<T> {
 	pub fn convert<R, F: Fn(T) -> R>(self, f: F) -> GenCommand<R> {
-		let Self { exe, args, cwd, env, env_inherit, impure_share_dirs, output, input } = self;
-		let impure_share_dirs : Vec<R> = impure_share_dirs.into_iter().map(&f).collect();
+		let Self { exe, args, cwd, env, env_inherit, impure_share_paths, output, input } = self;
+		let impure_share_paths : Vec<ImpureShare<R>> = impure_share_paths
+			.into_iter()
+			.map(|impure_share| impure_share.map(&f))
+			.collect();
 		GenCommand {
 			exe: f(exe),
 			args,
 			cwd: cwd.map(f),
 			env,
 			env_inherit,
-			impure_share_dirs,
+			impure_share_paths,
 			output,
 			input,
 		}
@@ -304,12 +332,22 @@ impl Command {
 	}
 	
 	pub fn impure_share_dir<S: Into<String>>(mut self, v: S) -> Self {
-		self.impure_share_dirs.push(v.into());
+		self.impure_share_paths.push(ImpureShare::Dir(v.into()));
 		self
 	}
 	
 	pub fn impure_share_dirs<S: Into<String>, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
-		self.impure_share_dirs.extend(v.into_iter().map(|s| s.into()));
+		self.impure_share_paths.extend(v.into_iter().map(|s| ImpureShare::Dir(s.into())));
+		self
+	}
+
+	pub fn impure_share_file<S: Into<String>>(mut self, v: S) -> Self {
+		self.impure_share_paths.push(ImpureShare::File(v.into()));
+		self
+	}
+
+	pub fn impure_share_files<S: Into<String>, V: IntoIterator<Item=S>>(mut self, v: V) -> Self {
+		self.impure_share_paths.extend(v.into_iter().map(|s| ImpureShare::File(s.into())));
 		self
 	}
 	

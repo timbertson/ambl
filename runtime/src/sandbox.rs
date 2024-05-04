@@ -9,7 +9,7 @@ use std::thread::{JoinHandle, Thread, self};
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig};
+use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare};
 
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
@@ -37,15 +37,59 @@ impl Sandbox {
 			Self::_link(roots, link, target)
 		}).with_context(|| format!("Installing symlink {:?} (in root {:?})", rel, roots.tmp))
 	}
+	
+	fn auto_promote(roots: &Roots, paths: Vec<&Unscoped>) -> Result<()> {
+		for unscoped_path in paths {
+			let rel_path = &unscoped_path.0;
+			result_block(|| {
+				let tmp_path = roots.tmp.join(rel_path);
+				if lexists(tmp_path.as_path())? {
+					let dest_path = roots.project.join(rel_path);
+					debug!("promoting newly-created path: {}", rel_path);
+					fs::rename(tmp_path.as_path(), dest_path.as_path())?;
+				} else {
+					debug!("path not created; not promoting: {}", rel_path);
+				}
+				Ok(())
+			}).with_context(|| format!("auto-promoting path {}", rel_path))?;
+		}
+		Ok(())
+	}
 
-	fn share_dir(roots: &Roots, source: &Unscoped) -> Result<()> {
+	fn share_path<'a, 'b>(
+		roots: & Roots,
+		auto_promote: &mut Vec<&'b Unscoped>,
+		source: &'a ImpureShare<Unscoped>
+	) -> Result<()>
+		// source path reference must live at least as long as the
+		// references we store in auto_promote
+		where 'a : 'b
+	{
 		result_block(|| {
-			let target: Absolute = roots.project.join(&source.0);
-			if !lexists(target.as_path())? {
-				fs::create_dir_all(target.as_path())?;
+			let cpath = &source.value().0;
+			let target: Absolute = roots.project.join(cpath);
+			let should_link = if !lexists(target.as_path())? {
+				match source {
+					ImpureShare::Dir(_) => {
+						fs::create_dir_all(target.as_path())?;
+						true
+					},
+					ImpureShare::File(t) => {
+						// don't auto-create the file. Instead, add this file as an output and
+						// promote it at the end of the command if it's been created
+						auto_promote.push(t);
+						false
+					},
+				}
+			} else {
+				true
+			};
+			if should_link {
+				let link = roots.tmp.join(cpath);
+				Self::_link(roots, link, target)
+			} else {
+				Ok(())
 			}
-			let link = roots.tmp.join(&source.0);
-			Self::_link(roots, link, target)
 		}).with_context(|| format!("Linking shared dir {:?} (in root {:?})", source, roots.tmp))
 	}
 	
@@ -115,10 +159,10 @@ impl Sandbox {
 		Ok(())
 	}
 
-	pub fn run<'a, M: BuildModule>(
+	pub fn run<'a, 'b, M: BuildModule>(
 		mut project: Mutexed<'a, Project<M>>,
 		implicits: &Implicits,
-		command: &GenCommand<Unscoped>,
+		command: &'b GenCommand<Unscoped>,
 		reason: &BuildReason,
 	) -> Result<(Mutexed<'a, Project<M>>, TempDir, InvokeResponse)> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
@@ -128,11 +172,11 @@ impl Sandbox {
 				.context("initializing command sandbox")?;
 		}
 		
-		let GenCommand { exe, args, cwd, env, env_inherit, output, input, impure_share_dirs } = command;
+		let GenCommand { exe, args, cwd, env, env_inherit, output, input, impure_share_paths } = command;
 		let mut cmd = Command::new(&exe.0.as_path());
 
 		cmd.env_clear();
-
+		
 		let mut env_inherit: HashSet<String> = HashSet::from_iter(env_inherit.into_iter().map(ToOwned::to_owned));
 
 		// inherit from project sandbox configuration
@@ -224,40 +268,42 @@ impl Sandbox {
 				},
 				build::Stderr::Ignore => Stdio::null(),
 			});
-			
-			// TODO: actual sandboxing.
-			// Use something like user namespacing to shadow
-			// all directories the command shouldn't have access to
-
-			debug!("Installing {} symlinks", rel_paths.len());
-			for (k, v) in rel_paths {
-				Self::install_symlink(&roots, &k, v.as_ref())?;
-			}
-
-			debug!("Installing {} symlinks to impure_shared_dirs", impure_share_dirs.len());
-			for dir in impure_share_dirs {
-				Self::share_dir(&roots, dir)?;
-			}
-
-			// build up actual CWD from temp + scope + explicit CWD
-			let mut full_cwd: PathBuf = roots.tmp.to_owned().into();
-			if let Some(cwd) = cwd {
-				// TODO warn if CWD is absolute?
-				full_cwd.push(&cwd.0);
-			}
-			cmd.current_dir(&full_cwd);
-
-			if log_enabled!(log::Level::Debug) {
-				debug!("+ {:?}", &cmd);
-			} else {
-				info!("+ {:?}", &exe);
-			}
 
 			let response = result_block(|| {
+			
+				// TODO: actual sandboxing.
+				// Use something like user namespacing to shadow
+				// all directories the command shouldn't have access to
+
+				debug!("Installing {} symlinks", rel_paths.len());
+				for (k, v) in rel_paths {
+					Self::install_symlink(&roots, &k, v.as_ref())?;
+				}
+
+				debug!("Installing {} symlinks to impure_shared_paths", impure_share_paths.len());
+				let mut auto_promote_paths: Vec<&Unscoped> = Vec::new();
+				for path in impure_share_paths {
+					Self::share_path(&roots, &mut auto_promote_paths, path)?;
+				}
+
+				// build up actual CWD from temp + scope + explicit CWD
+				let mut full_cwd: PathBuf = roots.tmp.to_owned().into();
+				if let Some(cwd) = cwd {
+					// TODO warn if CWD is absolute?
+					full_cwd.push(&cwd.0);
+				}
+				cmd.current_dir(&full_cwd);
+
+				if log_enabled!(log::Level::Debug) {
+					debug!("+ {:?}", &cmd);
+				} else {
+					info!("+ {:?}", &exe);
+				}
+
 				std::fs::create_dir_all(&full_cwd)?;
 				let mut proc = cmd.spawn()?;
 				
-				let otuput_proxy_handle = output_proxy.spawn(writer, &mut proc)?;
+				let output_proxy_handle = output_proxy.spawn(writer, &mut proc)?;
 				let response = match output.stdout {
 					build::Stdout::Return => {
 						let mut s: Vec<u8> = Vec::new();
@@ -266,11 +312,12 @@ impl Sandbox {
 					},
 					_ => InvokeResponse::Unit,
 				};
-				drop(otuput_proxy_handle);
+				drop(output_proxy_handle);
 				let result = proc.wait()?;
 				debug!("- {:?}: {:?}", &cmd, &result);
 				std::thread::sleep(std::time::Duration::from_millis(500));
 				if result.success() {
+					Self::auto_promote(&roots, auto_promote_paths)?;
 					Ok(response)
 				} else {
 					Err(anyhow!("Command `{}` failed (exit status: {:?})", exe, &result.code()))

@@ -90,3 +90,51 @@ fn run_is_influenced_by_implicit_sandbox_config() -> Result<()> {
 		Ok(())
 	})
 }
+
+
+#[test]
+#[serial]
+fn test_impure_shares() -> Result<()> {
+	TestProject::in_tempdir(|p| {
+		let builder = |p: &TestProject, c: &TargetCtx| {
+			let file_output = c.run_output(cmd("bash").arg("-euxc")
+				.arg("cat shared_existing_file")
+				.impure_share_file("shared_existing_file")
+			)?;
+
+			let dir_output = c.run_output(cmd("bash").arg("-euxc")
+				.arg("cat shared_existing_dir/file")
+				.impure_share_dir("shared_existing_dir")
+			)?;
+
+			c.run(cmd("bash").arg("-euxc")
+				.arg("echo created > shared_create_file")
+				.impure_share_file("shared_create_file")
+				.impure_share_file("shared_nocreate_file")
+			)?;
+
+			c.run(cmd("bash").arg("-euxc")
+				.arg("echo updated > shared_existing_file")
+				.impure_share_file("shared_existing_file"))?;
+
+			c.run(cmd("bash").arg("-euxc")
+				.arg("echo created > shared_existing_dir/new_file")
+				.impure_share_dir("shared_existing_dir"))?;
+
+			c.write_dest(format!("file: {}, dir: {}", file_output, dir_output))
+		};
+
+		p.write_file("shared_existing_dir/file", "dir_content")?;
+		p.write_file("shared_existing_file", "shared_existing")?;
+		p.target_builder("target", builder);
+		let built_contents = p.build_file_contents("target")?;
+		
+		assert_eq!(p.read_file("shared_existing_dir/new_file")?, "created");
+		assert_eq!(p.read_file("shared_existing_file")?, "updated");
+		assert_eq!(p.read_file("shared_create_file")?, "created");
+		assert_eq!(p.lexists("shared_nocreate_file")?, false);
+		assert_eq!(built_contents, "file: shared_existing, dir: dir_content");
+		
+		Ok(())
+	})
+}

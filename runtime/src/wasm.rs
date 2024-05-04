@@ -18,7 +18,7 @@ use crate::ctx::*;
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
 use crate::path_util::{Scope, self};
 use crate::project::{Implicits, FoundTarget};
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, ProjectHandle, ActiveBuildToken}, persist::{PersistFile}, module::{BuildModule}, path_util::{Scoped, CPath, Unscoped}, err::result_block, invoke};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::BuildModule, path_util::{Scoped, CPath, Unscoped}, err::result_block, invoke};
 
 bindgen!("builder");
 
