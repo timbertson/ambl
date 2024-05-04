@@ -8,20 +8,6 @@ use crate::ffi::*;
 use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, Invoke, InvokeAction, FilesetDependency, WriteDest, CopyFile, ReadFile, FileSource, Stdout};
 use crate::rule::EnvLookup;
 
-// #[cfg(target_arch = "wasm32")]
-// extern {
-// 	pub fn ambl_invoke(data: *const u8, len: u32, out: &mut *mut u8, out_len: &mut u32);
-// 	pub fn ambl_log(level: u32, data: *const u8, len: u32);
-// }
-
-// // stubs so that code compiles outside wasm
-// #[cfg(not(target_arch = "wasm32"))]
-// pub unsafe fn ambl_invoke(_: *const u8, _: u32, _: &mut *mut u8, _: &mut u32) { panic!("stub") }
-
-// #[cfg(not(target_arch = "wasm32"))]
-// pub unsafe fn ambl_log(_: u32, _: *const u8, _: u32) {}
-
-
 fn ignore_result<T>(r: Result<T>) -> Result<()> {
 	r.map(|_| ())
 }
@@ -33,6 +19,16 @@ pub struct BaseCtx {
 
 	#[serde(skip)] // used in tests, doesn't require serialization boundary
 	invoker: Option<Box<dyn Invoker>>,
+}
+
+impl Clone for BaseCtx {
+	fn clone(&self) -> Self {
+		Self {
+			token: self.token.clone(),
+			config: self.config.clone(),
+			invoker: None,
+		}
+	}
 }
 
 impl BaseCtx {
@@ -172,7 +168,7 @@ mod pathbuf_serde {
 	}
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TargetCtx {
 	target: String, // logical target name, relative to module root
 

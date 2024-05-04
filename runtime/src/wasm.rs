@@ -109,11 +109,13 @@ impl BuildModule for WasmModule {
 		_unlocked_evidence: &ProjectHandle<Self>
 	) -> Result<String> {
 		debug!("call({:?})", f);
+		let json_string = arg.json_string()?;
 		let state = self.store.data_mut();
 
 		// We wrap every call by inserting the scope + options into the store. This
 		// lets us access these implicit params within `invoke`
 		let token = ActiveBuildToken::from_raw(arg.token());
+
 		let inserted = match state.target_contexts.entry(token) {
 			Entry::Occupied(_) => false,
 			Entry::Vacant(entry) => {
@@ -127,7 +129,10 @@ impl BuildModule for WasmModule {
 		
 		let ffi_name = format!("amblffi_{}", &f.fn_name);
 
-		let result = self.bindings.call_invoke(&mut self.store, arg.ffi_tag(), &f.fn_name, &arg.json_string()?);
+		let result = match arg {
+			Ctx::Base(_) => self.bindings.call_rules(&mut self.store, &f.fn_name, &json_string),
+			Ctx::Target(_) => self.bindings.call_build(&mut self.store, &f.fn_name, &json_string),
+		};
 
 		if inserted {
 			let mut store_ctx = self.store.as_context_mut();

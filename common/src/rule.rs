@@ -3,7 +3,7 @@ use serde::{Serialize, Deserialize};
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use crate::ctx::{BaseCtx};
+use crate::ctx::BaseCtx;
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IncludeMode { YAML, WASM }
@@ -32,10 +32,10 @@ impl Default for Config {
 
 // used for delegating target definitions to another module
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Include {
 	#[serde(default)]
-	path: Option<String>,
+	module: Option<String>,
 
 	#[serde(default)]
 	scope: Option<String>,
@@ -70,8 +70,8 @@ impl Include {
 		&self.scope
 	}
 
-	pub fn get_path(& self) -> &Option<String> {
-		&self.path
+	pub fn get_module(& self) -> &Option<String> {
+		&self.module
 	}
 
 	pub fn get_fn_name(& self) -> &Option<String> {
@@ -83,9 +83,9 @@ impl Include {
 	}
 
 	pub fn get_mode(& self) -> IncludeMode {
-		// assume WASM unless it's overridden or path ends in .ya?ml
+		// assume WASM unless it's overridden or module ends in .ya?ml
 		self.mode.unwrap_or_else(|| {
-			let is_yaml = match self.path {
+			let is_yaml = match self.module {
 				Some(ref p) => p.ends_with(".yml") || p.ends_with(".yaml"),
 				None => false
 			};
@@ -108,7 +108,7 @@ pub struct FunctionSpec {
 	pub fn_name: String,
 
 	#[serde(default)]
-	pub path: Option<String>,
+	pub module: Option<String>,
 
 	#[serde(default)]
 	pub config: Config,
@@ -123,13 +123,13 @@ impl FunctionSpec {
 	pub fn scope<S: Into<String>>(self, s: S) -> Include {
 		let Self {
 			fn_name,
-			path,
+			module,
 			config,
 		} = self;
 		Include {
 			fn_name: Some(fn_name),
 			scope: Some(s.into()),
-			path,
+			module,
 			config,
 			mode: Some(IncludeMode::WASM),
 		}
@@ -137,14 +137,14 @@ impl FunctionSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct EnvLookup {
 	pub key: String,
 	pub find: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Rule {
 	Target(Target),
 	Include(Include),
@@ -152,6 +152,7 @@ pub enum Rule {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct Target {
 	// TODO deserializer which accepts `name` shorthand
 	pub names: Vec<String>,
@@ -168,7 +169,7 @@ impl Into<Rule> for Target {
 
 // TODO not sure if these should really be rules, but it's expedient for now
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Sandbox {
 	Nix,
 	AllowEnv(Vec<String>),
@@ -211,7 +212,7 @@ impl<I,O> Into<FunctionSpec> for TypedFnSymbol<I,O> {
 	fn into(self) -> FunctionSpec {
 		FunctionSpec {
 			fn_name: self.symbol,
-			path: None,
+			module: None,
 			config: Default::default(),
 		}
 	}
@@ -226,14 +227,14 @@ impl Module {
 	pub fn function<S: Into<String>>(self, name: S) -> FunctionSpec {
 		FunctionSpec {
 			fn_name: name.into(),
-			path: Some(self.0),
+			module: Some(self.0),
 			config: Default::default(),
 		}
 	}
 	
 	pub fn scope<S: Into<String>>(self, scope: S) -> Include {
 		Include {
-			path: Some(self.0),
+			module: Some(self.0),
 			scope: Some(scope.into()),
 			config: Default::default(),
 			fn_name: Default::default(),
@@ -255,7 +256,7 @@ impl Into<Include> for &str {
 impl Into<Include> for String {
 	fn into(self) -> Include {
 		Include {
-			path: Some(self),
+			module: Some(self),
 			scope: Default::default(),
 			config: Default::default(),
 			fn_name: Default::default(),
@@ -274,7 +275,7 @@ impl Into<Include> for Module {
 impl Into<Include> for TypedFnSymbol<BaseCtx, Result<Vec<Rule>>> {
 	fn into(self) -> Include {
 		Include {
-			path: Default::default(),
+			module: Default::default(),
 			scope: Default::default(),
 			config: Default::default(),
 			fn_name: Some(self.symbol),
@@ -287,11 +288,11 @@ impl Into<Include> for FunctionSpec {
 	fn into(self) -> Include {
 		let FunctionSpec {
 			fn_name,
-			path,
+			module,
 			config,
 		} = self;
 		Include {
-			path,
+			module: module,
 			scope: Default::default(),
 			config,
 			fn_name: Some(fn_name),

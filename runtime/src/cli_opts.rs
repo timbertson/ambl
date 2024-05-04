@@ -3,7 +3,7 @@ use clap::*;
 #[derive(Parser, Debug)]
 #[command(version)]
 pub struct CliOpts {
-	#[arg(long, short, help="Force rebuilding of naed targets (not their dependencies)")]
+	#[arg(long, short, help="Force rebuilding of named targets (not their dependencies)")]
 	pub force: bool,
 
 	#[arg(long, short, help="Set log level to DEBUG")]

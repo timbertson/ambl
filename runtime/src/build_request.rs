@@ -80,12 +80,12 @@ pub struct ResolvedFnSpec<'a> {
 
 impl<'a> ResolvedFnSpec<'a> {
 	pub fn from_explicit_fn_name(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope<'a>) -> Result<Self> {
-		let FunctionSpec { fn_name, path, config } = f;
-		let explicit_cpath = path.map(CPath::new);
+		let FunctionSpec { fn_name, module, config } = f;
+		let explicit_cpath = module.map(CPath::new);
 		let full_module = ResolveModule {
 			source_module,
 			explicit_path: explicit_cpath.as_ref().map(|p| Scoped::new(scope.copy(), p)),
-		}.resolve()?;
+		}.resolve().with_context(|| format!("resolving call to function {}", &fn_name))?;
 		Ok(Self {
 			scope,
 			fn_name,

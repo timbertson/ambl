@@ -23,13 +23,17 @@
     # config:
     #   length: 1
 
-- target:
-    ## TODO: add scope?
-    names: [target/wasm32-unknown-unknown/debug/ambl_sample_builder.wasm]
-    module: target/wasm32-unknown-unknown/debug/ambl_builtin_rust.wasm
-    fn: cargo
-    config:
-      package: ambl-sample-builder
+# - target:
+#     ## TODO: add scope?
+#     names: [target/wasm32-unknown-unknown/debug/ambl_sample_builder.wasm]
+#     module: target/wasm32-unknown-unknown/debug/component/ambl_builtin_cargo.wasm
+#     fn: module_build
+#     config:
+#       name: ambl-sample-builder
+
+# - include:
+#     path: target/wasm32-unknown-unknown/debug/component/ambl_builtin_cargo.wasm
+#     # scope: cargo
 
 # - include:
 #     mode: WASM

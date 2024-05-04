@@ -13,6 +13,7 @@ mkShell {
 	buildInputs = [
 		libiconv
 		wasm-pack
+		wasm-tools
 		(fenix.combine [
 			(fenix.stable.withComponents [ "cargo" "rustc" "rust-src" ])
 			(fenix.targets.wasm32-unknown-unknown.stable.rust-std)

@@ -367,7 +367,7 @@ impl ProjectRule {
 					None => None,
 					Some(rel) => Some(Simple::try_from(rel.to_owned())?),
 				};
-				let path = spec.get_path().to_owned().map(CPath::new);
+				let path = spec.get_module().to_owned().map(CPath::new);
 				let config = match spec.get_mode() {
 					IncludeMode::YAML => {
 						if let Some(config) = spec.get_config().value() {
@@ -529,7 +529,7 @@ impl<M: BuildModule> Project<M> {
 				match V::visit_target(ctx, scope, target) {
 					TargetVisitResult::Return(name) => result_block(|| {
 						let rel_name = CPath::new(name.to_owned()).into_simple()?;
-						let module_cpath = target.build.path.as_ref().map(|m| {
+						let module_cpath = target.build.module.as_ref().map(|m| {
 							CPath::new(m.to_owned())
 						});
 						let full_module = ResolveModule {
