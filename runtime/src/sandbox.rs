@@ -1,4 +1,5 @@
 use log::*;
+use os_pipe::{PipeReader, PipeWriter};
 use tempdir::TempDir;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -225,7 +226,7 @@ impl Sandbox {
 			cmd.env(k, v);
 		}
 		
-		let writer = project.writer().to_owned();
+		let ui_writer = project.writer().to_owned();
 		let (tmp, response) = project.unlocked_block(|project_handle| {
 			let tmp = tempdir::TempDir::new("ambl")?;
 			debug!("created command sandbox {:?}", &tmp);
@@ -236,37 +237,44 @@ impl Sandbox {
 			
 			cmd.args(args);
 			
-			let mut output_proxy = OutputProxy::new();
-
 			cmd.stdin(match input {
 				build::Stdin::Inherit => Stdio::inherit(),
 				build::Stdin::Value(v) => todo!(),
 				build::Stdin::Null => Stdio::null(),
 			});
+			
+			use build::{Stdout, Stderr};
+			
+
+			let mut capture_pipe = None;
+			let mut proxy_pipe = None;
+			
+			let writeable_end = |store: &mut Option<(PipeReader, PipeWriter)>| {
+				if let Some((_, ref write)) = store {
+					write.try_clone()
+				} else {
+					let (read, write) = os_pipe::pipe()?;
+					let result = write.try_clone();
+					*store = Some((read, write));
+					result
+				}
+			};
 
 			cmd.stdout(match output.stdout {
-				build::Stdout::Return => Stdio::piped(),
-				build::Stdout::Inherit => {
-					output_proxy.source.replace(OutputStream::Stdout);
-					Stdio::piped()
-				},
-				build::Stdout::Ignore => Stdio::null(),
+				Stdout::Return => writeable_end(&mut capture_pipe)?.into(),
+				Stdout::Inherit => writeable_end(&mut proxy_pipe)?.into(),
+				Stdout::Ignore => Stdio::null(),
 			});
 			
-			cmd.stderr(match output.stderr {
-				build::Stderr::Merge => {
-					unsafe { Stdio::from_raw_fd(1) }
-				},
-				build::Stderr::Inherit => {
-					if output_proxy.source.is_some() {
-						// inherit and inherit, that means Merge...
-						unsafe { Stdio::from_raw_fd(1) }
-					} else {
-						output_proxy.source.replace(OutputStream::Stderr);
-						Stdio::piped()
-					}
-				},
-				build::Stderr::Ignore => Stdio::null(),
+			cmd.stderr(match (&output.stderr, &output.stdout) {
+				// inherit & inherit means merge
+				(Stderr::Merge, Stdout::Inherit) | (Stderr::Inherit, Stdout::Inherit) =>
+					writeable_end(&mut proxy_pipe)?.into(),
+
+				(Stderr::Merge, Stdout::Return) => writeable_end(&mut capture_pipe)?.into(),
+				(Stderr::Merge, Stdout::Ignore) | (Stderr::Ignore, _) => Stdio::null(),
+
+				(Stderr::Inherit, _) => writeable_end(&mut proxy_pipe)?.into(),
 			});
 
 			let response = result_block(|| {
@@ -302,20 +310,32 @@ impl Sandbox {
 
 				std::fs::create_dir_all(&full_cwd)?;
 				let mut proc = cmd.spawn()?;
+
+				// cmd holds write handles in stdout/err values, drop them
+				drop(cmd);
 				
-				let output_proxy_handle = output_proxy.spawn(writer, &mut proc)?;
-				let response = match output.stdout {
-					build::Stdout::Return => {
+				let mut join_handles = Vec::new();
+				if let Some((reader, writer)) = proxy_pipe.take() {
+					drop(writer);
+					join_handles.push(spawn_output_proxy(ui_writer, reader)?);
+				}
+
+				let response = match capture_pipe.take() {
+					Some((mut reader, writer)) => {
+						drop(writer);
 						let mut s: Vec<u8> = Vec::new();
-						proc.stdout.take().expect("stdout pipe").read_to_end(&mut s)?;
+						reader.read_to_end(&mut s)?;
+						drop(reader);
 						InvokeResponse::Bytes(s)
 					},
-					_ => InvokeResponse::Unit,
+					None => InvokeResponse::Unit,
 				};
-				drop(output_proxy_handle);
+				// wait for all output pipes to drain
+				drop(join_handles);
+
 				let result = proc.wait()?;
-				debug!("- {:?}: {:?}", &cmd, &result);
-				std::thread::sleep(std::time::Duration::from_millis(500));
+				debug!("- {:?}", &result);
+				// std::thread::sleep(std::time::Duration::from_millis(500));
 				if result.success() {
 					Self::auto_promote(&roots, auto_promote_paths)?;
 					Ok(response)
@@ -337,53 +357,23 @@ enum OutputStream {
 	Stderr,
 }
 
-#[derive(Default)]
-struct OutputProxy {
-	source: Option<OutputStream>,
-	thread: Option<JoinHandle<()>>,
-}
-
-impl OutputProxy {
-	fn new() -> Self { Default::default() }
-	
-	fn read_thread<P: Read + Send + 'static>(&self, writer: ui::Writer, p: P) -> io::Result<JoinHandle<()>> {
-		thread::Builder::new()
-			.spawn(move || {
-				let mut reader = BufReader::new(p);
-				let mut buf = String::with_capacity(1024);
-				loop {
-					let len = reader.read_line(&mut buf).unwrap_or_else(|e| {
-						error!("failed reading data from child process: {}", e);
-						0
-					});
-					if len == 0 {
-						break;
-					}
-					writer.emit(ui::Event::Line(&buf)).expect("emitting output");
-					buf.clear();
+fn spawn_output_proxy(ui_writer: ui::Writer, reader: PipeReader) -> Result<JoinHandle<()>> {
+	let result = thread::Builder::new()
+		.spawn(move || {
+			let mut line_reader = BufReader::new(reader);
+			let mut buf = String::with_capacity(1024);
+			loop {
+				let len = line_reader.read_line(&mut buf).unwrap_or_else(|e| {
+					error!("failed reading data from child process: {}", e);
+					0
+				});
+				if len == 0 {
+					break;
 				}
-		})
-	}
-
-	fn spawn(&mut self, writer: ui::Writer, proc: &mut Child) -> Result<()> {
-		match self.source {
-			Some(source) => {
-				let spawned = match source {
-					OutputStream::Stdout => self.read_thread(writer, proc.stdout.take().expect("child output pipe")),
-					OutputStream::Stderr => self.read_thread(writer, proc.stderr.take().expect("child output pipe")),
-				};
-				self.thread = Some(spawned?);
-				Ok(())
-			},
-			None => Ok(()),
-		}
-	}
+				let line_only = buf.trim_end_matches('\n');
+				ui_writer.emit(ui::Event::Line(&line_only)).expect("emitting output");
+				buf.clear();
+			}
+	});
+	Ok(result?)
 }
-impl Drop for OutputProxy {
-	fn drop(&mut self) {
-		if let Some(thread) = self.thread.take() {
-			thread.join().expect("thread join on Drop");
-		}
-	}
-}
-

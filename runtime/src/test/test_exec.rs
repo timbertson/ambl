@@ -1,4 +1,5 @@
 use std::{fs, sync::{Arc, Mutex}};
+use ambl_api::Stderr;
 use ambl_common::build::Stdout;
 use ambl_common::ctx::TargetCtx;
 use ambl_common::rule::dsl;
@@ -97,27 +98,27 @@ fn run_is_influenced_by_implicit_sandbox_config() -> Result<()> {
 fn test_impure_shares() -> Result<()> {
 	TestProject::in_tempdir(|p| {
 		let builder = |p: &TestProject, c: &TargetCtx| {
-			let file_output = c.run_output(cmd("bash").arg("-euxc")
+			let file_output = c.run_output(cmd("bash").arg("-euc")
 				.arg("cat shared_existing_file")
 				.impure_share_file("shared_existing_file")
 			)?;
 
-			let dir_output = c.run_output(cmd("bash").arg("-euxc")
+			let dir_output = c.run_output(cmd("bash").arg("-euc")
 				.arg("cat shared_existing_dir/file")
 				.impure_share_dir("shared_existing_dir")
 			)?;
 
-			c.run(cmd("bash").arg("-euxc")
+			c.run(cmd("bash").arg("-euc")
 				.arg("echo created > shared_create_file")
 				.impure_share_file("shared_create_file")
 				.impure_share_file("shared_nocreate_file")
 			)?;
 
-			c.run(cmd("bash").arg("-euxc")
+			c.run(cmd("bash").arg("-euc")
 				.arg("echo updated > shared_existing_file")
 				.impure_share_file("shared_existing_file"))?;
 
-			c.run(cmd("bash").arg("-euxc")
+			c.run(cmd("bash").arg("-euc")
 				.arg("echo created > shared_existing_dir/new_file")
 				.impure_share_dir("shared_existing_dir"))?;
 
@@ -134,6 +135,33 @@ fn test_impure_shares() -> Result<()> {
 		assert_eq!(p.read_file("shared_create_file")?, "created");
 		assert_eq!(p.lexists("shared_nocreate_file")?, false);
 		assert_eq!(built_contents, "file: shared_existing, dir: dir_content");
+		
+		Ok(())
+	})
+}
+
+
+#[test]
+#[serial]
+fn test_stdio() -> Result<()> {
+	TestProject::in_tempdir(|p| {
+		let builder = |p: &TestProject, c: &TargetCtx| {
+			let merged_output = c.run_output(cmd("bash").arg("-euc")
+				.arg("echo out; echo >&2 err")
+				.stderr(Stderr::Merge)
+			)?;
+			
+			let stdout_only = c.run_output(cmd("bash").arg("-euc")
+				.arg("echo out; echo >&2 err")
+			)?;
+
+			c.write_dest(format!("merged: {}, stdout: {}", merged_output, stdout_only))
+		};
+
+		p.target_builder("target", builder);
+		let built_contents = p.build_file_contents("target")?;
+		
+		assert_eq!(built_contents, "merged: out\nerr, stdout: out");
 		
 		Ok(())
 	})

@@ -355,6 +355,11 @@ impl Command {
 		self.output.stdout = v;
 		self
 	}
+
+	pub fn stderr(mut self, v: Stderr) -> Self {
+		self.output.stderr = v;
+		self
+	}
 }
 
 impl From<GenCommand<String>> for Command {

@@ -302,7 +302,7 @@ impl<'a> TestProject<'a> {
 
 	fn new() -> Result<Self> {
 		let root = TempDir::new("ambltest")?;
-		let ui = Ui::new();
+		let ui = Ui::test();
 		// silly mac has a /tmp symlink
 		let root_abs = fs::canonicalize(root.path())?;
 		let project = Project::new(CPath::new(root_abs.to_str().unwrap().to_owned()).into_absolute()?, ui.writer())?;
@@ -471,7 +471,8 @@ impl<'a> TestProject<'a> {
 	}
 
 	pub fn read_file<F: AsRef<Path>>(&self, path: F) -> Result<String> {
-		Ok(fs::read_to_string(path.as_ref()).with_context(|| format!("Reading file {:?}", path.as_ref()))?)
+		let string = fs::read_to_string(path.as_ref()).with_context(|| format!("Reading file {:?}", path.as_ref()))?;
+		Ok(string.trim_end_matches('\n').to_owned())
 	}
 
 	pub fn mkdirp<F: AsRef<Path>>(&self, path: F) -> Result<&Self> {

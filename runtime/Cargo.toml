@@ -19,6 +19,7 @@ lazy_static = "1"
 crc32fast = "1"
 clap = { version = "4.1", features = ["derive"] }
 superconsole = "0.2"
+os_pipe = "1"
 
 [dev-dependencies]
 ctor = "0.1"

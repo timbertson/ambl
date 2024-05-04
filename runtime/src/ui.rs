@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::io;
 use anyhow::*;
+use log::*;
 use superconsole::components::{Split, Blank};
 use superconsole::components::bordering::{Bordered, BorderedSpec};
 use superconsole::components::splitting::SplitKind;
