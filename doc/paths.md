@@ -2,13 +2,11 @@
 
 Ambl maintains a `.ambl` directory in each project root.
 
-A target named `foo/bar` will have its output stored in `.ambl/target/foo/bar`. If the target is promoted, there will be a symlink installed in `foo/bar` for casual access by the workspace.
+A target named `foo/bar` will have its output stored in `.ambl/target/foo/bar`. If the target is promoted, there will be a symlink installed in `foo/bar` for casual access via the workspace.
 
-The namespace of workspace files and target files is unified. That is, `foo/bar` will refer to `.ambl/target/foo/bar` if that is a buildable target, and `foo/bar` otherwise. Ambl will log a warning if there exists a `foo/bar` file which is not a symlink to the target.
+The namespace of workspace files and target files is unified. That is, operations on the path `foo/bar` will refer to `.ambl/target/foo/bar` if that is a buildable target, and `foo/bar` otherwise. Ambl will log a warning if there exists a `foo/bar` file which is not a symlink to the target.
 
-When you run a hermetic command, it will run in a sandbox with all _declared_ sources and targets merged. That is, `foo/bar` will exist when you run the command (but only if you have already depended on `foo/bar` in the same rule).
-
-When running a non-hermetic command, there is no sandbox so you will need to be aware of the distinction between source paths and destination paths. The most robust way to do this is to use the return value of a `FileDependency`, which contains the on-disk path (relative to the project root).
+When you run a command, it will run in a temporary directory with all _declared_ sources and targets merged. That is, `foo/bar` will be accessible fom the command's working directory when it executed (but only if the rule depends on `foo/bar`).
 
 # Path roots
 
@@ -46,7 +44,7 @@ That is, a rule in the project can use `cli/foo` to reference the `foo` source/t
 
 Symlinks can complicate path operations. If `./bin` is a symlink to `./target/debug/bin`, then what does `bin/../` refer to?
 
-Theoretically it ought to be `./`, but from a physical path perspective (if you `cd bin/ && cd ../`), it refers to `./target/debug`.
+Naively it ought to be `./`, but from a physical path perspective (if you `cd bin/ && cd ../`), it refers to `./target/debug`.
 
 This is an annoying problem, so ambl (for now) takes the simple approach: all paths are normalized _without_ regard to symlinks. `x/y/..` normalizes to `x`, regardless of whether `y` is a symlink (or even exists).
 
