@@ -7,9 +7,12 @@ PROFILE_FLAGS=""
 if [ "$PROFILE" = release ]; then
 	PROFILE_FLAGS="--release"
 fi
-cargo build $PROFILE_FLAGS --color always --target=wasm32-unknown-unknown --package ambl-builtin-cargo
 cargo build $PROFILE_FLAGS --color always --package ambl-runtime
 mkdir -p "target/wasm32-unknown-unknown/$PROFILE/component"
-wasm-tools component \
-	new "target/wasm32-unknown-unknown/$PROFILE/ambl_builtin_cargo.wasm" \
-	-o  "target/wasm32-unknown-unknown/$PROFILE/component/ambl_builtin_cargo.wasm"
+
+for builtin in cargo ninja; do
+	cargo build $PROFILE_FLAGS --color always --target=wasm32-unknown-unknown --package ambl-builtin-$builtin
+	wasm-tools component \
+		new "target/wasm32-unknown-unknown/$PROFILE/ambl_builtin_$builtin.wasm" \
+		-o "target/wasm32-unknown-unknown/$PROFILE/component/ambl_builtin_$builtin.wasm"
+done

@@ -1,5 +1,5 @@
 [workspace]
-members = [ "common", "api", "macros", "runtime", "builtin/cargo" ]
+members = [ "common", "api", "macros", "runtime", "builtin/cargo", "builtin/ninja" ]
 exclude = [ "example" ]
 
 [profile.release]
