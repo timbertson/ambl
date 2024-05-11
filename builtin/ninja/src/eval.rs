@@ -1,44 +1,14 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::fmt::Debug;
-use ninja::ValuePiece;
 use ninja_build_syntax::{self as ninja};
 
 use anyhow::{anyhow, *};
 
 use crate::target::{OwnedValue, UnownedValue};
 
-// #[derive(Clone, Copy)]
-// pub struct Child<'a, T: Clone> {
-// 	value: &'a T,
-// 	parent: Inherited<'a, T>,
-// }
-
-// // #[derive(Clone, Copy)]
-// #[derive(Clone)]
-// pub enum Inherited<'a, T: Clone> {
-// 	Leaf(&'a T),
-// 	Child(&'a T, &'a Inherited<'a, T>),
-// }
-
-// impl<'a, T: Clone> Inherited<'a, T> {
-// 	pub fn child(&'a self, t: &'a T) -> Inherited<'a, T> {
-// 		Inherited::Child(t, self)
-// 	}
-// }
-
-// pub fn leaf<'a, T : Clone>(t: &'a T) -> Inherited<'a, T> {
-// 	Inherited::Leaf(t)
-// }
-
-// impl<'a, T: Clone> Inherited<'a, T> {
-// 	fn iter(&'a self) -> InheritIter<'a, T> {
-// 		InheritIter(Some(*self))
-// 	}
-// }
-
 pub enum LookupResult<'a> {
-	Simple(&'a str),
+	Simple(String),
 	Complex(UnownedValue<'a>),
 }
 
@@ -65,39 +35,6 @@ impl<'a> Lookup for HashMap<String, OwnedValue> {
 		self.get(key).map(|v| Ok(LookupResult::Complex(v.into())))
 	}
 }
-
-// impl<'a> Lookup for Inherited<'a, HashMap<String, ninja::Value<'a>>> {
-// 	fn lookup(&self, key: &str) -> Option<LookupResult> {
-// 		match self {
-// 			Inherited::Leaf(l) => l.lookup(key),
-// 			Inherited::Child(child, parent) => child.lookup(key).or_else(|| parent.lookup(key)),
-// 		}
-// 	}
-// }
-
-// TODO: why does T have to be clone for this impl? Inherited doesn't hold a T, it holds a reference to a T
-// impl<'a, T: Clone> Copy for Inherited<'a, T> {}
-
-// struct InheritIter<'a, T: Clone>(Option<Inherited<'a, T>>);
-
-// impl<'a, T: Clone> Iterator for InheritIter<'a, T> {
-// 	type Item = &'a T;
-	
-// 	fn next(&mut self) -> Option<Self::Item> {
-// 		match self.0.take() {
-// 			None => None,
-// 			Some(next) => {
-// 				match next {
-// 					Inherited::Leaf(t) => Some(t),
-// 					Inherited::Child(t, parent) => {
-// 						self.0 = Some(*parent);
-// 						Some(t)
-// 					},
-// 				}
-// 			},
-// 		}
-// 	}
-// }
 
 /*
 The full lookup order for a variable expanded in a build block (or the rule is uses) is:

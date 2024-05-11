@@ -188,13 +188,13 @@ fn rebuild_on_transitive_dep_change() -> Result<()> {
 		p.target_builder("b", |p, c| {
 			let contents = c.read_file("a")?;
 			p.record("build b");
-			fs::write(c.output_path(), format!("{} -> b", contents))?;
+			fs::write(c.dest_path(), format!("{} -> b", contents))?;
 			Ok(())
 		});
 		p.target_builder("c", |p, c| {
 			let contents = c.read_file("b")?;
 			p.record("build c");
-			fs::write(c.output_path(), format!("{} -> c", contents))?;
+			fs::write(c.dest_path(), format!("{} -> c", contents))?;
 			Ok(())
 		});
 		p.write_file("a", "1")?;
@@ -220,7 +220,7 @@ fn rebuild_on_fileset_change() -> Result<()> {
 		p.target_builder("list", |p, c| {
 			let files: Vec<String> = c.list_fileset(fileset(".").include_files("*.txt"))?;
 			p.record("build");
-			fs::write(c.output_path(), format!("{}", files.join("\n")))?;
+			fs::write(c.dest_path(), format!("{}", files.join("\n")))?;
 			Ok(())
 		});
 		p.write_file("a.txt", "1")?;

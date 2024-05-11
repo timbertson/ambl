@@ -197,7 +197,7 @@ impl Nested {
 	fn projection<'a>(&'a self, name: &'a str) -> Option<(&'a Scope<'static>, &'a str)> {
 		match self.relative_scope.as_ref() {
 			Some(sub) => {
-				sub.project(name).map(|new_name| {
+				sub.projected(name).map(|new_name| {
 					(&self.absolute_scope, new_name)
 				})
 			},
@@ -225,7 +225,7 @@ pub enum IncludeConfig {
 
 impl ScopedInclude {
 	fn contains_path(&self, name: &str) -> bool {
-		self.relative_scope.as_ref().map(|scope| scope.project(name).is_some()).unwrap_or(true)
+		self.relative_scope.as_ref().map(|scope| scope.projected(name).is_some()).unwrap_or(true)
 	}
 }
 

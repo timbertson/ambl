@@ -166,3 +166,30 @@ fn test_stdio() -> Result<()> {
 		Ok(())
 	})
 }
+
+
+#[test]
+#[serial]
+fn test_can_create_output() -> Result<()> {
+	TestProject::in_tempdir(|p| {
+		let builder = |p: &TestProject, c: &TargetCtx| {
+			let dest = c.dest_path_str();
+			c.run(cmd("bash").arg("-euc")
+				.arg(format!("echo {} > {}", &dest, &dest))
+				.stderr(Stderr::Merge)
+			)?;
+			Ok(())
+		};
+
+		p.target_builder("target", builder);
+		assert_eq!(p.build_file_contents("target")?, ".ambl/tmp/target");
+
+		p.target_builder("subdir/target", builder);
+		assert_eq!(p.build_file_contents("subdir/target")?, ".ambl/tmp/subdir/target");
+
+		p.target_builder_scoped("scope", "subdir/target", builder);
+		assert_eq!(p.build_file_contents("scope/subdir/target")?, ".ambl/tmp/scope/subdir/target");
+		
+		Ok(())
+	})
+}

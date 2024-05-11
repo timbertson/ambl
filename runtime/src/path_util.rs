@@ -511,7 +511,7 @@ impl Into<PathBuf> for Unscoped {
 pub struct Simple(CPath);
 
 impl Simple {
-	pub fn project<'a>(&self, s: &'a str) -> Option<&'a str> {
+	pub fn projected<'a>(&self, s: &'a str) -> Option<&'a str> {
 		let prefix: &str = self.0.as_ref();
 		s.strip_prefix(prefix).and_then(|s| s.strip_prefix("/"))
 	}
@@ -576,6 +576,12 @@ impl Absolute {
 impl Into<PathBuf> for Absolute {
 	fn into(self) -> PathBuf {
 		self.0.into()
+	}
+}
+
+impl AsRef<Path> for Absolute {
+	fn as_ref(&self) -> &Path {
+		self.0.as_ref()
 	}
 }
 

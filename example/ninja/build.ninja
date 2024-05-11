@@ -1,5 +1,5 @@
 rule echo
-  command = bash -c "echo $greeting > $out"
+  command = echo $greeting > $out
 
 build trivial: echo
   greeting = "hello"

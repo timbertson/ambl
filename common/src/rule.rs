@@ -136,6 +136,16 @@ impl FunctionSpec {
 	}
 }
 
+impl<S: ToString> From<S> for FunctionSpec {
+	fn from(value: S) -> Self {
+		FunctionSpec {
+			fn_name: value.to_string(),
+			module: Default::default(),
+			config: Default::default(),
+		}
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct EnvLookup {
@@ -340,18 +350,11 @@ pub mod dsl {
 			cwd: Default::default(),
 			env: Default::default(),
 			env_inherit: Default::default(),
+			internal_target_ctx: Default::default(),
 			impure_share_paths: Default::default(),
 			output: Default::default(),
 			input: Default::default(),
 		})
-	}
-
-	pub fn env_lookup<S: Into<String>, S2: Into<String>>(key: S, find: S2) -> EnvLookup {
-		EnvLookup { key: key.into(), find: find.into() }
-	}
-
-	pub fn exe_lookup<S: Into<String>>(find: S) -> EnvLookup {
-		EnvLookup { key: "PATH".into(), find: find.into() }
 	}
 
 	pub fn fileset<S: Into<String>>(root: S) -> FilesetDependency {

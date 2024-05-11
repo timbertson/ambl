@@ -3,21 +3,24 @@ use os_pipe::{PipeReader, PipeWriter};
 use tempdir::TempDir;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
+use std::fmt;
 use std::io::{Read, Stdin, self, Write, BufRead, BufReader};
 use std::os::fd::FromRawFd;
+use std::path::Path;
 use std::process::Child;
+use std::str::FromStr;
 use std::thread::{JoinHandle, Thread, self};
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare};
+use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare, InternalTargetCtx};
 
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
 use crate::persist::{DepSet, BuildResult};
 use crate::project::{Project, ProjectMutexPair, ProjectSandbox, Implicits};
 use crate::sync::{Mutexed, MutexHandle};
-use crate::path_util::{External, Absolute, Scoped, CPath, Simple, Unscoped, lexists};
+use crate::path_util::{lexists, Absolute, CPath, External, Scope, Scoped, Simple, Unscoped};
 use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::{DependencyRequest, ui};
@@ -35,7 +38,7 @@ impl Sandbox {
 		result_block(|| {
 			let link = roots.tmp.join(rel);
 			let target = roots.project.join(dest_rel.unwrap_or(rel));
-			Self::_link(roots, link, target)
+			Self::_link(link, target)
 		}).with_context(|| format!("Installing symlink {:?} (in root {:?})", rel, roots.tmp))
 	}
 	
@@ -87,21 +90,21 @@ impl Sandbox {
 			};
 			if should_link {
 				let link = roots.tmp.join(cpath);
-				Self::_link(roots, link, target)
+				Self::_link(link, target)
 			} else {
 				Ok(())
 			}
 		}).with_context(|| format!("Linking shared dir {:?} (in root {:?})", source, roots.tmp))
 	}
 	
-	fn _link(roots: &Roots, link: Absolute, target: Absolute) -> Result<()> {
+	fn _link<P: AsRef<Path> + fmt::Debug>(link: Absolute, target: P) -> Result<()> {
 		debug!("Linking {:?} -> {:?}", &link, &target);
 		let link: PathBuf = link.into();
 		let parent = link.parent().expect("link.parent()");
 		debug!("Creating parent directory {:?}", &parent);
 		fs::create_dir_all(&parent)?;
-		symlink(target.as_path(), &link)
-			.with_context(|| format!("fs::symlink({:?}, {:?})", target.as_path(), &link))?;
+		symlink(target.as_ref(), &link)
+			.with_context(|| format!("fs::symlink({:?}, {:?})", target, &link))?;
 		Ok(())
 	}
 
@@ -173,7 +176,13 @@ impl Sandbox {
 				.context("initializing command sandbox")?;
 		}
 		
-		let GenCommand { exe, args, cwd, env, env_inherit, output, input, impure_share_paths } = command;
+		let GenCommand { exe, args, cwd, env, env_inherit, internal_target_ctx, output, input, impure_share_paths } = command;
+
+		let InternalTargetCtx { scope, mount_depth } = internal_target_ctx.as_ref()
+			.ok_or_else(|| anyhow!("internal target ctx not populated"))?;
+		
+		let scope_dest = scope.clone().map(Simple::try_from).transpose()?;
+
 		let mut cmd = Command::new(&exe.0.as_path());
 
 		cmd.env_clear();
@@ -286,6 +295,29 @@ impl Sandbox {
 				debug!("Installing {} symlinks", rel_paths.len());
 				for (k, v) in rel_paths {
 					Self::install_symlink(&roots, &k, v.as_ref())?;
+				}
+
+				// TODO: both @scope and @root need to exist at the mount path within roots.tmp, not at the tmp root
+				{ // install @scope
+					let scope_link = roots.tmp.join(&CPath::new("@scope".to_owned()));
+					Self::_link(scope_link, scope_dest.as_ref().map(|simple| simple.as_ref())
+						.unwrap_or(CPath::Cwd.as_ref()))?;
+				}
+
+				{ // install @root
+					let root_link = roots.tmp.join(&CPath::new("@root".to_owned()));
+					let mut root_dest = PathBuf::from_str(".")?;
+					for _ in 0..(*mount_depth) {
+						root_dest.push("..");
+					}
+					Self::_link(root_link, root_dest)?;
+				}
+
+				{ // install .ambl/tmp, so the command can populate an output path
+					let ambl_cpath = CPath::new(".ambl/tmp".to_owned());
+					let root_link = roots.tmp.join(&ambl_cpath);
+					let root_dest = roots.project.join(&ambl_cpath);
+					Self::_link(root_link, root_dest)?;
 				}
 
 				debug!("Installing {} symlinks to impure_shared_paths", impure_share_paths.len());

@@ -70,7 +70,7 @@ Pants makes everything a goal, and you can pass targets to goals. I'm not sure a
 
 Pick a buildroot. Say .ambl/
 .ambl/meta contains all the build DB / lockfiles etc
-.ambl/target contains the built files
+.ambl/out contains the built files
 
 All targets by default go in here.
 
@@ -81,7 +81,7 @@ Cleanup: if a target becomes unbuildable, we remove the source version _if_ it's
 
 ### Symlinks:
 
-symlinks in .ambl/target won't naturally work. Options:
+symlinks in .ambl/out won't naturally work. Options:
  - make them all absolute? This doesn't work if they're made from an exec'd command
   - we could rewrite them post-build? And if we're promoting them, _don't_ rewrite those versions.
  - install a symlink tree / copy of source files. I think this is what dune does, it seems rather heavy.

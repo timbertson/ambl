@@ -5,7 +5,7 @@ mod eval;
 pub mod build {
 	use std::collections::HashMap;
 	use std::default::Default;
-	use ninja_build_syntax::{self as ninja, Build, Statement, ValuePiece};
+	use ninja_build_syntax as ninja;
 
 	use anyhow::{anyhow, *};
 	use serde::{Deserialize, Serialize};
@@ -36,6 +36,7 @@ use crate::target::{TargetConfig, UnownedValue};
 	
 	impl<'a> NinjaRules<'a> {
 		fn parse(bytes: &'a[u8]) -> Result<Self> {
+			use ninja::Statement;
 			let mut result: Self = Default::default();
 			for stmt in ninja::parse(bytes) {
 				let stmt = stmt?;

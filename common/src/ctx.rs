@@ -5,7 +5,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::ffi::*;
-use crate::build::{TaggedInvoke, DependencyRequest, InvokeResponse, Command, Invoke, InvokeAction, FilesetDependency, WriteDest, CopyFile, ReadFile, FileSource, Stdout};
+use crate::build::{Command, CopyFile, DependencyRequest, FileSource, FilesetDependency, GenCommand, Invoke, InvokeAction, InvokeResponse, ReadFile, Stdout, TaggedInvoke, WriteDest};
 use crate::rule::EnvLookup;
 
 fn ignore_result<T>(r: Result<T>) -> Result<()> {
@@ -117,8 +117,29 @@ impl BaseCtx {
 		self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Return)))?.into_bytes()
 	}
 
-	pub fn lookup(&self, lookup: EnvLookup) -> Result<Option<String>> {
-		self.invoke_dep(DependencyRequest::EnvLookup(lookup))?.into_string_opt()
+	pub fn cmd_from_path<S: Into<String>>(&self, exe: S) -> Result<Command> {
+		let exe = self.lookup_exe(exe)?;
+		Ok(Command::from(GenCommand::<String> {
+			exe: exe.into(),
+			args: Default::default(),
+			cwd: Default::default(),
+			env: Default::default(),
+			env_inherit: Default::default(),
+			internal_target_ctx: Default::default(),
+			impure_share_paths: Default::default(),
+			output: Default::default(),
+			input: Default::default(),
+		}))
+	}
+
+	pub fn lookup_exe<S: Into<String>>(&self, find: S) -> Result<String> {
+		let lookup = EnvLookup { key: "PATH".into(), find: find.into() };
+		self.invoke_dep(DependencyRequest::EnvLookup(lookup))?.into_string()
+	}
+
+	pub fn lookup_env<S: Into<String>, S2: Into<String>>(&self, key: S, find: S2) -> Result<String> {
+		let lookup = EnvLookup { key: key.into(), find: find.into() };
+		self.invoke_dep(DependencyRequest::EnvLookup(lookup))?.into_string()
 	}
 
 	pub fn env<S: Into<String>>(&self, key: S) -> Result<String> {
@@ -191,10 +212,10 @@ impl TargetCtx {
 	pub fn target(&self) -> &str { &self.target }
 
 	// TODO make part of struct and return a pointer, don't clone
-	pub fn output_path(&self) -> &Path { &self.dest }
+	pub fn dest_path(&self) -> &Path { &self.dest }
 
 	// convenience
-	pub fn output_path_str(&self) -> &str { self.dest.to_str().expect("non-UTF8 path") }
+	pub fn dest_path_str(&self) -> &str { self.dest.to_str().expect("non-UTF8 path") }
 
 	pub fn write_dest<C: Into<Vec<u8>>>(&self, contents: C) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {

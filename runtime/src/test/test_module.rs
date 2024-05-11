@@ -358,6 +358,19 @@ impl<'a> TestProject<'a> {
 			.inject_rule(dsl::target(&target_name, dsl::module(&m.name).function(DEFAULT_BUILD_FN)))
 			.inject_module(m)
 	}
+
+	// scoped version of target_builder
+	pub fn target_builder_scoped<S1: ToString, S2: ToString>
+		(&'a self, scope: S1, target_name: S2, f: BuilderFn) -> &Self
+	{
+		let target_name = target_name.to_string();
+		let m = self.new_module().set_scope(scope.to_string())
+			.rule(dsl::target(&target_name, FunctionSpec::from(DEFAULT_BUILD_FN)))
+			.builder(f);
+		self
+			.inject_rule(dsl::target(&target_name, dsl::module(&m.name).function(DEFAULT_BUILD_FN)))
+			.inject_module(m)
+	}
 	
 	// low-level module / rule modification
 	pub fn inject_rule<R: Into<Rule>>(&self, v: R) -> &Self {

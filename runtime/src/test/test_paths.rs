@@ -18,9 +18,9 @@ fn test_paths_of_nested_module() -> Result<()> {
 			p.record(format!(
 				"nested build of {} with dest {}",
 				ctx.target(),
-				ctx.output_path().display(),
+				ctx.dest_path().display(),
 			));
-			fs::write(ctx.output_path(), "nested!")?;
+			fs::write(ctx.dest_path(), "nested!")?;
 			Ok(())
 		});
 		
@@ -29,7 +29,7 @@ fn test_paths_of_nested_module() -> Result<()> {
 			p.record(format!(
 				"root build of {} with dest {}",
 				ctx.target(),
-				ctx.output_path().display()
+				ctx.dest_path().display()
 			));
 			ctx.empty_dest()
 		});
@@ -81,6 +81,40 @@ fn test_module_which_is_itself_a_target() -> Result<()> {
 			format!("build wasm"),
 			format!("build a")
 		));
+		Ok(())
+	})
+}
+
+
+#[test]
+#[serial]
+fn test_vitual_paths() -> Result<()> {
+	TestProject::in_tempdir(|p| {
+		p.target_builder("target", |p, ctx| {
+			p.record(ctx.read_file("file")?);
+			p.record(ctx.read_file("@scope/file")?);
+			p.record(ctx.read_file("@root/file")?);
+			
+			ctx.write_dest(
+				ctx.run_output(cmd("bash").arg("-euc").arg("ls -1 ../ && cat file @scope/file @root/file"))?
+			)
+		});
+		
+		p.write_file("mount/file", "mounted")?;
+		p.write_file("mount/scope/file", "mounted and scoped")?;
+		p.write_file("file", "root file")?;
+
+		// TODO inject at mount _and_ scope
+		
+		p.build_file("target")?;
+		eq!(p.log(), vec!(
+			format!("build wasm"),
+			format!("build a")
+		));
+		eq!(
+			p.read_file(".ambl/out/target")?,
+			"mount\nmounted\nmounted and scoped\nroot file"
+		);
 		Ok(())
 	})
 }

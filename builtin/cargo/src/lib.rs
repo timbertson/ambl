@@ -37,9 +37,8 @@ pub mod build {
 	}
 
 	fn raw_cargo(c: &BaseCtx) -> Result<Command> {
-		let exe = c.lookup(exe_lookup("cargo"))?.ok_or_else(|| anyhow!("cargo not on $PATH"))?;
 		minimal_cargo_files(c)?;
-		Ok(cmd(exe))
+		c.cmd_from_path("cargo")
 	}
 
 	fn minimal_cargo_files(c: &BaseCtx) -> Result<()> {
