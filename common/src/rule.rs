@@ -30,7 +30,21 @@ impl Default for Config {
 	}
 }
 
-// used for delegating target definitions to another module
+// used for embedding a self-contained project at a specific path
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct Mount {
+	#[serde(default)]
+	path: String,
+}
+
+impl Mount {
+	pub fn get_path(&self) -> &str {
+		self.path.as_str()
+	}
+}
+
+// used for delegating target definitions to another module, with an optional scope
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Include {
@@ -45,9 +59,6 @@ pub struct Include {
 
 	#[serde(rename = "fn", default)]
 	fn_name: Option<String>,
-
-	#[serde(default)]
-	mode: Option<IncludeMode>, // TODO this is bad modelling, YAML doesn't use config
 }
 
 impl Include {
@@ -80,17 +91,6 @@ impl Include {
 
 	pub fn get_config(& self) -> &Config {
 		&self.config
-	}
-
-	pub fn get_mode(& self) -> IncludeMode {
-		// assume WASM unless it's overridden or module ends in .ya?ml
-		self.mode.unwrap_or_else(|| {
-			let is_yaml = match self.module {
-				Some(ref p) => p.ends_with(".yml") || p.ends_with(".yaml"),
-				None => false
-			};
-			if is_yaml { IncludeMode::YAML } else { IncludeMode::WASM }
-		})
 	}
 }
 
@@ -131,7 +131,6 @@ impl FunctionSpec {
 			scope: Some(s.into()),
 			module,
 			config,
-			mode: Some(IncludeMode::WASM),
 		}
 	}
 }
@@ -157,6 +156,7 @@ pub struct EnvLookup {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Rule {
 	Target(Target),
+	Mount(Mount),
 	Include(Include),
 	Sandbox(Sandbox),
 }
@@ -248,7 +248,6 @@ impl Module {
 			scope: Some(scope.into()),
 			config: Default::default(),
 			fn_name: Default::default(),
-			mode: Default::default(),
 		}
 	}
 }
@@ -270,7 +269,6 @@ impl Into<Include> for String {
 			scope: Default::default(),
 			config: Default::default(),
 			fn_name: Default::default(),
-			mode: Default::default(),
 		}
 	}
 }
@@ -289,7 +287,6 @@ impl Into<Include> for TypedFnSymbol<BaseCtx, Result<Vec<Rule>>> {
 			scope: Default::default(),
 			config: Default::default(),
 			fn_name: Some(self.symbol),
-			mode: Default::default(),
 		}
 	}
 }
@@ -306,7 +303,6 @@ impl Into<Include> for FunctionSpec {
 			scope: Default::default(),
 			config,
 			fn_name: Some(fn_name),
-			mode: Some(IncludeMode::WASM),
 		}
 	}
 }
@@ -342,15 +338,17 @@ pub mod dsl {
 	pub fn module<S: Into<String>>(path: S) -> Module {
 		Module(path.into())
 	}
+	
+	pub fn mount<S: Into<String>>(path: S) -> Rule {
+		Rule::Mount(Mount { path: path.into() })
+	}
 
 	pub fn cmd<S: Into<String>>(exe: S) -> Command {
 		Command::from(GenCommand::<String> {
 			exe: exe.into(),
 			args: Default::default(),
-			cwd: Default::default(),
 			env: Default::default(),
 			env_inherit: Default::default(),
-			internal_target_ctx: Default::default(),
 			impure_share_paths: Default::default(),
 			output: Default::default(),
 			input: Default::default(),

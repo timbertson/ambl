@@ -13,7 +13,7 @@ use std::thread::{JoinHandle, Thread, self};
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare, InternalTargetCtx};
+use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare};
 
 use crate::build::BuildReason;
 use crate::build_request::BuildRequest;
@@ -25,8 +25,30 @@ use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::{DependencyRequest, ui};
 
-pub struct Sandbox {
+pub struct InternalCommand<'a> {
+	scope: &'a Scope<'a>,
+	mount_depth: u32,
+	cmd: GenCommand<Unscoped>,
 }
+impl<'a> InternalCommand<'a> {
+	pub fn wrap(cmd_str: GenCommand<String>, scope: &'a Scope, mount_depth: u32) -> Self {
+		Self {
+			scope,
+			mount_depth,
+			cmd: cmd_str.convert(|s| {
+				Unscoped::from_string(s, scope)
+			}),
+		}
+	}
+}
+
+impl<'a> fmt::Debug for InternalCommand<'a> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		self.cmd.fmt(f)
+	}
+}
+
+pub struct Sandbox;
 
 struct Roots {
 	tmp: Absolute,
@@ -166,7 +188,7 @@ impl Sandbox {
 	pub fn run<'a, 'b, M: BuildModule>(
 		mut project: Mutexed<'a, Project<M>>,
 		implicits: &Implicits,
-		command: &'b GenCommand<Unscoped>,
+		command: &'b InternalCommand,
 		reason: &BuildReason,
 	) -> Result<(Mutexed<'a, Project<M>>, TempDir, InvokeResponse)> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
@@ -176,12 +198,10 @@ impl Sandbox {
 				.context("initializing command sandbox")?;
 		}
 		
-		let GenCommand { exe, args, cwd, env, env_inherit, internal_target_ctx, output, input, impure_share_paths } = command;
+		let InternalCommand { scope, mount_depth, cmd } = command;
+		let GenCommand { exe, args, env, env_inherit, output, input, impure_share_paths } = cmd;
 
-		let InternalTargetCtx { scope, mount_depth } = internal_target_ctx.as_ref()
-			.ok_or_else(|| anyhow!("internal target ctx not populated"))?;
-		
-		let scope_dest = scope.clone().map(Simple::try_from).transpose()?;
+		let scope_dest = scope.as_simple();
 
 		let mut cmd = Command::new(&exe.0.as_path());
 
@@ -297,14 +317,23 @@ impl Sandbox {
 					Self::install_symlink(&roots, &k, v.as_ref())?;
 				}
 
-				// TODO: both @scope and @root need to exist at the mount path within roots.tmp, not at the tmp root
-				{ // install @scope
-					let scope_link = roots.tmp.join(&CPath::new("@scope".to_owned()));
-					Self::_link(scope_link, scope_dest.as_ref().map(|simple| simple.as_ref())
+				// TODO: figure out how an explicitly passed in cwd would interact
+				// with mount path
+				let cwd: Absolute = match scope.as_simple() {
+					Some(scope) => roots.tmp.join(scope),
+					None => roots.tmp.clone(),
+				};
+
+				std::fs::create_dir_all(&cwd)?;
+				cmd.current_dir(&cwd);
+
+				{ // install @scope in cwd
+					let scope_link = cwd.join(&CPath::new("@scope".to_owned()));
+					Self::_link(scope_link, scope_dest.map(|simple| simple.as_ref())
 						.unwrap_or(CPath::Cwd.as_ref()))?;
 				}
 
-				{ // install @root
+				{ // install @root in cwd, as a sequence of `..` components
 					let root_link = roots.tmp.join(&CPath::new("@root".to_owned()));
 					let mut root_dest = PathBuf::from_str(".")?;
 					for _ in 0..(*mount_depth) {
@@ -313,7 +342,7 @@ impl Sandbox {
 					Self::_link(root_link, root_dest)?;
 				}
 
-				{ // install .ambl/tmp, so the command can populate an output path
+				{ // install .ambl/tmp at the project root, so the command can populate the output path
 					let ambl_cpath = CPath::new(".ambl/tmp".to_owned());
 					let root_link = roots.tmp.join(&ambl_cpath);
 					let root_dest = roots.project.join(&ambl_cpath);
@@ -326,21 +355,12 @@ impl Sandbox {
 					Self::share_path(&roots, &mut auto_promote_paths, path)?;
 				}
 
-				// build up actual CWD from temp + scope + explicit CWD
-				let mut full_cwd: PathBuf = roots.tmp.to_owned().into();
-				if let Some(cwd) = cwd {
-					// TODO warn if CWD is absolute?
-					full_cwd.push(&cwd.0);
-				}
-				cmd.current_dir(&full_cwd);
-
 				if log_enabled!(log::Level::Debug) {
 					debug!("+ {:?}", &cmd);
 				} else {
 					info!("+ {:?}", &exe);
 				}
 
-				std::fs::create_dir_all(&full_cwd)?;
 				let mut proc = cmd.spawn()?;
 
 				// cmd holds write handles in stdout/err values, drop them

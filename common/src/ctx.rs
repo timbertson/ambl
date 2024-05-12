@@ -122,10 +122,8 @@ impl BaseCtx {
 		Ok(Command::from(GenCommand::<String> {
 			exe: exe.into(),
 			args: Default::default(),
-			cwd: Default::default(),
 			env: Default::default(),
 			env_inherit: Default::default(),
-			internal_target_ctx: Default::default(),
 			impure_share_paths: Default::default(),
 			output: Default::default(),
 			input: Default::default(),

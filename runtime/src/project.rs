@@ -30,7 +30,7 @@ use crate::{err::*, path_util, fileset, ui};
 use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
 use crate::persist::*;
 use crate::module::*;
-use crate::sandbox::Sandbox;
+use crate::sandbox::{InternalCommand, Sandbox};
 use crate::sync::{MutexRef, Mutexed, MutexHandle, RwRef, RwHandle, RwReadGuard};
 use crate::{wasm::WasmModule, sync::lock_failed};
 
@@ -78,7 +78,7 @@ trait TargetVisitor<'a> {
 	fn visit_nested(ctx: Self::Ctx, scope: &'a Scope, nested: &'a Nested) -> NestedVisitResult<'a, Self::Ctx>;
 	
 	// TODO why is this lifetime different?
-	fn should_include<'b>(ctx: Self::Ctx, include: &'b ScopedInclude) -> bool;
+	fn should_include<'b, I: ContainsPath>(ctx: Self::Ctx, include: &'b I) -> bool;
 }
 
 struct ListTargetsVisitor {
@@ -98,7 +98,7 @@ impl ListTargetsVisitor {
 impl<'a> TargetVisitor<'a> for ListTargetsVisitor {
 	type Ctx = Option<&'a str>;
 
-	fn should_include<'b>(ctx: Self::Ctx, include: &'b ScopedInclude) -> bool {
+	fn should_include<'b, I: ContainsPath>(ctx: Self::Ctx, include: &'b I) -> bool {
 		if let Some(name) = ctx {
 			FindTargetVisitor::should_include(name, include)
 		} else {
@@ -147,7 +147,7 @@ impl<'a> TargetVisitor<'a> for FindTargetVisitor {
 	// Note: name (ctx) is guaranteed to be a valid Simple, but we use a str for efficient slicing
 	type Ctx = &'a str;
 
-	fn should_include<'b>(name: &'a str, include: &'b ScopedInclude) -> bool {
+	fn should_include<'b, I: ContainsPath>(name: &'a str, include: &'b I) -> bool {
 		include.contains_path(name)
 	}
 
@@ -214,19 +214,34 @@ pub struct ScopedInclude {
 	pub path: Option<CPath>,
 	pub fn_name: String,
 	pub relative_scope: Option<Simple>,
-	pub config: IncludeConfig
+	pub config: IncludeConfig // TODO
+}
+
+#[derive(Clone, Debug)]
+pub struct ScopedMount {
+	pub path: Simple,
+}
+
+trait ContainsPath {
+	fn contains_path(&self, name: &str) -> bool;
+}
+
+impl ContainsPath for ScopedInclude {
+	fn contains_path(&self, name: &str) -> bool {
+		self.relative_scope.as_ref().map(|scope| scope.projected(name).is_some()).unwrap_or(true)
+	}
+}
+
+impl ContainsPath for ScopedMount {
+	fn contains_path(&self, name: &str) -> bool {
+		self.path.projected(name).is_some()
+	}
 }
 
 #[derive(Clone, Debug)]
 pub enum IncludeConfig {
 	YAML,
 	WASM(ambl_common::rule::Config)
-}
-
-impl ScopedInclude {
-	fn contains_path(&self, name: &str) -> bool {
-		self.relative_scope.as_ref().map(|scope| scope.projected(name).is_some()).unwrap_or(true)
-	}
 }
 
 // superset of Rule with the addition of Nested, which
@@ -248,8 +263,9 @@ impl ProjectRule {
 							implicits.merge_sandbox(sandbox);
 							None
 						},
-						Rule::Target(t) => Some(NonConfigRule::Target(t)),
-						Rule::Include(i) => Some(NonConfigRule::Include(i)),
+						Rule::Target(x) => Some(NonConfigRule::Target(x)),
+						Rule::Mount(x) => Some(NonConfigRule::Mount(x)),
+						Rule::Include(x) => Some(NonConfigRule::Include(x)),
 					}
 				});
 
@@ -266,7 +282,9 @@ impl ProjectRule {
 // from initial -> loading -> loaded
 #[derive(Clone, Debug)]
 pub enum MutableRule {
+	// TODO: an Include and a Mount share most of their logic. Merge?
 	Include(ScopedInclude), // before loading
+	Mount(ScopedMount), // before loading
 	Nested(Nested), // after loading
 	Loading(), // during loading.
 	// TODO when we support parallelism, this will need to indicate
@@ -356,6 +374,7 @@ impl Default for ProjectSandbox {
 enum NonConfigRule {
 	Target(Target),
 	Include(Include),
+	Mount(Mount),
 }
 
 impl ProjectRule {
@@ -367,21 +386,17 @@ impl ProjectRule {
 					None => None,
 					Some(rel) => Some(Simple::try_from(rel.to_owned())?),
 				};
+				// TODO should this be Scoped or Unscoped?
 				let path = spec.get_module().to_owned().map(CPath::new);
-				let config = match spec.get_mode() {
-					IncludeMode::YAML => {
-						if let Some(config) = spec.get_config().value() {
-							return Err(anyhow!(
-								"Configuration can't be passed to a yaml include ({:?})\nConfiguration value: {:?}",
-								&path, &config));
-						}
-						IncludeConfig::YAML
-					},
-					IncludeMode::WASM => IncludeConfig::WASM(spec.get_config().to_owned()),
-				};
+				let config = IncludeConfig::WASM(spec.get_config().to_owned());
 				let fn_name = spec.get_fn_name().as_deref().unwrap_or("get_rules").to_owned();
 				let include = ScopedInclude { path, relative_scope, config, fn_name };
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(include))))
+			},
+			NonConfigRule::Mount(spec) => {
+				let path = Simple::try_from(spec.get_path().to_owned())?;
+				let mount = ScopedMount { path };
+				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Mount(mount))))
 			},
 		}
 	}
@@ -594,6 +609,64 @@ impl<M: BuildModule> Project<M> {
 					},
 				}
 				Ok((project, None))
+			},
+
+			MutableRule::Mount(mount) => {
+				if V::should_include(ctx, mount) {
+					// release borrow of rule
+					let mount = mount.to_owned();
+					debug!("Loading mount {:?}", &mount);
+					let mut handle = readable.unlock();
+
+					result_block(|| {
+						handle.with_write(|writeable| {
+							*writeable = MutableRule::Loading();
+							Ok(())
+						})?;
+
+						let explicit_path = Scoped::new(scope.copy(), mount.path.as_ref());
+						let module_path = ResolveModule {
+							explicit_path: Some(explicit_path),
+							source_module,
+						}.resolve()?;
+
+						let rules = {
+							let (project_ret, rules) = Self::load_yaml_rules(
+								project,
+								parent_implicits,
+								&module_path,
+								&BuildReason::Import
+							).context("loading YAML rules")?;
+							project = project_ret;
+							rules
+						};
+
+						// Compute the the full scope
+						let absolute_scope: Scope<'static> = Scope::owned(scope.join_simple(mount.path.clone()));
+							
+						handle.with_write(|writeable| {
+							let (implicits, project_rules) = ProjectRule::collate_raw_rules(
+								parent_implicits.clone(), scope, rules)?;
+
+							let nested = MutableRule::Nested(Nested {
+								implicits,
+								module_path: None,
+								rules: project_rules,
+								relative_scope: Some(mount.path.clone()),
+								absolute_scope,
+							});
+							debug!("Import produced these rules: {:?}", &nested);
+							*writeable = nested;
+							Ok(())
+						})?;
+
+						// reevaluate after replacing, this will drop into the Rule::Nested branch
+						Self::visit_importable_rule::<V>(project, parent_implicits, rule_ref, scope, source_module, ctx)
+					}).with_context(|| format!("loading include {:?}", &mount))
+				} else {
+					debug!("Skipping irrelevant include: {:?}", &mount);
+					Ok((project, None))
+				}
 			},
 
 			MutableRule::Include(include) => {
@@ -918,7 +991,8 @@ impl<M: BuildModule> Project<M> {
 				// which is unlikely to result in many cache hits if the target is being rebuilt anyway.
 				// (Also: executes aren't necessarly hermetic)
 				// It also means we don't need to persist execute output, we always just re-execute
-				let (mut project, tempdir, response) = Sandbox::run(project, implicits, cmd, reason)
+				let internal_cmd = InternalCommand::wrap(cmd.to_owned(), todo!(), todo!());
+				let (mut project, tempdir, response) = Sandbox::run(project, implicits, &internal_cmd, reason)
 					.with_context(|| format!("running {:?}", cmd))?;
 				
 				let response = match response {

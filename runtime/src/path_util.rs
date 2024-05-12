@@ -565,7 +565,7 @@ impl TryFrom<String> for Simple {
 // a CPath with leading `../` components
 pub struct External(CPath);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Absolute(CPath);
 impl Absolute {
 	pub fn join(&self, other: &CPath) -> Self {
@@ -605,6 +605,13 @@ pub enum Kind {
 	Simple,
 	External,
 	Absolute,
+}
+
+#[derive(Clone, Debug)]
+pub enum Virtual<T: Debug + Clone> {
+	Scope(T), // @scope/*
+	Root(T), // @root/*
+	Plain(T), // *
 }
 
 pub struct ResolveModule<'a> {

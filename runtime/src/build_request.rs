@@ -22,7 +22,7 @@ pub enum BuildRequest {
 	EnvKeys(String),
 	EnvLookup(EnvLookup),
 	Fileset(ResolvedFilesetDependency),
-	Execute(GenCommand<Unscoped>),
+	Execute(GenCommand<String>),
 	Universe,
 }
 
@@ -48,19 +48,7 @@ impl BuildRequest {
 				Self::Fileset(ResolvedFilesetDependency{ root, dirs, files })
 			},
 			DependencyRequest::Execute(v) => {
-				let gen_str : GenCommand<String> = v.into();
-				let mut gen = gen_str.convert(|s| {
-					Unscoped::from_string(s, scope)
-				});
-				// If there is a scope, make sure it's used for the default CWD
-				// TODO should an explicit relative CWD be joined onto the scope?
-				let override_cwd = match (scope.as_simple(), &gen.cwd) {
-					(Some(scope), None) => {
-						gen.cwd = Some(scope.clone().into());
-					},
-					_ => ()
-				};
-				Self::Execute(gen)
+				Self::Execute(v.into())
 			},
 			DependencyRequest::Universe => Self::Universe,
 		})

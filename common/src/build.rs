@@ -208,23 +208,13 @@ impl<T> ImpureShare<T> {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct InternalTargetCtx {
-	pub scope: Option<String>, // used for @scope symlink. None means the symlink points to "."
-	pub mount_depth: u32, // used to build @root symlink with this number of ".." components
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct GenCommand<Path> {
 	pub exe: Path,
 	pub args: Vec<String>,
-	pub cwd: Option<Path>,
+	// pub cwd: Option<Path>, // Disabled until there's a plan to support sane scope / mount handling with a custom CWD
 	pub env: BTreeMap<String, String>,
 	pub env_inherit: BTreeSet<String>,
 	pub impure_share_paths: Vec<ImpureShare<Path>>,
-
-	// NOTE: this should not be provided by the requester, it'll be populated
-	// by the invoker before running the command.
-	pub internal_target_ctx: Option<InternalTargetCtx>,
 
 	pub output: Stdio,
 	pub input: Stdin,
@@ -250,7 +240,6 @@ impl <T: Debug> Debug for GenCommand<T> {
 
 		if log::log_enabled!(log::Level::Debug) {
 			out
-				.field("cwd", &self.cwd)
 				.field("env", &self.env)
 				.field("env_inherit", &self.env_inherit)
 				.field("impure_share_paths", &self.impure_share_paths)
@@ -263,7 +252,7 @@ impl <T: Debug> Debug for GenCommand<T> {
 
 impl<T> GenCommand<T> {
 	pub fn convert<R, F: Fn(T) -> R>(self, f: F) -> GenCommand<R> {
-		let Self { exe, args, cwd, env, env_inherit, internal_target_ctx, impure_share_paths, output, input } = self;
+		let Self { exe, args, env, env_inherit, impure_share_paths, output, input } = self;
 		let impure_share_paths : Vec<ImpureShare<R>> = impure_share_paths
 			.into_iter()
 			.map(|impure_share| impure_share.map(&f))
@@ -271,10 +260,8 @@ impl<T> GenCommand<T> {
 		GenCommand {
 			exe: f(exe),
 			args,
-			cwd: cwd.map(&f),
 			env,
 			env_inherit,
-			internal_target_ctx,
 			impure_share_paths,
 			output,
 			input,
@@ -315,11 +302,6 @@ impl Command {
 			.unwrap_or_else(|| panic!("non-UTF8 path: {:?}", path_ref))
 			.to_owned()
 		);
-		self
-	}
-
-	pub fn cwd<S: ToString>(mut self, s: S) -> Self {
-		self.cwd = Some(s.to_string());
 		self
 	}
 
