@@ -27,7 +27,7 @@ use crate::build::{BuildCache, BuildReason, BuildResponse};
 use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
 use crate::ctx::Ctx;
 use crate::{err::*, path_util, fileset, ui};
-use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
+use crate::path_util::{Absolute, CPath, MountAndScope, ResolveModule, Scope, Scoped, Simple, Unscoped};
 use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::{InternalCommand, Sandbox};
@@ -384,17 +384,17 @@ impl ProjectRule {
 			NonConfigRule::Include(spec) => {
 				let relative_scope = match spec.get_scope() {
 					None => None,
-					Some(rel) => Some(Simple::try_from(rel.to_owned())?),
+					Some(rel) => Some(Simple::try_from(rel.to_owned(), base_scope)?),
 				};
 				// TODO should this be Scoped or Unscoped?
-				let path = spec.get_module().to_owned().map(CPath::new);
+				let path = spec.get_module().to_owned().map(|m| CPath::new(m, base_scope));
 				let config = IncludeConfig::WASM(spec.get_config().to_owned());
 				let fn_name = spec.get_fn_name().as_deref().unwrap_or("get_rules").to_owned();
 				let include = ScopedInclude { path, relative_scope, config, fn_name };
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(include))))
 			},
 			NonConfigRule::Mount(spec) => {
-				let path = Simple::try_from(spec.get_path().to_owned())?;
+				let path = Simple::try_from(spec.get_path().to_owned(), base_scope)?;
 				let mount = ScopedMount { path };
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Mount(mount))))
 			},
@@ -543,9 +543,9 @@ impl<M: BuildModule> Project<M> {
 			ProjectRule::Target(target) => {
 				match V::visit_target(ctx, scope, target) {
 					TargetVisitResult::Return(name) => result_block(|| {
-						let rel_name = CPath::new(name.to_owned()).into_simple()?;
+						let rel_name = CPath::new(name.to_owned(), scope).into_simple()?;
 						let module_cpath = target.build.module.as_ref().map(|m| {
-							CPath::new(m.to_owned())
+							CPath::new(m.to_owned(), scope)
 						});
 						let full_module = ResolveModule {
 							source_module,
@@ -1126,19 +1126,19 @@ impl<M: BuildModule> Project<M> {
 		&self.writer
 	}
 	
-	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<Unscoped> {
+	fn _internal_path(&self, base: &str, name: &Scoped<Simple>) -> Result<Unscoped> {
 		let mut ret: PathBuf = PathBuf::from(".ambl");
 		ret.push(base);
 		ret.push(Unscoped::from_scoped(name).0);
-		Ok(Unscoped(CPath::try_from(ret)?))
+		Ok(Unscoped(CPath::from_path_nonvirtual(ret)?))
 	}
 
 	pub fn tmp_path(&self, name: &Scoped<Simple>) -> Result<Unscoped> {
-		self._path("tmp", name)
+		self._internal_path("tmp", name)
 	}
 
 	pub fn dest_path(&self, name: &Scoped<Simple>) -> Result<Unscoped> {
-		self._path("out", name)
+		self._internal_path("out", name)
 	}
 
 	#[cfg(test)]
@@ -1169,7 +1169,8 @@ impl<M: BuildModule> Project<M> {
 	pub fn inject_module<K: ToString>(&mut self, k: K, v: M::Compiled) {
 		let s = k.to_string();
 		warn!("injecting module: {}", &s);
-		self.module_cache.modules.insert(Unscoped::new(s.to_string()), v);
+		let module_path = Unscoped(CPath::new_nonvirtual(s.to_string()));
+		self.module_cache.modules.insert(module_path, v);
 	}
 
 	#[cfg(test)]

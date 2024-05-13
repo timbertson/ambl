@@ -89,7 +89,7 @@ impl<'a> TestModule<'a> {
 		Self {
 			// NOTE: these get replaced by set_name below
 			name: "".to_owned(),
-			module_path: Unscoped::new("".to_owned()),
+			module_path: Unscoped(CPath::new_nonvirtual("".to_owned())),
 
 			project,
 			scope: Default::default(),
@@ -113,7 +113,7 @@ impl<'a> TestModule<'a> {
 
 	pub fn set_name<S: ToString>(mut self, v: S) -> Self {
 		self.name = v.to_string();
-		self.module_path = Unscoped::new(v.to_string());
+		self.module_path = Unscoped(CPath::new_nonvirtual(v.to_string()));
 		self
 	}
 
@@ -305,7 +305,7 @@ impl<'a> TestProject<'a> {
 		let ui = Ui::test();
 		// silly mac has a /tmp symlink
 		let root_abs = fs::canonicalize(root.path())?;
-		let project = Project::new(CPath::new(root_abs.to_str().unwrap().to_owned()).into_absolute()?, ui.writer())?;
+		let project = Project::new(CPath::from_path_nonvirtual(root_abs)?.into_absolute()?, ui.writer())?;
 		let token = ActiveBuildToken::generate();
 
 		let handle = project.handle();
@@ -399,7 +399,7 @@ impl<'a> TestProject<'a> {
 		p.inject_module(&s, v);
 		// mark the module file as fresh to skip having to write an actual file
 		p.inject_cache(
-			BuildRequest::FileDependency(Unscoped::new(s)),
+			BuildRequest::FileDependency(Unscoped(CPath::new_nonvirtual(s))),
 			BuildResultWithDeps::simple(BuildResult::File(FAKE_FILE.clone()))
 		).expect("inject_module");
 		drop(p);
@@ -414,7 +414,7 @@ impl<'a> TestProject<'a> {
 			checksum: PersistChecksum::Disabled,
 		};
 		p.inject_cache(
-			BuildRequest::FileDependency(Unscoped::new(v.into())),
+			BuildRequest::FileDependency(Unscoped(CPath::new_nonvirtual(v.into()))),
 			BuildResultWithDeps::simple(BuildResult::File(stat))
 		).expect("touch_fake");
 		drop(p);
@@ -453,7 +453,7 @@ impl<'a> TestProject<'a> {
 	}
 
 	fn invoke_full(&self, req: &Invoke) -> Result<InvokeResponse> {
-		let module = Unscoped::new("_fake_root_module".to_owned());
+		let module = Unscoped(CPath::new_nonvirtual("_fake_root_module".to_owned()));
 		let target_context = TargetContext {
 			scope: Scope::root(),
 			implicits: Default::default(),

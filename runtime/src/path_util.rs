@@ -4,6 +4,7 @@ use log::*;
 use core::fmt;
 use std::ffi::OsStr;
 use std::iter;
+use std::str::FromStr;
 use std::{ops::Deref, sync::Arc, fmt::{Display, Debug}, path::Components};
 use serde::{Deserialize, Serialize};
 use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::prelude::PermissionsExt, borrow::{Cow, Borrow}};
@@ -101,6 +102,48 @@ pub fn lexists<P: AsRef<Path>>(p: P) -> Result<bool> {
 
 lazy_static::lazy_static! {
 	static ref ROOT_SCOPE: Scope<'static> = Scope(None);
+	static ref ROOT_MAS: MountAndScope<'static> = MountAndScope { mount: None, scope: None, mount_depth: 0 };
+}
+
+/*
+ * Joining rules:
+ *
+ * Mounts always inherit from their parents.
+ * Soped are ephemerial - if you join on top of a scoped path, it won't
+ * inherit the scope unless you explicitly join e.g. `@scope/foo`.
+ */
+// #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct MountAndScope<'a> {
+	mount: Option<Cow<'a, Simple>>,
+	scope: Option<Cow<'a, Simple>>,
+	mount_depth: usize
+}
+
+impl<'a> MountAndScope<'a> {
+	pub fn new(mount: Option<Cow<'a, Simple>>, scope: Option<Cow<'a, Simple>>) -> Self {
+		let mount_depth = mount.as_ref().map(|mount| {
+			let simple: &Simple = mount.borrow();
+			simple.as_str().chars().filter(|c| *c == '/').count()
+		}).unwrap_or(0);
+		Self { mount, scope, mount_depth }
+	}
+
+	pub fn root() -> MountAndScope<'static> {
+		ROOT_MAS.clone()
+	}
+	
+	pub fn replacement_root_prefix(&self) -> String {
+		let mut buf = "".to_owned();
+		for _ in 0..self.mount_depth {
+			buf.push_str("../")
+		}
+		buf
+	}
+
+	// todo remove
+	pub fn magic_ref(scope: &'a Scope<'a>) -> &'a Self {
+		todo!()
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -226,6 +269,7 @@ impl <'a, C: Clone> Clone for Scoped<'a, C> {
 // a "canonical" PathBuf which is:
 // - always a valid string
 // - normalized, i.e. contains no trailing `/`, and no internal `../` (but may start with one or more ../ segments)
+// - has virtual path segments resolved (i.e. a leading @scope or @root)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum CPath {
 	P(PathBuf),
@@ -253,14 +297,25 @@ lazy_static::lazy_static!{
 }
 
 impl CPath {
-	pub fn new(mut s: String) -> Self {
-		if let Some(builtin) = s.strip_prefix("builtin:") {
-			let mut owned_path = BUILTINS_ROOT.to_owned();
-			owned_path.push(format!("ambl_builtin_{}.wasm", builtin));
-			s = string_of_pathbuf(owned_path)
-		}
+	pub fn new(s: String, scope: &Scope) -> Self {
+		// TODO promote this to the actual argument
+		let mas = MountAndScope::magic_ref(scope);
+		Self::canonicalize(s, mas)
+	}
 
-		Self::canonicalize(PathBuf::from(s))
+	pub fn from_path_nonvirtual<P: AsRef<Path>>(p: P) -> Result<Self> {
+		let s = p.as_ref().as_os_str().to_str().ok_or_else(|| {
+			anyhow!("Path is not valid utf8")
+		})?;
+		Ok(Self::new_nonvirtual(s.to_owned()))
+	}
+	
+	// To be used only when we know the path can't contain virtual
+	// prefixes, e.g loaded from serialization or we're concatenating
+	// two cpaths. Mistaken use of this function will silently drop @scope
+	// and @mount prefixes
+	pub fn new_nonvirtual(s: String) -> Self {
+		Self::canonicalize(s, &MountAndScope::root())
 	}
 
 	pub fn as_path(&self) -> &Path {
@@ -300,7 +355,7 @@ impl CPath {
 
 	fn is_canon(p: &PathBuf) -> bool {
 		let s: &str = str_of_path(p);
-		// treat traling slash as non-canon (unless it's "/")
+		// treat trailing slash as non-canon (unless it's "/")
 		if s.ends_with(|c| c == '/' || c == '\\') && s != "/" {
 			false
 		} else {
@@ -320,7 +375,21 @@ impl CPath {
 		}
 	}
 
-	fn canonicalize(orig: PathBuf) -> Self {
+	fn canonicalize(mut s: String, mas: &MountAndScope) -> Self {
+		// first thing, resolve virtualization
+		if s.starts_with("@scope/") {
+			let scope_ref: Option<&Simple> = mas.scope.as_ref().map(|x| x.borrow());
+			s.replace_range(0..7, scope_ref.map(|x| x.as_str()).unwrap_or(""));
+		} else if s.starts_with("@root/") {
+			s.replace_range(0..6, &mas.replacement_root_prefix());
+		} else if let Some(builtin) = s.strip_prefix("builtin:") {
+			// TODO rename @builtin/?
+			let mut owned_path = BUILTINS_ROOT.to_owned();
+			owned_path.push(format!("ambl_builtin_{}.wasm", builtin));
+			s = string_of_pathbuf(owned_path)
+		}
+
+		let orig = PathBuf::from(s);
 		if Self::is_canon(&orig) {
 			Self::P(orig)
 		} else {
@@ -412,16 +481,6 @@ impl AsRef<CPath> for CPath {
 	}
 }
 
-impl TryFrom<PathBuf> for CPath {
-	type Error = Error;
-	fn try_from(p: PathBuf) -> Result<Self> {
-		let s = p.into_os_string().into_string().map_err(|_| {
-			anyhow!("Path is not valid utf8")
-		})?;
-		Ok(CPath::new(s))
-	}
-}
-
 impl Into<String> for CPath {
 	fn into(self) -> String {
 		let pb: PathBuf = self.into();
@@ -453,11 +512,6 @@ impl AsRef<str> for CPath {
 // Small wrapper for declaring that a path is relative to the project root, and does not need a scope
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Unscoped(pub CPath);
-impl Unscoped {
-	pub fn new(s: String) -> Unscoped {
-		Unscoped(CPath::new(s))
-	}
-}
 
 impl Unscoped {
 	// merge a scope and a CPath into a single path
@@ -476,7 +530,7 @@ impl Unscoped {
 	}
 
 	pub fn from_string(path: String, scope: &Scope) -> Unscoped {
-		Self::from(CPath::new(path), scope)
+		Self::from(CPath::new(path, scope), scope)
 	}
 
 	pub fn from_scoped<P: AsRef<CPath>>(path: &Scoped<P>) -> Unscoped {
@@ -515,6 +569,16 @@ impl Simple {
 		let prefix: &str = self.0.as_ref();
 		s.strip_prefix(prefix).and_then(|s| s.strip_prefix("/"))
 	}
+	
+	pub fn try_from(s: String, scope: &Scope) -> Result<Self> {
+		let c = CPath::new(s, scope);
+		if c.kind() == Kind::Simple {
+			Ok(Self(c))
+		} else {
+			Err(anyhow!("Not a simple path: {:?}", c))
+		}
+	}
+
 }
 
 impl AsRef<CPath> for Simple {
@@ -546,19 +610,6 @@ impl Into<Unscoped> for Simple {
 impl Display for Simple {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		Display::fmt(&self.0, f)
-	}
-}
-
-impl TryFrom<String> for Simple {
-	type Error = Error;
-
-	fn try_from(s: String) -> Result<Self> {
-		let c = CPath::new(s);
-		if c.kind() == Kind::Simple {
-			Ok(Self(c))
-		} else {
-			Err(anyhow!("Not a simple path: {:?}", c))
-		}
 	}
 }
 
@@ -633,7 +684,15 @@ mod test {
 	use super::*;
 	
 	fn p(s: &str) -> CPath {
-		CPath::new(s.to_owned())
+		CPath::new_nonvirtual(s.to_owned())
+	}
+
+	fn p_virtual(s: &str, mount: Option<&str>, scope: Option<&str>) -> CPath {
+		let mas = MountAndScope::new(
+			mount.map(|s| Cow::Owned(CPath::new_nonvirtual(s.to_owned()).into_simple().unwrap())),
+			scope.map(|s| Cow::Owned(CPath::new_nonvirtual(s.to_owned()).into_simple().unwrap())),
+		);
+		CPath::new(s.to_owned(), &mas)
 	}
 
 	fn s(s: &str) -> Scope {
@@ -653,6 +712,20 @@ mod test {
 		assert_eq!(p("../z").as_str(), "../z");
 		assert_eq!(p("../../z").as_str(), "../../z");
 		assert_eq!(p("../z").kind(), Kind::External);
+		assert_eq!(p("builtin:x"), p(&format!("{}/ambl_builtin_x.wasm", BUILTINS_ROOT.display())));
+	}
+
+	#[test]
+	fn test_virtualisation() {
+		assert_eq!(p_virtual("@scope/x", None, None), p("x"));
+		assert_eq!(p_virtual("@scope/x", Some("mount"), Some("scope")), p("scope/x"));
+		assert_eq!(p_virtual("@scope/../x", Some("mount"), Some("some/internal/scope")), p("some/internal/x"));
+
+		assert_eq!(p_virtual("@root/x", None, None), p("x"));
+		assert_eq!(p_virtual("@root/../x", None, None), p("../x"));
+		assert_eq!(p_virtual("@root/../x", None, Some("scope")), p("../x"));
+		assert_eq!(p_virtual("@root/../x", Some("subdir"), Some("scope")), p("x"));
+		assert_eq!(p_virtual("@root/x", Some("nested/subdir"), Some("scope")), p("../../x"));
 	}
 
 	#[test]

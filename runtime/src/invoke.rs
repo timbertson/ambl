@@ -46,7 +46,7 @@ fn perform_invoke<M: BuildModule>(
 	result_block(|| {
 		let scope = &target_context.scope;
 		let dest_tmp = |project: &Project<M>, target: &String| {
-			let target = Scoped::new(scope.copy(), Simple::try_from(target.to_owned())?);
+			let target = Scoped::new(scope.copy(), Simple::try_from(target.to_owned(), scope)?);
 			Project::tmp_path(project, &target)
 		};
 		match action {

@@ -260,8 +260,8 @@ impl Sandbox {
 			let tmp = tempdir::TempDir::new("ambl")?;
 			debug!("created command sandbox {:?}", &tmp);
 			let roots = Roots {
-				tmp: CPath::try_from(tmp.path().to_owned())?.into_absolute()?,
-				project: CPath::try_from(current_dir()?)?.into_absolute()?,
+				tmp: CPath::from_path_nonvirtual(tmp.path().to_owned())?.into_absolute()?,
+				project: CPath::from_path_nonvirtual(current_dir()?)?.into_absolute()?,
 			};
 			
 			cmd.args(args);
@@ -327,14 +327,15 @@ impl Sandbox {
 				std::fs::create_dir_all(&cwd)?;
 				cmd.current_dir(&cwd);
 
-				{ // install @scope in cwd
-					let scope_link = cwd.join(&CPath::new("@scope".to_owned()));
+				{ // install @scope in cwd. Note this is a literal @scope symlink,
+					// so that uninterpreted raw string paths will work within the command
+					let scope_link = cwd.join(&CPath::new_nonvirtual("@scope".to_owned()));
 					Self::_link(scope_link, scope_dest.map(|simple| simple.as_ref())
 						.unwrap_or(CPath::Cwd.as_ref()))?;
 				}
 
 				{ // install @root in cwd, as a sequence of `..` components
-					let root_link = roots.tmp.join(&CPath::new("@root".to_owned()));
+					let root_link = roots.tmp.join(&CPath::new_nonvirtual("@root".to_owned()));
 					let mut root_dest = PathBuf::from_str(".")?;
 					for _ in 0..(*mount_depth) {
 						root_dest.push("..");
@@ -343,7 +344,7 @@ impl Sandbox {
 				}
 
 				{ // install .ambl/tmp at the project root, so the command can populate the output path
-					let ambl_cpath = CPath::new(".ambl/tmp".to_owned());
+					let ambl_cpath = CPath::new_nonvirtual(".ambl/tmp".to_owned());
 					let root_link = roots.tmp.join(&ambl_cpath);
 					let root_dest = roots.project.join(&ambl_cpath);
 					Self::_link(root_link, root_dest)?;
