@@ -39,7 +39,6 @@ use cli_opts::CliOpts;
 use clap::Parser;
 
 use crate::build::Forced;
-use crate::path_util::MountAndScope;
 
 fn main() -> Result<()> {
 	let cli = CliOpts::parse();

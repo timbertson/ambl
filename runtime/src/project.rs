@@ -27,7 +27,7 @@ use crate::build::{BuildCache, BuildReason, BuildResponse};
 use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
 use crate::ctx::Ctx;
 use crate::{err::*, path_util, fileset, ui};
-use crate::path_util::{Absolute, CPath, MountAndScope, ResolveModule, Scope, Scoped, Simple, Unscoped};
+use crate::path_util::{Absolute, CPath, ResolveModule, Scope, Scoped, Simple, Unscoped};
 use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::{InternalCommand, Sandbox};
@@ -86,10 +86,12 @@ struct ListTargetsVisitor {
 
 impl ListTargetsVisitor {
 	fn print_target_name(scope: &Scope, name: &str) {
-		let prefix = scope.as_simple().map(|s| s.as_str());
 		print!("  ");
-		if let Some(prefix) = prefix {
-			print!("{}/", prefix);
+		if let Some(mount) = scope.mount.as_ref() {
+			print!("{}/", mount);
+		}
+		if let Some(scope) = scope.scope.as_ref() {
+			print!("{}/", scope);
 		}
 		println!("{}", name);
 	}

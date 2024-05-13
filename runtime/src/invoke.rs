@@ -134,7 +134,7 @@ fn built_source_path<'a, M: BuildModule>(
 		FileSource::Tempdir(tempdir) => {
 			let temp_root: &Path = project.get_tempdir(token, *tempdir)?;
 			let mut ret = PathBuf::from(temp_root);
-			scope.push_to(&mut ret);
+			scope.push_mount_to(&mut ret);
 			ret
 		}
 	};

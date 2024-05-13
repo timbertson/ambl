@@ -201,8 +201,6 @@ impl Sandbox {
 		let InternalCommand { scope, mount_depth, cmd } = command;
 		let GenCommand { exe, args, env, env_inherit, output, input, impure_share_paths } = cmd;
 
-		let scope_dest = scope.as_simple();
-
 		let mut cmd = Command::new(&exe.0.as_path());
 
 		cmd.env_clear();
@@ -319,8 +317,8 @@ impl Sandbox {
 
 				// TODO: figure out how an explicitly passed in cwd would interact
 				// with mount path
-				let cwd: Absolute = match scope.as_simple() {
-					Some(scope) => roots.tmp.join(scope),
+				let cwd: Absolute = match scope.mount.as_ref() {
+					Some(scope) => roots.tmp.join(scope.as_ref()),
 					None => roots.tmp.clone(),
 				};
 
@@ -330,7 +328,7 @@ impl Sandbox {
 				{ // install @scope in cwd. Note this is a literal @scope symlink,
 					// so that uninterpreted raw string paths will work within the command
 					let scope_link = cwd.join(&CPath::new_nonvirtual("@scope".to_owned()));
-					Self::_link(scope_link, scope_dest.map(|simple| simple.as_ref())
+					Self::_link(scope_link, scope.scope.as_ref().map(|simple| simple.as_path())
 						.unwrap_or(CPath::Cwd.as_ref()))?;
 				}
 

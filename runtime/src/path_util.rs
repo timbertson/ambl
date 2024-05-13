@@ -101,8 +101,11 @@ pub fn lexists<P: AsRef<Path>>(p: P) -> Result<bool> {
 }
 
 lazy_static::lazy_static! {
-	static ref ROOT_SCOPE: Scope<'static> = Scope(None);
-	static ref ROOT_MAS: MountAndScope<'static> = MountAndScope { mount: None, scope: None, mount_depth: 0 };
+	static ref ROOT_SCOPE: Scope<'static> = Scope {
+		mount: None,
+		scope: None,
+		mount_depth: 0
+	};
 }
 
 /*
@@ -112,14 +115,14 @@ lazy_static::lazy_static! {
  * Soped are ephemerial - if you join on top of a scoped path, it won't
  * inherit the scope unless you explicitly join e.g. `@scope/foo`.
  */
-// #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
-pub struct MountAndScope<'a> {
-	mount: Option<Cow<'a, Simple>>,
-	scope: Option<Cow<'a, Simple>>,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct Scope<'a> {
+	pub mount: Option<Cow<'a, Simple>>,
+	pub scope: Option<Cow<'a, Simple>>,
 	mount_depth: usize
 }
 
-impl<'a> MountAndScope<'a> {
+impl<'a> Scope<'a> {
 	pub fn new(mount: Option<Cow<'a, Simple>>, scope: Option<Cow<'a, Simple>>) -> Self {
 		let mount_depth = mount.as_ref().map(|mount| {
 			let simple: &Simple = mount.borrow();
@@ -128,28 +131,6 @@ impl<'a> MountAndScope<'a> {
 		Self { mount, scope, mount_depth }
 	}
 
-	pub fn root() -> MountAndScope<'static> {
-		ROOT_MAS.clone()
-	}
-	
-	pub fn replacement_root_prefix(&self) -> String {
-		let mut buf = "".to_owned();
-		for _ in 0..self.mount_depth {
-			buf.push_str("../")
-		}
-		buf
-	}
-
-	// todo remove
-	pub fn magic_ref(scope: &'a Scope<'a>) -> &'a Self {
-		todo!()
-	}
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
-pub struct Scope<'a>(Option<Cow<'a, Simple>>);
-
-impl<'a> Scope<'a> {
 	pub fn root() -> Scope<'static> {
 		ROOT_SCOPE.clone()
 	}
@@ -158,43 +139,51 @@ impl<'a> Scope<'a> {
 		&ROOT_SCOPE
 	}
 
-	pub fn owned(n: Simple) -> Scope<'static> {
-		Scope(Some(Cow::Owned(n)))
+	pub fn replacement_root_prefix(&self) -> String {
+		let mut buf = "".to_owned();
+		for _ in 0..self.mount_depth {
+			buf.push_str("../")
+		}
+		buf
 	}
 
-	pub fn borrowed(n: &'a Simple) -> Self {
-		Scope(Some(Cow::Borrowed(n)))
+	pub fn owned(n: Simple) -> Scope<'static> {
+		Scope::new(Some(Cow::Owned(n)), None)
 	}
-	
-	pub fn push_to(&self, path: &mut PathBuf) {
-		if let Some(ref content) = self.0 {
+
+	pub fn push_mount_to(&self, path: &mut PathBuf) {
+		if let Some(ref content) = self.mount {
 			path.push(content.as_path())
 		}
 	}
 
 	// Always expensive, removes all lifetime limits
 	pub fn clone(&self) -> Scope<'static> {
-		Scope(self.0.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())))
+		Scope {
+			mount: self.mount.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())),
+			scope: self.mount.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())),
+			mount_depth: self.mount_depth
+		}
 	}
 
 	// always cheap, but can't outlive the pointer it came from
 	pub fn copy(&'a self) -> Self {
-		Self(self.0.as_ref().map(|r| Cow::Borrowed((*r).deref())))
+		Self {
+			mount: self.mount.as_ref().map(|r| Cow::Borrowed((*r).deref())),
+			scope: self.scope.as_ref().map(|r| Cow::Borrowed((*r).deref())),
+			mount_depth: self.mount_depth
+		}
 	}
 
-	pub fn as_simple(&self) -> Option<&Simple> {
-		self.0.as_ref().map(|x| x.deref())
-	}
-	
 	pub fn join(&self, sub: CPath) -> CPath {
-		match &self.0 {
+		match &self.mount {
 			Some(base) => base.0.join(&sub),
 			None => sub
 		}
 	}
 
 	pub fn join_simple(&self, sub: Simple) -> Simple {
-		match &self.0 {
+		match &self.mount {
 			Some(base) => Simple(base.0.join(&sub)),
 			None => sub
 		}
@@ -242,8 +231,8 @@ impl<'a, T> Scoped<'a, T> {
 
 impl<'a, T: Display> Display for Scoped<'a, T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		if let Some(scope) = self.scope.as_simple() {
-			Display::fmt(&scope, f)?;
+		if let Some(mount) = self.scope.mount.as_ref() {
+			Display::fmt(&mount, f)?;
 			write!(f, "/")?;
 		}
 		Display::fmt(&self.value, f)
@@ -253,7 +242,7 @@ impl<'a, T: Display> Display for Scoped<'a, T> {
 impl<'a> Scoped<'a, Simple> {
 	// flatten a scoped simple into a single simple
 	pub fn flatten(&self) -> Simple {
-		match self.scope.0 {
+		match self.scope.mount {
 			None => self.value.to_owned(),
 			Some(ref scope) => Simple(scope.0.join(&self.value)),
 		}
@@ -298,9 +287,7 @@ lazy_static::lazy_static!{
 
 impl CPath {
 	pub fn new(s: String, scope: &Scope) -> Self {
-		// TODO promote this to the actual argument
-		let mas = MountAndScope::magic_ref(scope);
-		Self::canonicalize(s, mas)
+		Self::canonicalize(s, scope)
 	}
 
 	pub fn from_path_nonvirtual<P: AsRef<Path>>(p: P) -> Result<Self> {
@@ -315,7 +302,7 @@ impl CPath {
 	// two cpaths. Mistaken use of this function will silently drop @scope
 	// and @mount prefixes
 	pub fn new_nonvirtual(s: String) -> Self {
-		Self::canonicalize(s, &MountAndScope::root())
+		Self::canonicalize(s, &Scope::root())
 	}
 
 	pub fn as_path(&self) -> &Path {
@@ -375,7 +362,7 @@ impl CPath {
 		}
 	}
 
-	fn canonicalize(mut s: String, mas: &MountAndScope) -> Self {
+	fn canonicalize(mut s: String, mas: &Scope) -> Self {
 		// first thing, resolve virtualization
 		if s.starts_with("@scope/") {
 			let scope_ref: Option<&Simple> = mas.scope.as_ref().map(|x| x.borrow());
@@ -516,14 +503,14 @@ pub struct Unscoped(pub CPath);
 impl Unscoped {
 	// merge a scope and a CPath into a single path
 	pub fn from(path: CPath, scope: &Scope) -> Unscoped {
-		Unscoped(match scope.0 {
+		Unscoped(match scope.mount {
 			None => path,
 			Some(ref scope) => scope.join(path.as_ref()),
 		})
 	}
 
 	pub fn from_ref(path: &CPath, scope: &Scope) -> Unscoped {
-		Unscoped(match scope.0 {
+		Unscoped(match scope.mount {
 			None => path.to_owned(),
 			Some(ref scope) => scope.join(path),
 		})
@@ -688,7 +675,7 @@ mod test {
 	}
 
 	fn p_virtual(s: &str, mount: Option<&str>, scope: Option<&str>) -> CPath {
-		let mas = MountAndScope::new(
+		let mas = Scope::new(
 			mount.map(|s| Cow::Owned(CPath::new_nonvirtual(s.to_owned()).into_simple().unwrap())),
 			scope.map(|s| Cow::Owned(CPath::new_nonvirtual(s.to_owned()).into_simple().unwrap())),
 		);
