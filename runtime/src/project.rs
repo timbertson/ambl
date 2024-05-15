@@ -280,13 +280,37 @@ impl ProjectRule {
 	}
 }
 
+#[derive(Clone, Debug)]
+pub enum IncludeOrMount {
+	Include(ScopedInclude),
+	Mount(ScopedMount),
+}
+
+impl IncludeOrMount {
+	fn relative_mount(&self) -> Option<&Simple> {
+		match self {
+			// includes don't have mounts, only scopes
+			IncludeOrMount::Include(x) => None,
+			IncludeOrMount::Mount(x) => Some(&x.path),
+		}
+	}
+}
+
+impl ContainsPath for IncludeOrMount {
+	fn contains_path(&self, name: &str) -> bool {
+		match self {
+			IncludeOrMount::Include(x) => x.contains_path(name),
+			IncludeOrMount::Mount(x) => x.contains_path(name),
+		}
+	}
+}
+
 // A wrapper encapsulating a single include's state,
 // from initial -> loading -> loaded
 #[derive(Clone, Debug)]
 pub enum MutableRule {
 	// TODO: an Include and a Mount share most of their logic. Merge?
-	Include(ScopedInclude), // before loading
-	Mount(ScopedMount), // before loading
+	Include(IncludeOrMount), // before loading
 	Nested(Nested), // after loading
 	Loading(), // during loading.
 	// TODO when we support parallelism, this will need to indicate
@@ -391,13 +415,13 @@ impl ProjectRule {
 				let path = spec.get_module().to_owned().map(|m| CPath::new(m, base_scope));
 				let config = IncludeConfig::WASM(spec.get_config().to_owned());
 				let fn_name = spec.get_fn_name().as_deref().unwrap_or("get_rules").to_owned();
-				let include = ScopedInclude { path, relative_scope, config, fn_name };
+				let include = IncludeOrMount::Include(ScopedInclude { path, relative_scope, config, fn_name });
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(include))))
 			},
 			NonConfigRule::Mount(spec) => {
 				let path = Simple::try_from(spec.get_path().to_owned(), base_scope)?;
-				let mount = ScopedMount { path };
-				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Mount(mount))))
+				let mount = IncludeOrMount::Mount(ScopedMount { path });
+				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(mount))))
 			},
 		}
 	}
@@ -612,11 +636,11 @@ impl<M: BuildModule> Project<M> {
 				Ok((project, None))
 			},
 
-			MutableRule::Mount(mount) => {
-				if V::should_include(ctx, mount) {
+			MutableRule::Include(embedded) => {
+				if V::should_include(ctx, embedded) {
 					// release borrow of rule
-					let mount = mount.to_owned();
-					debug!("Loading mount {:?}", &mount);
+					let embedded = embedded.to_owned();
+					debug!("Loading embedded {:?} (scope {:?})", &embedded, scope);
 					let mut handle = readable.unlock();
 
 					result_block(|| {
@@ -625,77 +649,84 @@ impl<M: BuildModule> Project<M> {
 							Ok(())
 						})?;
 
-						let simple_yaml_path = mount.path.join(&CPath::new_nonvirtual("ambl.yaml".to_owned()));
-						let explicit_path = Scoped::new(scope.copy(), &simple_yaml_path);
-						let module_path = ResolveModule {
-							explicit_path: Some(explicit_path),
-							source_module,
-						}.resolve()?;
-
-						let rules = {
-							let (project_ret, rules) = Self::load_yaml_rules(
-								project,
-								parent_implicits,
-								&module_path,
-								&BuildReason::Import
-							).context("loading YAML rules")?;
-							project = project_ret;
-							rules
-						};
-
-						let mut absolute_scope = scope.clone();
-						absolute_scope.push_mount(&mount.path);
-
-						handle.with_write(|writeable| {
-							let (implicits, project_rules) = ProjectRule::collate_raw_rules(
-								parent_implicits.clone(), scope, rules)?;
-
-							let nested = MutableRule::Nested(Nested {
-								implicits,
-								module_path: None,
-								rules: project_rules,
-								relative_mount: Some(mount.path.clone()),
-								absolute_scope,
-							});
-							debug!("Import produced these rules: {:?}", &nested);
-							*writeable = nested;
-							Ok(())
-						})?;
-
-						// reevaluate after replacing, this will drop into the Rule::Nested branch
-						Self::visit_importable_rule::<V>(project, parent_implicits, rule_ref, scope, source_module, ctx)
-					}).with_context(|| format!("loading include {:?}", &mount))
-				} else {
-					debug!("Skipping irrelevant include: {:?}", &mount);
-					Ok((project, None))
-				}
-			},
-
-			MutableRule::Include(include) => {
-				if V::should_include(ctx, include) {
-					// release borrow of rule
-					let include = include.to_owned();
-					debug!("Loading include {:?} (scope {:?})", &include, scope);
-					let mut handle = readable.unlock();
-
-					result_block(|| {
-						handle.with_write(|writeable| {
-							*writeable = MutableRule::Loading();
-							Ok(())
-						})?;
-
-						let explicit_path = include.path.as_ref()
-							.map(|cpath| Scoped::new(scope.copy(), cpath));
-						let module_path = ResolveModule {
-							explicit_path,
-							source_module,
-						}.resolve()?;
+						// the wasm module path (only set when loading a WASM module)
 						let mut wasm_module_path = None;
+						
+						// the scope used when evaluating functions from this module
+						// (mutated in both IncludeOrMount branches)
 						let mut module_scope = scope.clone();
-						module_scope.set_scope(include.relative_scope.clone());
+						
+						let rules = match &embedded {
+							IncludeOrMount::Include(include) => {
+								module_scope.set_scope(include.relative_scope.clone());
 
-						let rules = match include.config {
-							IncludeConfig::YAML => {
+								let explicit_path = include.path.as_ref()
+									.map(|cpath| Scoped::new(scope.copy(), cpath));
+								let module_path = ResolveModule {
+									explicit_path,
+									source_module,
+								}.resolve()?;
+
+								match include.config {
+									IncludeConfig::YAML => {
+										let (project_ret, rules) = Self::load_yaml_rules(
+											project,
+											parent_implicits,
+											&module_path,
+											&BuildReason::Import
+										).context("loading YAML rules")?;
+										project = project_ret;
+										rules
+									},
+
+									IncludeConfig::WASM(ref config) => {
+										let request = BuildRequest::WasmCall(ResolvedFnSpec {
+											scope: module_scope.clone(),
+											fn_name: include.fn_name.to_owned(),
+											full_module: module_path.clone(),
+											config: config.to_owned(),
+										});
+										wasm_module_path = Some(module_path);
+
+										let (project_ret, persist_dep) = Project::build(project,
+											parent_implicits,
+											&request,
+											&BuildReason::Import)?;
+
+										let mut rules: Vec<Rule> = match persist_dep.result.result {
+											BuildResult::Wasm(jvalue) => serde_json::from_value(jvalue.to_owned())
+												.with_context(|| format!("Deserializing JSON as a list of Rules:\n```\n{}\n```", &jvalue))?,
+											other => {
+												return Err(anyhow!("Unexpected wasm call response: {:?}", other));
+											},
+										};
+										project = project_ret;
+
+										// An include's scope is applied directly to Targets - all other rules
+										// (includes, mounts) only receive scoping if they explicitly
+										// use @scope/*
+										if let Some(rule_scope) = module_scope.scope.as_ref() {
+											for rule in rules.iter_mut() {
+												match rule {
+													Rule::Target(t) => {
+														let prefix = format!("{}/", rule_scope.as_str());
+														for name in t.names.iter_mut() {
+															name.insert_str(0, &prefix);
+														}
+													}
+													_ => (),
+												}
+											}
+										}
+										rules
+									},
+								}
+							},
+							IncludeOrMount::Mount(mount) => {
+								module_scope.push_mount(&mount.path);
+
+								let simple_yaml_path = mount.path.join(&CPath::new_nonvirtual("ambl.yaml".to_owned()));
+								let module_path = Unscoped::from_scoped(&Scoped::new(scope.copy(), &simple_yaml_path));
 								let (project_ret, rules) = Self::load_yaml_rules(
 									project,
 									parent_implicits,
@@ -704,49 +735,7 @@ impl<M: BuildModule> Project<M> {
 								).context("loading YAML rules")?;
 								project = project_ret;
 								rules
-							},
-
-							IncludeConfig::WASM(ref config) => {
-								let request = BuildRequest::WasmCall(ResolvedFnSpec {
-									scope: module_scope.clone(),
-									fn_name: include.fn_name.to_owned(),
-									full_module: module_path.clone(),
-									config: config.to_owned(),
-								});
-								wasm_module_path = Some(module_path);
-
-								let (project_ret, persist_dep) = Project::build(project,
-									parent_implicits,
-									&request,
-									&BuildReason::Import)?;
-
-								let mut rules: Vec<Rule> = match persist_dep.result.result {
-									BuildResult::Wasm(jvalue) => serde_json::from_value(jvalue.to_owned())
-										.with_context(|| format!("Deserializing JSON as a list of Rules:\n```\n{}\n```", &jvalue))?,
-									other => {
-										return Err(anyhow!("Unexpected wasm call response: {:?}", other));
-									},
-								};
-								project = project_ret;
-
-								// An include's scope is applied directly to Targets - all other rules
-								// (includes, mounts) only receive scoping if they explicitly
-								// use @scope/*
-								if let Some(rule_scope) = module_scope.scope.as_ref() {
-									for rule in rules.iter_mut() {
-										match rule {
-											Rule::Target(t) => {
-												let prefix = format!("{}/", rule_scope.as_str());
-												for name in t.names.iter_mut() {
-													name.insert_str(0, &prefix);
-												}
-											}
-											_ => (),
-										}
-									}
-								}
-								rules
-							},
+							}
 						};
 						
 
@@ -757,10 +746,7 @@ impl<M: BuildModule> Project<M> {
 								implicits,
 								module_path: wasm_module_path,
 								rules: project_rules,
-								
-								// includes can set a scope, but scopes aren't inherited
-								// so we don't alter the mount
-								relative_mount: None,
+								relative_mount: embedded.relative_mount().cloned(),
 								absolute_scope: module_scope,
 							});
 							debug!("Import produced these rules: {:?}", &nested);
@@ -770,9 +756,9 @@ impl<M: BuildModule> Project<M> {
 
 						// reevaluate after replacing, this will drop into the Rule::Nested branch
 						Self::visit_importable_rule::<V>(project, parent_implicits, rule_ref, scope, source_module, ctx)
-					}).with_context(|| format!("loading include {:?}", &include))
+					}).with_context(|| format!("loading embedded {:?}", &embedded))
 				} else {
-					debug!("Skipping irrelevant include: {:?}", &include);
+					debug!("Skipping irrelevant embed: {:?}", &embedded);
 					Ok((project, None))
 				}
 			},
