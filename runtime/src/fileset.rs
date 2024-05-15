@@ -87,7 +87,7 @@ use ambl_common::rule::dsl::*;
 	fn globs(f: FilesetDependency) -> Vec<FileSelectionGlob> {
 		let FilesetDependency { root, dirs, files } = f;
 		let res = ResolvedFilesetDependency {
-			root: Unscoped::new(root),
+			root: Unscoped(CPath::new_nonvirtual(root)),
 			dirs,
 			files,
 		};

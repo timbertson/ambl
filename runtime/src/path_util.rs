@@ -4,6 +4,8 @@ use log::*;
 use core::fmt;
 use std::ffi::OsStr;
 use std::iter;
+use std::ops::DerefMut;
+use std::str::FromStr;
 use std::{ops::Deref, sync::Arc, fmt::{Display, Debug}, path::Components};
 use serde::{Deserialize, Serialize};
 use std::{path::{Path, PathBuf, Component}, fs::{self, Metadata}, io, os::unix::prelude::PermissionsExt, borrow::{Cow, Borrow}};
@@ -100,13 +102,41 @@ pub fn lexists<P: AsRef<Path>>(p: P) -> Result<bool> {
 }
 
 lazy_static::lazy_static! {
-	static ref ROOT_SCOPE: Scope<'static> = Scope(None);
+	static ref ROOT_SCOPE: Scope<'static> = Scope {
+		mount: None,
+		scope: None,
+		mount_depth: 0
+	};
 }
 
+/*
+ * Joining rules:
+ *
+ * Mounts always inherit from their parents.
+ * Soped are ephemerial - if you join on top of a scoped path, it won't
+ * inherit the scope unless you explicitly join e.g. `@scope/foo`.
+ */
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
-pub struct Scope<'a>(Option<Cow<'a, Simple>>);
+pub struct Scope<'a> {
+	pub mount: Option<Cow<'a, Simple>>,
+	pub scope: Option<Cow<'a, Simple>>,
+	mount_depth: usize
+}
 
 impl<'a> Scope<'a> {
+	pub fn new(mount: Option<Cow<'a, Simple>>, scope: Option<Cow<'a, Simple>>) -> Self {
+		let mut ret = Self { mount, scope, mount_depth: 0 };
+		ret.set_mount_depth();
+		ret
+	}
+	
+	fn set_mount_depth(&mut self) {
+		self.mount_depth = self.mount.as_ref().map(|mount| {
+			let simple: &Simple = mount.borrow();
+			simple.as_str().chars().filter(|c| *c == '/').count() + 1
+		}).unwrap_or(0);
+	}
+
 	pub fn root() -> Scope<'static> {
 		ROOT_SCOPE.clone()
 	}
@@ -115,46 +145,53 @@ impl<'a> Scope<'a> {
 		&ROOT_SCOPE
 	}
 
-	pub fn owned(n: Simple) -> Scope<'static> {
-		Scope(Some(Cow::Owned(n)))
+	pub fn path_to_root(&self) -> String {
+		let mut buf = ".".to_owned();
+		for _ in 0..self.mount_depth {
+			buf.push_str("/..")
+		}
+		buf
 	}
 
-	pub fn borrowed(n: &'a Simple) -> Self {
-		Scope(Some(Cow::Borrowed(n)))
-	}
-	
-	pub fn push_to(&self, path: &mut PathBuf) {
-		if let Some(ref content) = self.0 {
+	pub fn push_mount_to(&self, path: &mut PathBuf) {
+		if let Some(ref content) = self.mount {
 			path.push(content.as_path())
 		}
 	}
 
 	// Always expensive, removes all lifetime limits
 	pub fn clone(&self) -> Scope<'static> {
-		Scope(self.0.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())))
+		Scope {
+			mount: self.mount.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())),
+			scope: self.scope.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())),
+			mount_depth: self.mount_depth
+		}
 	}
 
 	// always cheap, but can't outlive the pointer it came from
 	pub fn copy(&'a self) -> Self {
-		Self(self.0.as_ref().map(|r| Cow::Borrowed((*r).deref())))
-	}
-
-	pub fn as_simple(&self) -> Option<&Simple> {
-		self.0.as_ref().map(|x| x.deref())
+		Self {
+			mount: self.mount.as_ref().map(|r| Cow::Borrowed((*r).deref())),
+			scope: self.scope.as_ref().map(|r| Cow::Borrowed((*r).deref())),
+			mount_depth: self.mount_depth
+		}
 	}
 	
-	pub fn join(&self, sub: CPath) -> CPath {
-		match &self.0 {
-			Some(base) => base.0.join(&sub),
-			None => sub
+	// adding a mount removes the scope
+	pub fn push_mount(&mut self, scope: &Simple) {
+		self.scope = None;
+		match self.mount.as_mut() {
+			Some(existing) => existing.to_mut().push_simple(scope),
+			None => {
+				self.mount = Some(Cow::Owned(scope.to_owned()));
+			}
 		}
+		self.set_mount_depth();
 	}
 
-	pub fn join_simple(&self, sub: Simple) -> Simple {
-		match &self.0 {
-			Some(base) => Simple(base.0.join(&sub)),
-			None => sub
-		}
+	// setting a scope replaces an existing one
+	pub fn set_scope(&mut self, scope: Option<Simple>) {
+		self.scope = scope.map(Cow::Owned)
 	}
 }
 
@@ -199,8 +236,8 @@ impl<'a, T> Scoped<'a, T> {
 
 impl<'a, T: Display> Display for Scoped<'a, T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		if let Some(scope) = self.scope.as_simple() {
-			Display::fmt(&scope, f)?;
+		if let Some(mount) = self.scope.mount.as_ref() {
+			Display::fmt(&mount, f)?;
 			write!(f, "/")?;
 		}
 		Display::fmt(&self.value, f)
@@ -210,7 +247,7 @@ impl<'a, T: Display> Display for Scoped<'a, T> {
 impl<'a> Scoped<'a, Simple> {
 	// flatten a scoped simple into a single simple
 	pub fn flatten(&self) -> Simple {
-		match self.scope.0 {
+		match self.scope.mount {
 			None => self.value.to_owned(),
 			Some(ref scope) => Simple(scope.0.join(&self.value)),
 		}
@@ -226,6 +263,7 @@ impl <'a, C: Clone> Clone for Scoped<'a, C> {
 // a "canonical" PathBuf which is:
 // - always a valid string
 // - normalized, i.e. contains no trailing `/`, and no internal `../` (but may start with one or more ../ segments)
+// - has virtual path segments resolved (i.e. a leading @scope or @root)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum CPath {
 	P(PathBuf),
@@ -253,14 +291,23 @@ lazy_static::lazy_static!{
 }
 
 impl CPath {
-	pub fn new(mut s: String) -> Self {
-		if let Some(builtin) = s.strip_prefix("builtin:") {
-			let mut owned_path = BUILTINS_ROOT.to_owned();
-			owned_path.push(format!("ambl_builtin_{}.wasm", builtin));
-			s = string_of_pathbuf(owned_path)
-		}
+	pub fn new(s: String, scope: &Scope) -> Self {
+		Self::canonicalize(s, scope)
+	}
 
-		Self::canonicalize(PathBuf::from(s))
+	pub fn from_path_nonvirtual<P: AsRef<Path>>(p: P) -> Result<Self> {
+		let s = p.as_ref().as_os_str().to_str().ok_or_else(|| {
+			anyhow!("Path is not valid utf8")
+		})?;
+		Ok(Self::new_nonvirtual(s.to_owned()))
+	}
+	
+	// To be used only when we know the path can't contain virtual
+	// prefixes, e.g loaded from serialization or we're concatenating
+	// two cpaths. Mistaken use of this function will silently drop @scope
+	// and @mount prefixes
+	pub fn new_nonvirtual(s: String) -> Self {
+		Self::canonicalize(s, &Scope::root())
 	}
 
 	pub fn as_path(&self) -> &Path {
@@ -300,7 +347,7 @@ impl CPath {
 
 	fn is_canon(p: &PathBuf) -> bool {
 		let s: &str = str_of_path(p);
-		// treat traling slash as non-canon (unless it's "/")
+		// treat trailing slash as non-canon (unless it's "/")
 		if s.ends_with(|c| c == '/' || c == '\\') && s != "/" {
 			false
 		} else {
@@ -320,7 +367,22 @@ impl CPath {
 		}
 	}
 
-	fn canonicalize(orig: PathBuf) -> Self {
+	fn canonicalize(mut s: String, scope: &Scope) -> Self {
+		// first thing, resolve virtualization
+		if s.starts_with("@scope/") {
+			let scope_ref: Option<&Simple> = scope.scope.as_ref().map(|x| x.borrow());
+			let replacement = scope_ref.map(|x| x.as_str());
+			s.replace_range(0..6, replacement.unwrap_or("."));
+		} else if s.starts_with("@root/") {
+			s.replace_range(0..5, &scope.path_to_root());
+		} else if let Some(builtin) = s.strip_prefix("builtin:") {
+			// TODO rename @builtin/?
+			let mut owned_path = BUILTINS_ROOT.to_owned();
+			owned_path.push(format!("ambl_builtin_{}.wasm", builtin));
+			s = string_of_pathbuf(owned_path)
+		}
+
+		let orig = PathBuf::from(s);
 		if Self::is_canon(&orig) {
 			Self::P(orig)
 		} else {
@@ -328,16 +390,27 @@ impl CPath {
 			if iter::once(Component::CurDir).eq(orig.components()) {
 				return Self::Cwd
 			}
+			let mut depth = 0;
 			for part in orig.components() {
 				match part {
-					Component::RootDir => ret.push(Component::RootDir),
+					Component::RootDir => {
+						ret.push(Component::RootDir);
+						depth = 0;
+					},
 					Component::CurDir => (),
 					Component::ParentDir => {
-						if !ret.pop() {
+						if depth > 0 {
+							let popped = ret.pop();
+							assert!(popped == true);
+						} else {
 							ret.push("..");
 						}
+						depth -= 1;
 					},
-					Component::Normal(s) => ret.push(s),
+					Component::Normal(s) => {
+						ret.push(s);
+						depth += 1;
+					}
 					Component::Prefix(_) => todo!(),
 				}
 			}
@@ -357,6 +430,16 @@ impl CPath {
 		}
 	}
 	
+	pub fn push_simple(&mut self, other: &Simple) {
+		// Simples can just be concatenated
+		match self {
+			Self::P(ref mut p) => p.push(other.as_path()),
+			Self::Cwd => {
+				*self = other.0.to_owned();
+			}
+		}
+	}
+
 	pub fn join(&self, other: &CPath) -> Self {
 		match (self, other) {
 			(Self::Cwd, other) => other.to_owned(),
@@ -364,11 +447,9 @@ impl CPath {
 			(Self::P(p_self), Self::P(p_other)) => {
 				Self::P(match other.kind() {
 					Kind::Simple => {
-						// Simples can just be concatenated
-						let path: &Path = self.as_ref();
-						let mut buf = p_self.to_owned();
-						buf.push::<&Path>(p_other);
-						buf
+						let mut ret = p_self.to_owned();
+						ret.push(other.as_path());
+						ret
 					},
 
 					Kind::Absolute => {
@@ -412,16 +493,6 @@ impl AsRef<CPath> for CPath {
 	}
 }
 
-impl TryFrom<PathBuf> for CPath {
-	type Error = Error;
-	fn try_from(p: PathBuf) -> Result<Self> {
-		let s = p.into_os_string().into_string().map_err(|_| {
-			anyhow!("Path is not valid utf8")
-		})?;
-		Ok(CPath::new(s))
-	}
-}
-
 impl Into<String> for CPath {
 	fn into(self) -> String {
 		let pb: PathBuf = self.into();
@@ -453,30 +524,25 @@ impl AsRef<str> for CPath {
 // Small wrapper for declaring that a path is relative to the project root, and does not need a scope
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Unscoped(pub CPath);
-impl Unscoped {
-	pub fn new(s: String) -> Unscoped {
-		Unscoped(CPath::new(s))
-	}
-}
 
 impl Unscoped {
 	// merge a scope and a CPath into a single path
 	pub fn from(path: CPath, scope: &Scope) -> Unscoped {
-		Unscoped(match scope.0 {
+		Unscoped(match scope.mount {
 			None => path,
 			Some(ref scope) => scope.join(path.as_ref()),
 		})
 	}
 
 	pub fn from_ref(path: &CPath, scope: &Scope) -> Unscoped {
-		Unscoped(match scope.0 {
+		Unscoped(match scope.mount {
 			None => path.to_owned(),
 			Some(ref scope) => scope.join(path),
 		})
 	}
 
 	pub fn from_string(path: String, scope: &Scope) -> Unscoped {
-		Self::from(CPath::new(path), scope)
+		Self::from(CPath::new(path, scope), scope)
 	}
 
 	pub fn from_scoped<P: AsRef<CPath>>(path: &Scoped<P>) -> Unscoped {
@@ -515,6 +581,16 @@ impl Simple {
 		let prefix: &str = self.0.as_ref();
 		s.strip_prefix(prefix).and_then(|s| s.strip_prefix("/"))
 	}
+	
+	pub fn try_from(s: String, scope: &Scope) -> Result<Self> {
+		let c = CPath::new(s, scope);
+		if c.kind() == Kind::Simple {
+			Ok(Self(c))
+		} else {
+			Err(anyhow!("Not a simple path: {:?}", c))
+		}
+	}
+
 }
 
 impl AsRef<CPath> for Simple {
@@ -528,6 +604,12 @@ impl Deref for Simple {
 
 	fn deref(&self) -> &Self::Target {
 		&self.0
+	}
+}
+
+impl DerefMut for Simple {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.0
 	}
 }
 
@@ -546,19 +628,6 @@ impl Into<Unscoped> for Simple {
 impl Display for Simple {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		Display::fmt(&self.0, f)
-	}
-}
-
-impl TryFrom<String> for Simple {
-	type Error = Error;
-
-	fn try_from(s: String) -> Result<Self> {
-		let c = CPath::new(s);
-		if c.kind() == Kind::Simple {
-			Ok(Self(c))
-		} else {
-			Err(anyhow!("Not a simple path: {:?}", c))
-		}
 	}
 }
 
@@ -607,13 +676,6 @@ pub enum Kind {
 	Absolute,
 }
 
-#[derive(Clone, Debug)]
-pub enum Virtual<T: Debug + Clone> {
-	Scope(T), // @scope/*
-	Root(T), // @root/*
-	Plain(T), // *
-}
-
 pub struct ResolveModule<'a> {
 	pub source_module: Option<&'a Unscoped>,
 	pub explicit_path: Option<Scoped<'a, &'a CPath>>,
@@ -633,11 +695,23 @@ mod test {
 	use super::*;
 	
 	fn p(s: &str) -> CPath {
-		CPath::new(s.to_owned())
+		CPath::new_nonvirtual(s.to_owned())
+	}
+	
+	fn simple(s: &str) -> Simple {
+		CPath::new_nonvirtual(s.to_owned()).into_simple().unwrap()
 	}
 
-	fn s(s: &str) -> Scope {
-		Scope::owned(p(s).into_simple().unwrap())
+	fn p_virtual(s: &str, mount: Option<&str>, scope: Option<&str>) -> CPath {
+		let scope = Scope::new(
+			mount.map(|s| Cow::Owned(simple(s))),
+			scope.map(|s| Cow::Owned(simple(s))),
+		);
+		CPath::new(s.to_owned(), &scope)
+	}
+
+	fn mount(s: &str) -> Scope {
+		Scope::new(Some(Cow::Owned(simple(s))), None)
 	}
 
 	#[test]
@@ -652,12 +726,38 @@ mod test {
 
 		assert_eq!(p("../z").as_str(), "../z");
 		assert_eq!(p("../../z").as_str(), "../../z");
+		assert_eq!(p("./../../z").as_str(), "../../z");
 		assert_eq!(p("../z").kind(), Kind::External);
+		assert_eq!(p("builtin:x"), p(&format!("{}/ambl_builtin_x.wasm", BUILTINS_ROOT.display())));
+	}
+
+	#[test]
+	fn test_virtualisation() {
+		assert_eq!(mount("x/y").path_to_root(), "./../..");
+		assert_eq!(Scope::new(None, None).path_to_root(), ".");
+
+		assert_eq!(p_virtual("@scope/x", None, None), p("x"));
+		assert_eq!(p_virtual("@scope/x", Some("mount"), Some("scope")), p("scope/x"));
+		assert_eq!(p_virtual("@scope/../x", Some("mount"), Some("some/internal/scope")), p("some/internal/x"));
+
+		assert_eq!(p_virtual("@root/x", None, None), p("x"));
+		assert_eq!(p_virtual("@root/../x", None, None), p("../x"));
+		assert_eq!(p_virtual("@root/../x", None, Some("scope")), p("../x"));
+		
+		// @root undoes the effect of a mount
+		assert_eq!(p_virtual("@root/x", Some("subdir"), None), p("../x"));
+		assert_eq!(p_virtual("@root/../x", Some("subdir"), Some("scope")), p("../../x"));
+		assert_eq!(p_virtual("@root/x", Some("nested/subdir"), Some("scope")), p("../../x"));
+		
+		let mut scope_mut = Scope::root();
+		scope_mut.push_mount(&p("mnt").into_simple().unwrap());
+		assert_eq!(CPath::new("@root/x".to_owned(), &scope_mut), p("../x"));
+
 	}
 
 	#[test]
 	fn test_join() {
-		let scope = Scope::owned(p("x/y").into_simple().unwrap());
+		let scope = mount("x/y");
 		let join = |s: &str| Unscoped::from_string(s.to_owned(), &scope);
 		assert_eq!(join("foo/bar").0, p("x/y/foo/bar"));
 		assert_eq!(join("../z").0, p("x/z"));

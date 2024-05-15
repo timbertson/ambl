@@ -37,7 +37,10 @@ fn run_can_only_see_dependencies() -> Result<()> {
 			c.build("checksum")?;
 			c.build("plain_file_dep")?;
 			let files = c.run(cmd("ls").arg("-1").stdout(Stdout::Return))?.into_string()?;
-			let mut lines: Vec<&str> = files.lines().filter(|l| !l.ends_with(".wasm")).collect();
+			let mut lines: Vec<&str> = files.lines()
+				.filter(|l| !l.ends_with(".wasm"))
+				.filter(|l| !l.starts_with("@"))
+				.collect();
 			lines.sort();
 			for line in lines {
 				p.record(line);
@@ -182,13 +185,13 @@ fn test_can_create_output() -> Result<()> {
 		};
 
 		p.target_builder("target", builder);
-		assert_eq!(p.build_file_contents("target")?, ".ambl/tmp/target");
+		assert_eq!(p.build_file_contents("target")?, ".ambl/tmp/target\n");
 
 		p.target_builder("subdir/target", builder);
-		assert_eq!(p.build_file_contents("subdir/target")?, ".ambl/tmp/subdir/target");
+		assert_eq!(p.build_file_contents("subdir/target")?, ".ambl/tmp/subdir/target\n");
 
-		p.target_builder_scoped("scope", "subdir/target", builder);
-		assert_eq!(p.build_file_contents("scope/subdir/target")?, ".ambl/tmp/scope/subdir/target");
+		p.target_builder_module(p.new_module().set_scope("scope"), "subdir/target", builder);
+		assert_eq!(p.build_file_contents("scope/subdir/target")?, ".ambl/tmp/scope/subdir/target\n");
 		
 		Ok(())
 	})

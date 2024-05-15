@@ -73,6 +73,7 @@ impl<'a> PartialEq<Vec<String>> for Log {
 pub struct TestModule<'a> {
 	pub name: String,
 	pub scope: Option<String>,
+	pub mount: Option<String>,
 	pub project: &'a TestProject<'a>,
 	module_path: Unscoped,
 	_rules: Vec<Rule>,
@@ -89,10 +90,11 @@ impl<'a> TestModule<'a> {
 		Self {
 			// NOTE: these get replaced by set_name below
 			name: "".to_owned(),
-			module_path: Unscoped::new("".to_owned()),
+			module_path: Unscoped(CPath::new_nonvirtual("".to_owned())),
 
 			project,
 			scope: Default::default(),
+			mount: Default::default(),
 			_rules: Default::default(),
 			rule_fn: Default::default(),
 			builders: Default::default(),
@@ -113,12 +115,17 @@ impl<'a> TestModule<'a> {
 
 	pub fn set_name<S: ToString>(mut self, v: S) -> Self {
 		self.name = v.to_string();
-		self.module_path = Unscoped::new(v.to_string());
+		self.module_path = Unscoped(CPath::new_nonvirtual(v.to_string()));
 		self
 	}
 
 	pub fn set_scope<S: ToString>(mut self, v: S) -> Self {
 		self.scope = Some(v.to_string());
+		self
+	}
+
+	pub fn set_mount<S: ToString>(mut self, v: S) -> Self {
+		self.mount = Some(v.to_string());
 		self
 	}
 
@@ -305,7 +312,7 @@ impl<'a> TestProject<'a> {
 		let ui = Ui::test();
 		// silly mac has a /tmp symlink
 		let root_abs = fs::canonicalize(root.path())?;
-		let project = Project::new(CPath::new(root_abs.to_str().unwrap().to_owned()).into_absolute()?, ui.writer())?;
+		let project = Project::new(CPath::from_path_nonvirtual(root_abs)?.into_absolute()?, ui.writer())?;
 		let token = ActiveBuildToken::generate();
 
 		let handle = project.handle();
@@ -359,19 +366,16 @@ impl<'a> TestProject<'a> {
 			.inject_module(m)
 	}
 
-	// scoped version of target_builder
-	pub fn target_builder_scoped<S1: ToString, S2: ToString>
-		(&'a self, scope: S1, target_name: S2, f: BuilderFn) -> &Self
+	pub fn target_builder_module<S1: ToString>
+		(&'a self, m: TestModule<'a>, target_name: S1, f: BuilderFn) -> &Self
 	{
 		let target_name = target_name.to_string();
-		let m = self.new_module().set_scope(scope.to_string())
+		self.inject_rules_module(m
 			.rule(dsl::target(&target_name, FunctionSpec::from(DEFAULT_BUILD_FN)))
-			.builder(f);
-		self
-			.inject_rule(dsl::target(&target_name, dsl::module(&m.name).function(DEFAULT_BUILD_FN)))
-			.inject_module(m)
+			.builder(f)
+		)
 	}
-	
+
 	// low-level module / rule modification
 	pub fn inject_rule<R: Into<Rule>>(&self, v: R) -> &Self {
 		let mut r = self.rules.lock().unwrap();
@@ -384,22 +388,39 @@ impl<'a> TestProject<'a> {
 
 	// injects a module and includes it in the root ruleset
 	pub fn inject_rules_module(&self, m: TestModule<'a>) -> &Self {
-		let mod_dsl = dsl::module(&m.name);
-		let rule = match m.scope {
-			None => dsl::include(mod_dsl),
-			Some(ref scope) => dsl::include(mod_dsl.scope(scope)),
+		let rule = match m.mount {
+			None => Self::include_for_test_module(&m),
+			Some(ref mount) => dsl::mount(mount),
 		};
 		self.inject_rule(rule);
 		self.inject_module(m)
 	}
+	
+	fn include_for_test_module(m: &TestModule) -> Rule {
+		let mod_dsl = dsl::module(&m.name);
+		match m.scope {
+			None => dsl::include(mod_dsl),
+			Some(ref scope) => dsl::include(mod_dsl.scope(scope)),
+		}
+	}
 
 	pub fn inject_module(&self, v: TestModule<'a>) -> &Self {
 		let mut p = self.lock();
-		let s = v.name.to_owned();
-		p.inject_module(&s, v);
-		// mark the module file as fresh to skip having to write an actual file
+		let mut full_path = v.name.to_owned();
+		if let Some(mount) = v.mount.as_ref() {
+			let simple_path = v.name.to_owned();
+			full_path = format!("{}/{}", mount, full_path);
+			// mounted modules must be loaded via a yaml entrypoint:
+			let yaml_path = format!("{}/ambl.yaml", mount);
+			let rules = vec!(Self::include_for_test_module(&v));
+			let contents = serde_yaml::to_string(&rules).expect("serialize rules");
+			self.write_file(yaml_path, contents).expect("write ambl.yaml");
+		}
+
+		p.inject_module(&full_path, v);
+		// mark the module file as fresh to avoid loading a real .wasm file
 		p.inject_cache(
-			BuildRequest::FileDependency(Unscoped::new(s)),
+			BuildRequest::FileDependency(Unscoped(CPath::new_nonvirtual(full_path))),
 			BuildResultWithDeps::simple(BuildResult::File(FAKE_FILE.clone()))
 		).expect("inject_module");
 		drop(p);
@@ -414,7 +435,7 @@ impl<'a> TestProject<'a> {
 			checksum: PersistChecksum::Disabled,
 		};
 		p.inject_cache(
-			BuildRequest::FileDependency(Unscoped::new(v.into())),
+			BuildRequest::FileDependency(Unscoped(CPath::new_nonvirtual(v.into()))),
 			BuildResultWithDeps::simple(BuildResult::File(stat))
 		).expect("touch_fake");
 		drop(p);
@@ -453,7 +474,7 @@ impl<'a> TestProject<'a> {
 	}
 
 	fn invoke_full(&self, req: &Invoke) -> Result<InvokeResponse> {
-		let module = Unscoped::new("_fake_root_module".to_owned());
+		let module = Unscoped(CPath::new_nonvirtual("_fake_root_module".to_owned()));
 		let target_context = TargetContext {
 			scope: Scope::root(),
 			implicits: Default::default(),

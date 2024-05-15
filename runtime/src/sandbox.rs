@@ -16,7 +16,7 @@ use anyhow::*;
 use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare};
 
 use crate::build::BuildReason;
-use crate::build_request::BuildRequest;
+use crate::build_request::{BuildRequest, ResolvedCommand};
 use crate::persist::{DepSet, BuildResult};
 use crate::project::{Project, ProjectMutexPair, ProjectSandbox, Implicits};
 use crate::sync::{Mutexed, MutexHandle};
@@ -24,29 +24,6 @@ use crate::path_util::{lexists, Absolute, CPath, External, Scope, Scoped, Simple
 use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::{DependencyRequest, ui};
-
-pub struct InternalCommand<'a> {
-	scope: &'a Scope<'a>,
-	mount_depth: u32,
-	cmd: GenCommand<Unscoped>,
-}
-impl<'a> InternalCommand<'a> {
-	pub fn wrap(cmd_str: GenCommand<String>, scope: &'a Scope, mount_depth: u32) -> Self {
-		Self {
-			scope,
-			mount_depth,
-			cmd: cmd_str.convert(|s| {
-				Unscoped::from_string(s, scope)
-			}),
-		}
-	}
-}
-
-impl<'a> fmt::Debug for InternalCommand<'a> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		self.cmd.fmt(f)
-	}
-}
 
 pub struct Sandbox;
 
@@ -188,7 +165,7 @@ impl Sandbox {
 	pub fn run<'a, 'b, M: BuildModule>(
 		mut project: Mutexed<'a, Project<M>>,
 		implicits: &Implicits,
-		command: &'b InternalCommand,
+		command: &'b ResolvedCommand,
 		reason: &BuildReason,
 	) -> Result<(Mutexed<'a, Project<M>>, TempDir, InvokeResponse)> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
@@ -198,10 +175,8 @@ impl Sandbox {
 				.context("initializing command sandbox")?;
 		}
 		
-		let InternalCommand { scope, mount_depth, cmd } = command;
+		let ResolvedCommand { scope, cmd } = command;
 		let GenCommand { exe, args, env, env_inherit, output, input, impure_share_paths } = cmd;
-
-		let scope_dest = scope.as_simple();
 
 		let mut cmd = Command::new(&exe.0.as_path());
 
@@ -260,8 +235,8 @@ impl Sandbox {
 			let tmp = tempdir::TempDir::new("ambl")?;
 			debug!("created command sandbox {:?}", &tmp);
 			let roots = Roots {
-				tmp: CPath::try_from(tmp.path().to_owned())?.into_absolute()?,
-				project: CPath::try_from(current_dir()?)?.into_absolute()?,
+				tmp: CPath::from_path_nonvirtual(tmp.path().to_owned())?.into_absolute()?,
+				project: CPath::from_path_nonvirtual(current_dir()?)?.into_absolute()?,
 			};
 			
 			cmd.args(args);
@@ -319,31 +294,29 @@ impl Sandbox {
 
 				// TODO: figure out how an explicitly passed in cwd would interact
 				// with mount path
-				let cwd: Absolute = match scope.as_simple() {
-					Some(scope) => roots.tmp.join(scope),
+				let cwd: Absolute = match scope.mount.as_ref() {
+					Some(scope) => roots.tmp.join(scope.as_ref()),
 					None => roots.tmp.clone(),
 				};
+				debug!("cwd = {}, scope = {:?}", cwd.as_path().display(), scope);
 
 				std::fs::create_dir_all(&cwd)?;
 				cmd.current_dir(&cwd);
 
-				{ // install @scope in cwd
-					let scope_link = cwd.join(&CPath::new("@scope".to_owned()));
-					Self::_link(scope_link, scope_dest.map(|simple| simple.as_ref())
+				{ // install @scope in cwd. Note this is a literal @scope symlink,
+					// so that uninterpreted raw string paths will work within the command
+					let scope_link = cwd.join(&CPath::new_nonvirtual("@scope".to_owned()));
+					Self::_link(scope_link, scope.scope.as_ref().map(|simple| simple.as_path())
 						.unwrap_or(CPath::Cwd.as_ref()))?;
 				}
 
 				{ // install @root in cwd, as a sequence of `..` components
-					let root_link = roots.tmp.join(&CPath::new("@root".to_owned()));
-					let mut root_dest = PathBuf::from_str(".")?;
-					for _ in 0..(*mount_depth) {
-						root_dest.push("..");
-					}
-					Self::_link(root_link, root_dest)?;
+					let root_link = cwd.join(&CPath::new_nonvirtual("@root".to_owned()));
+					Self::_link(root_link, scope.path_to_root())?;
 				}
 
 				{ // install .ambl/tmp at the project root, so the command can populate the output path
-					let ambl_cpath = CPath::new(".ambl/tmp".to_owned());
+					let ambl_cpath = CPath::new_nonvirtual(".ambl/tmp".to_owned());
 					let root_link = roots.tmp.join(&ambl_cpath);
 					let root_dest = roots.project.join(&ambl_cpath);
 					Self::_link(root_link, root_dest)?;

@@ -46,7 +46,7 @@ fn main() -> Result<()> {
 	crate::init::init(ui.writer(), cli.verbose);
 	debug!("cli = {:?}", &cli);
 	
-	let cwd = CPath::try_from(env::current_dir()?)?.into_absolute()?;
+	let cwd = CPath::from_path_nonvirtual(env::current_dir()?)?.into_absolute()?;
 	let project = Project::<WasmModule>::new(cwd, ui.writer())?;
 	let result = (|| {
 		let args = &cli.targets;
@@ -62,7 +62,8 @@ fn main() -> Result<()> {
 			}
 		} else {
 			for arg in args {
-				let request = BuildRequest::FileDependency(Unscoped::new(arg.to_owned()));
+				let path = Unscoped(CPath::new_nonvirtual(arg.to_owned()));
+				let request = BuildRequest::FileDependency(path);
 				let reason = BuildReason::Explicit(Forced(cli.force));
 				let (project_ret, _) = Project::build(project_mutexed, &Implicits::default_static(), &request, &reason)?;
 				project_mutexed = project_ret;

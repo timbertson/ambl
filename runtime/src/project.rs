@@ -27,10 +27,10 @@ use crate::build::{BuildCache, BuildReason, BuildResponse};
 use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
 use crate::ctx::Ctx;
 use crate::{err::*, path_util, fileset, ui};
-use crate::path_util::{Absolute, Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
+use crate::path_util::{Absolute, CPath, ResolveModule, Scope, Scoped, Simple, Unscoped};
 use crate::persist::*;
 use crate::module::*;
-use crate::sandbox::{InternalCommand, Sandbox};
+use crate::sandbox::Sandbox;
 use crate::sync::{MutexRef, Mutexed, MutexHandle, RwRef, RwHandle, RwReadGuard};
 use crate::{wasm::WasmModule, sync::lock_failed};
 
@@ -86,10 +86,12 @@ struct ListTargetsVisitor {
 
 impl ListTargetsVisitor {
 	fn print_target_name(scope: &Scope, name: &str) {
-		let prefix = scope.as_simple().map(|s| s.as_str());
 		print!("  ");
-		if let Some(prefix) = prefix {
-			print!("{}/", prefix);
+		if let Some(mount) = scope.mount.as_ref() {
+			print!("{}/", mount);
+		}
+		if let Some(scope) = scope.scope.as_ref() {
+			print!("{}/", scope);
 		}
 		println!("{}", name);
 	}
@@ -187,7 +189,7 @@ struct TargetIter<'a, 'b, M: BuildModule> {
 #[derive(Clone, Debug)]
 pub struct Nested {
 	rules: Vec<ProjectRule>,
-	relative_scope: Option<Simple>,
+	relative_mount: Option<Simple>,
 	absolute_scope: Scope<'static>,
 	module_path: Option<Unscoped>,
 	implicits: Implicits,
@@ -195,7 +197,7 @@ pub struct Nested {
 
 impl Nested {
 	fn projection<'a>(&'a self, name: &'a str) -> Option<(&'a Scope<'static>, &'a str)> {
-		match self.relative_scope.as_ref() {
+		match self.relative_mount.as_ref() {
 			Some(sub) => {
 				sub.projected(name).map(|new_name| {
 					(&self.absolute_scope, new_name)
@@ -384,17 +386,16 @@ impl ProjectRule {
 			NonConfigRule::Include(spec) => {
 				let relative_scope = match spec.get_scope() {
 					None => None,
-					Some(rel) => Some(Simple::try_from(rel.to_owned())?),
+					Some(rel) => Some(Simple::try_from(rel.to_owned(), base_scope)?),
 				};
-				// TODO should this be Scoped or Unscoped?
-				let path = spec.get_module().to_owned().map(CPath::new);
+				let path = spec.get_module().to_owned().map(|m| CPath::new(m, base_scope));
 				let config = IncludeConfig::WASM(spec.get_config().to_owned());
 				let fn_name = spec.get_fn_name().as_deref().unwrap_or("get_rules").to_owned();
 				let include = ScopedInclude { path, relative_scope, config, fn_name };
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(include))))
 			},
 			NonConfigRule::Mount(spec) => {
-				let path = Simple::try_from(spec.get_path().to_owned())?;
+				let path = Simple::try_from(spec.get_path().to_owned(), base_scope)?;
 				let mount = ScopedMount { path };
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Mount(mount))))
 			},
@@ -543,9 +544,9 @@ impl<M: BuildModule> Project<M> {
 			ProjectRule::Target(target) => {
 				match V::visit_target(ctx, scope, target) {
 					TargetVisitResult::Return(name) => result_block(|| {
-						let rel_name = CPath::new(name.to_owned()).into_simple()?;
+						let rel_name = CPath::new(name.to_owned(), scope).into_simple()?;
 						let module_cpath = target.build.module.as_ref().map(|m| {
-							CPath::new(m.to_owned())
+							CPath::new(m.to_owned(), scope)
 						});
 						let full_module = ResolveModule {
 							source_module,
@@ -585,7 +586,7 @@ impl<M: BuildModule> Project<M> {
 		match readable.deref() {
 			MutableRule::Loading() => {
 				// TODO when we have concurrency, we can wait if this is being loaded by another fiber
-				debug!("Encountered recursive include, skipping.");
+				debug!("Ignoring recursive path when resolving target; skipping.");
 				Ok((project, None))
 			},
 
@@ -624,7 +625,8 @@ impl<M: BuildModule> Project<M> {
 							Ok(())
 						})?;
 
-						let explicit_path = Scoped::new(scope.copy(), mount.path.as_ref());
+						let simple_yaml_path = mount.path.join(&CPath::new_nonvirtual("ambl.yaml".to_owned()));
+						let explicit_path = Scoped::new(scope.copy(), &simple_yaml_path);
 						let module_path = ResolveModule {
 							explicit_path: Some(explicit_path),
 							source_module,
@@ -641,9 +643,9 @@ impl<M: BuildModule> Project<M> {
 							rules
 						};
 
-						// Compute the the full scope
-						let absolute_scope: Scope<'static> = Scope::owned(scope.join_simple(mount.path.clone()));
-							
+						let mut absolute_scope = scope.clone();
+						absolute_scope.push_mount(&mount.path);
+
 						handle.with_write(|writeable| {
 							let (implicits, project_rules) = ProjectRule::collate_raw_rules(
 								parent_implicits.clone(), scope, rules)?;
@@ -652,7 +654,7 @@ impl<M: BuildModule> Project<M> {
 								implicits,
 								module_path: None,
 								rules: project_rules,
-								relative_scope: Some(mount.path.clone()),
+								relative_mount: Some(mount.path.clone()),
 								absolute_scope,
 							});
 							debug!("Import produced these rules: {:?}", &nested);
@@ -673,7 +675,7 @@ impl<M: BuildModule> Project<M> {
 				if V::should_include(ctx, include) {
 					// release borrow of rule
 					let include = include.to_owned();
-					debug!("Loading include {:?}", &include);
+					debug!("Loading include {:?} (scope {:?})", &include, scope);
 					let mut handle = readable.unlock();
 
 					result_block(|| {
@@ -682,11 +684,6 @@ impl<M: BuildModule> Project<M> {
 							Ok(())
 						})?;
 
-						// Compute the the full scope which will be used inside the loaded module.
-						let absolute_scope: Scope<'static> = include.relative_scope.as_ref()
-							.map(|rel| Scope::owned(scope.join_simple(rel.to_owned())))
-							.unwrap_or_else(|| scope.clone());
-						
 						let explicit_path = include.path.as_ref()
 							.map(|cpath| Scoped::new(scope.copy(), cpath));
 						let module_path = ResolveModule {
@@ -694,6 +691,8 @@ impl<M: BuildModule> Project<M> {
 							source_module,
 						}.resolve()?;
 						let mut wasm_module_path = None;
+						let mut module_scope = scope.clone();
+						module_scope.set_scope(include.relative_scope.clone());
 
 						let rules = match include.config {
 							IncludeConfig::YAML => {
@@ -709,7 +708,7 @@ impl<M: BuildModule> Project<M> {
 
 							IncludeConfig::WASM(ref config) => {
 								let request = BuildRequest::WasmCall(ResolvedFnSpec {
-									scope: absolute_scope.clone(),
+									scope: module_scope.clone(),
 									fn_name: include.fn_name.to_owned(),
 									full_module: module_path.clone(),
 									config: config.to_owned(),
@@ -721,7 +720,7 @@ impl<M: BuildModule> Project<M> {
 									&request,
 									&BuildReason::Import)?;
 
-								let rules: Vec<Rule> = match persist_dep.result.result {
+								let mut rules: Vec<Rule> = match persist_dep.result.result {
 									BuildResult::Wasm(jvalue) => serde_json::from_value(jvalue.to_owned())
 										.with_context(|| format!("Deserializing JSON as a list of Rules:\n```\n{}\n```", &jvalue))?,
 									other => {
@@ -729,19 +728,40 @@ impl<M: BuildModule> Project<M> {
 									},
 								};
 								project = project_ret;
+
+								// An include's scope is applied directly to Targets - all other rules
+								// (includes, mounts) only receive scoping if they explicitly
+								// use @scope/*
+								if let Some(rule_scope) = module_scope.scope.as_ref() {
+									for rule in rules.iter_mut() {
+										match rule {
+											Rule::Target(t) => {
+												let prefix = format!("{}/", rule_scope.as_str());
+												for name in t.names.iter_mut() {
+													name.insert_str(0, &prefix);
+												}
+											}
+											_ => (),
+										}
+									}
+								}
 								rules
 							},
 						};
+						
 
 						handle.with_write(|writeable| {
 							let (implicits, project_rules) = ProjectRule::collate_raw_rules(
-								parent_implicits.clone(), scope, rules)?;
+								parent_implicits.clone(), &module_scope, rules)?;
 							let nested = MutableRule::Nested(Nested {
 								implicits,
 								module_path: wasm_module_path,
 								rules: project_rules,
-								relative_scope: include.relative_scope.clone(),
-								absolute_scope,
+								
+								// includes can set a scope, but scopes aren't inherited
+								// so we don't alter the mount
+								relative_mount: None,
+								absolute_scope: module_scope,
 							});
 							debug!("Import produced these rules: {:?}", &nested);
 							*writeable = nested;
@@ -991,8 +1011,7 @@ impl<M: BuildModule> Project<M> {
 				// which is unlikely to result in many cache hits if the target is being rebuilt anyway.
 				// (Also: executes aren't necessarly hermetic)
 				// It also means we don't need to persist execute output, we always just re-execute
-				let internal_cmd = InternalCommand::wrap(cmd.to_owned(), todo!(), todo!());
-				let (mut project, tempdir, response) = Sandbox::run(project, implicits, &internal_cmd, reason)
+				let (mut project, tempdir, response) = Sandbox::run(project, implicits, &cmd, reason)
 					.with_context(|| format!("running {:?}", cmd))?;
 				
 				let response = match response {
@@ -1126,19 +1145,19 @@ impl<M: BuildModule> Project<M> {
 		&self.writer
 	}
 	
-	fn _path(&self, base: &str, name: &Scoped<Simple>) -> Result<Unscoped> {
+	fn _internal_path(&self, base: &str, name: &Scoped<Simple>) -> Result<Unscoped> {
 		let mut ret: PathBuf = PathBuf::from(".ambl");
 		ret.push(base);
 		ret.push(Unscoped::from_scoped(name).0);
-		Ok(Unscoped(CPath::try_from(ret)?))
+		Ok(Unscoped(CPath::from_path_nonvirtual(ret)?))
 	}
 
 	pub fn tmp_path(&self, name: &Scoped<Simple>) -> Result<Unscoped> {
-		self._path("tmp", name)
+		self._internal_path("tmp", name)
 	}
 
 	pub fn dest_path(&self, name: &Scoped<Simple>) -> Result<Unscoped> {
-		self._path("out", name)
+		self._internal_path("out", name)
 	}
 
 	#[cfg(test)]
@@ -1154,7 +1173,7 @@ impl<M: BuildModule> Project<M> {
 		self.root_rule = Arc::new(ProjectRule::Mutable(RwRef::new(MutableRule::Nested(Nested {
 			implicits,
 			rules: project_rules,
-			relative_scope: None,
+			relative_mount: None,
 			absolute_scope: scope,
 			module_path: None,
 		}))));
@@ -1169,7 +1188,8 @@ impl<M: BuildModule> Project<M> {
 	pub fn inject_module<K: ToString>(&mut self, k: K, v: M::Compiled) {
 		let s = k.to_string();
 		warn!("injecting module: {}", &s);
-		self.module_cache.modules.insert(Unscoped::new(s.to_string()), v);
+		let module_path = Unscoped(CPath::new_nonvirtual(s.to_string()));
+		self.module_cache.modules.insert(module_path, v);
 	}
 
 	#[cfg(test)]
