@@ -44,6 +44,24 @@ impl Mount {
 	}
 }
 
+impl Into<Mount> for &str {
+	fn into(self) -> Mount {
+		self.to_owned().into()
+	}
+}
+
+impl Into<Mount> for String {
+	fn into(self) -> Mount {
+		Mount { path: self }
+	}
+}
+
+impl Into<Rule> for Mount {
+	fn into(self) -> Rule {
+		Rule::Mount(self)
+	}
+}
+
 // used for delegating target definitions to another module, with an optional scope
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -91,6 +109,61 @@ impl Include {
 
 	pub fn get_config(& self) -> &Config {
 		&self.config
+	}
+}
+
+// Things that can be included:
+// - str / string, names a module
+// - function symbol, names a symbol in the current module
+// - function spec, e.g. rule_fn(foo).config(bar)
+impl Into<Include> for &str {
+	fn into(self) -> Include {
+		self.to_owned().into()
+	}
+}
+
+impl Into<Include> for String {
+	fn into(self) -> Include {
+		Include {
+			module: Some(self),
+			scope: Default::default(),
+			config: Default::default(),
+			fn_name: Default::default(),
+		}
+	}
+}
+
+impl Into<Include> for Module {
+	fn into(self) -> Include {
+		self.0.into()
+	}
+}
+
+// a raw symbol, like rule_fn(foo_rules)
+impl Into<Include> for TypedFnSymbol<BaseCtx, Result<Vec<Rule>>> {
+	fn into(self) -> Include {
+		Include {
+			module: Default::default(),
+			scope: Default::default(),
+			config: Default::default(),
+			fn_name: Some(self.symbol),
+		}
+	}
+}
+
+impl Into<Include> for FunctionSpec {
+	fn into(self) -> Include {
+		let FunctionSpec {
+			fn_name,
+			module,
+			config,
+		} = self;
+		Include {
+			module: module,
+			scope: Default::default(),
+			config,
+			fn_name: Some(fn_name),
+		}
 	}
 }
 
@@ -248,61 +321,6 @@ impl Module {
 			scope: Some(scope.into()),
 			config: Default::default(),
 			fn_name: Default::default(),
-		}
-	}
-}
-
-// Things that can be included:
-// - str / string, names a module
-// - function symbol, names a symbol in the current module
-// - function spec, e.g. rule_fn(foo).config(bar)
-impl Into<Include> for &str {
-	fn into(self) -> Include {
-		self.to_owned().into()
-	}
-}
-
-impl Into<Include> for String {
-	fn into(self) -> Include {
-		Include {
-			module: Some(self),
-			scope: Default::default(),
-			config: Default::default(),
-			fn_name: Default::default(),
-		}
-	}
-}
-
-impl Into<Include> for Module {
-	fn into(self) -> Include {
-		self.0.into()
-	}
-}
-
-// a raw symbol, like rule_fn(foo_rules)
-impl Into<Include> for TypedFnSymbol<BaseCtx, Result<Vec<Rule>>> {
-	fn into(self) -> Include {
-		Include {
-			module: Default::default(),
-			scope: Default::default(),
-			config: Default::default(),
-			fn_name: Some(self.symbol),
-		}
-	}
-}
-
-impl Into<Include> for FunctionSpec {
-	fn into(self) -> Include {
-		let FunctionSpec {
-			fn_name,
-			module,
-			config,
-		} = self;
-		Include {
-			module: module,
-			scope: Default::default(),
-			config,
-			fn_name: Some(fn_name),
 		}
 	}
 }

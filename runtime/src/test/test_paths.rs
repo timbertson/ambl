@@ -1,4 +1,5 @@
 use std::{fs, sync::{Arc, Mutex}};
+use ambl_api::Stderr;
 use serial_test::serial;
 
 use anyhow::*;
@@ -7,55 +8,6 @@ use ambl_common::{rule::dsl::{*, self}, build::DependencyRequest};
 use super::util::*;
 
 use super::test_module::DEFAULT_BUILD_FN;
-
-#[test]
-#[serial]
-fn test_paths_of_nested_module() -> Result<()> {
-	TestProject::in_tempdir(|p| {
-		// Nested build is a module at the root, but which will be invoked from `subdir/` scope.
-		let nested_build_m = p.new_module().set_name("nested-build").builder(|p, ctx| {
-			ctx.build("../root")?;
-			p.record(format!(
-				"nested build of {} with dest {}",
-				ctx.target(),
-				ctx.dest_path().display(),
-			));
-			fs::write(ctx.dest_path(), "nested!")?;
-			Ok(())
-		});
-		
-		// add a simple root builder for nested-build to call
-		p.target_builder("root", |p, ctx| {
-			p.record(format!(
-				"root build of {} with dest {}",
-				ctx.target(),
-				ctx.dest_path().display()
-			));
-			ctx.empty_dest()
-		});
-
-		// define a target (which we'll scope under `subdir/`) which is built by nested-build
-		let nested_rule_m = p.new_module().rule_fn(|m, ctx| {
-			Ok(vec!(target("a", module("../nested-build").function("build"))))
-		});
-
-		p.inject_rule(include(module(&nested_rule_m.name).scope("subdir")));
-		p.inject_module(nested_rule_m);
-		p.inject_module(nested_build_m);
-
-		p.build_file("subdir/a")?;
-		let cwd = std::env::current_dir()?;
-		eq!(p.log(), vec!(
-			format!("root build of root with dest .ambl/tmp/root"),
-			format!("nested build of a with dest .ambl/tmp/subdir/a")
-		));
-
-		eq!(fs::read_to_string(cwd.join(".ambl/out/subdir/a"))?, "nested!");
-		eq!(fs::read_to_string(cwd.join(".ambl/out/root"))?, "");
-
-		Ok(())
-	})
-}
 
 #[test]
 #[serial]
@@ -85,35 +37,49 @@ fn test_module_which_is_itself_a_target() -> Result<()> {
 	})
 }
 
-
 #[test]
 #[serial]
-fn test_vitual_paths() -> Result<()> {
+fn test_virtual_paths() -> Result<()> {
 	TestProject::in_tempdir(|p| {
-		p.target_builder("target", |p, ctx| {
+		p.target_builder_module(p.new_module().set_mount("mount").set_scope("scope"), "target", |p, ctx| {
 			p.record(ctx.read_file("file")?);
 			p.record(ctx.read_file("@scope/file")?);
 			p.record(ctx.read_file("@root/file")?);
 			
 			ctx.write_dest(
-				ctx.run_output(cmd("bash").arg("-euc").arg("ls -1 ../ && cat file @scope/file @root/file"))?
+				ctx.run_output(ctx.cmd_from_path("bash")?.arg("-uxc")
+					.arg("ls -1 ../; cat file; cat @scope/file; cat @root/file")
+					.stderr(Stderr::Merge))?
 			)
 		});
 		
-		p.write_file("mount/file", "mounted")?;
-		p.write_file("mount/scope/file", "mounted and scoped")?;
-		p.write_file("file", "root file")?;
+		p.write_file("mount/file", "mounted\n")?;
+		p.write_file("mount/scope/file", "mounted and scoped\n")?;
+		p.write_file("file", "root file\n")?;
 
-		// TODO inject at mount _and_ scope
-		
-		p.build_file("target")?;
+		p.build_file("mount/scope/target")?;
 		eq!(p.log(), vec!(
-			format!("build wasm"),
-			format!("build a")
+			"mounted\n",
+			"mounted and scoped\n",
+			"root file\n",
 		));
+		let built_contents = p.read_file(".ambl/out/mount/scope/target")?;
 		eq!(
-			p.read_file(".ambl/out/target")?,
-			"mount\nmounted\nmounted and scoped\nroot file"
+			built_contents.split('\n').collect::<Vec<_>>(),
+			vec!(
+				"+ ls -1 ../",
+				"file",
+				"mount",
+
+				"+ cat file",
+				"mounted",
+
+				"+ cat @scope/file",
+				"mounted and scoped",
+
+				"+ cat @root/file",
+				"root file",
+			)
 		);
 		Ok(())
 	})

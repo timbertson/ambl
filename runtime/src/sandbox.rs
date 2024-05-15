@@ -16,7 +16,7 @@ use anyhow::*;
 use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare};
 
 use crate::build::BuildReason;
-use crate::build_request::BuildRequest;
+use crate::build_request::{BuildRequest, ResolvedCommand};
 use crate::persist::{DepSet, BuildResult};
 use crate::project::{Project, ProjectMutexPair, ProjectSandbox, Implicits};
 use crate::sync::{Mutexed, MutexHandle};
@@ -24,29 +24,6 @@ use crate::path_util::{lexists, Absolute, CPath, External, Scope, Scoped, Simple
 use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::{DependencyRequest, ui};
-
-pub struct InternalCommand<'a> {
-	scope: &'a Scope<'a>,
-	mount_depth: u32,
-	cmd: GenCommand<Unscoped>,
-}
-impl<'a> InternalCommand<'a> {
-	pub fn wrap(cmd_str: GenCommand<String>, scope: &'a Scope, mount_depth: u32) -> Self {
-		Self {
-			scope,
-			mount_depth,
-			cmd: cmd_str.convert(|s| {
-				Unscoped::from_string(s, scope)
-			}),
-		}
-	}
-}
-
-impl<'a> fmt::Debug for InternalCommand<'a> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		self.cmd.fmt(f)
-	}
-}
 
 pub struct Sandbox;
 
@@ -188,7 +165,7 @@ impl Sandbox {
 	pub fn run<'a, 'b, M: BuildModule>(
 		mut project: Mutexed<'a, Project<M>>,
 		implicits: &Implicits,
-		command: &'b InternalCommand,
+		command: &'b ResolvedCommand,
 		reason: &BuildReason,
 	) -> Result<(Mutexed<'a, Project<M>>, TempDir, InvokeResponse)> {
 		let dep_set = reason.parent().and_then(|t| project.get_deps(t)).unwrap_or(DepSet::empty_static()).clone();
@@ -198,7 +175,7 @@ impl Sandbox {
 				.context("initializing command sandbox")?;
 		}
 		
-		let InternalCommand { scope, mount_depth, cmd } = command;
+		let ResolvedCommand { scope, cmd } = command;
 		let GenCommand { exe, args, env, env_inherit, output, input, impure_share_paths } = cmd;
 
 		let mut cmd = Command::new(&exe.0.as_path());
@@ -321,6 +298,7 @@ impl Sandbox {
 					Some(scope) => roots.tmp.join(scope.as_ref()),
 					None => roots.tmp.clone(),
 				};
+				debug!("cwd = {}, scope = {:?}", cwd.as_path().display(), scope);
 
 				std::fs::create_dir_all(&cwd)?;
 				cmd.current_dir(&cwd);
@@ -333,12 +311,8 @@ impl Sandbox {
 				}
 
 				{ // install @root in cwd, as a sequence of `..` components
-					let root_link = roots.tmp.join(&CPath::new_nonvirtual("@root".to_owned()));
-					let mut root_dest = PathBuf::from_str(".")?;
-					for _ in 0..(*mount_depth) {
-						root_dest.push("..");
-					}
-					Self::_link(root_link, root_dest)?;
+					let root_link = cwd.join(&CPath::new_nonvirtual("@root".to_owned()));
+					Self::_link(root_link, scope.path_to_root())?;
 				}
 
 				{ // install .ambl/tmp at the project root, so the command can populate the output path

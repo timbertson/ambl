@@ -4,6 +4,7 @@ use log::*;
 use core::fmt;
 use std::ffi::OsStr;
 use std::iter;
+use std::ops::DerefMut;
 use std::str::FromStr;
 use std::{ops::Deref, sync::Arc, fmt::{Display, Debug}, path::Components};
 use serde::{Deserialize, Serialize};
@@ -124,11 +125,16 @@ pub struct Scope<'a> {
 
 impl<'a> Scope<'a> {
 	pub fn new(mount: Option<Cow<'a, Simple>>, scope: Option<Cow<'a, Simple>>) -> Self {
-		let mount_depth = mount.as_ref().map(|mount| {
+		let mut ret = Self { mount, scope, mount_depth: 0 };
+		ret.set_mount_depth();
+		ret
+	}
+	
+	fn set_mount_depth(&mut self) {
+		self.mount_depth = self.mount.as_ref().map(|mount| {
 			let simple: &Simple = mount.borrow();
-			simple.as_str().chars().filter(|c| *c == '/').count()
+			simple.as_str().chars().filter(|c| *c == '/').count() + 1
 		}).unwrap_or(0);
-		Self { mount, scope, mount_depth }
 	}
 
 	pub fn root() -> Scope<'static> {
@@ -139,16 +145,12 @@ impl<'a> Scope<'a> {
 		&ROOT_SCOPE
 	}
 
-	pub fn replacement_root_prefix(&self) -> String {
-		let mut buf = "".to_owned();
+	pub fn path_to_root(&self) -> String {
+		let mut buf = ".".to_owned();
 		for _ in 0..self.mount_depth {
-			buf.push_str("../")
+			buf.push_str("/..")
 		}
 		buf
-	}
-
-	pub fn owned(n: Simple) -> Scope<'static> {
-		Scope::new(Some(Cow::Owned(n)), None)
 	}
 
 	pub fn push_mount_to(&self, path: &mut PathBuf) {
@@ -161,7 +163,7 @@ impl<'a> Scope<'a> {
 	pub fn clone(&self) -> Scope<'static> {
 		Scope {
 			mount: self.mount.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())),
-			scope: self.mount.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())),
+			scope: self.scope.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())),
 			mount_depth: self.mount_depth
 		}
 	}
@@ -174,19 +176,22 @@ impl<'a> Scope<'a> {
 			mount_depth: self.mount_depth
 		}
 	}
-
-	pub fn join(&self, sub: CPath) -> CPath {
-		match &self.mount {
-			Some(base) => base.0.join(&sub),
-			None => sub
+	
+	// adding a mount removes the scope
+	pub fn push_mount(&mut self, scope: &Simple) {
+		self.scope = None;
+		match self.mount.as_mut() {
+			Some(existing) => existing.to_mut().push_simple(scope),
+			None => {
+				self.mount = Some(Cow::Owned(scope.to_owned()));
+			}
 		}
+		self.set_mount_depth();
 	}
 
-	pub fn join_simple(&self, sub: Simple) -> Simple {
-		match &self.mount {
-			Some(base) => Simple(base.0.join(&sub)),
-			None => sub
-		}
+	// setting a scope replaces an existing one
+	pub fn set_scope(&mut self, scope: Option<Simple>) {
+		self.scope = scope.map(Cow::Owned)
 	}
 }
 
@@ -362,13 +367,14 @@ impl CPath {
 		}
 	}
 
-	fn canonicalize(mut s: String, mas: &Scope) -> Self {
+	fn canonicalize(mut s: String, scope: &Scope) -> Self {
 		// first thing, resolve virtualization
 		if s.starts_with("@scope/") {
-			let scope_ref: Option<&Simple> = mas.scope.as_ref().map(|x| x.borrow());
-			s.replace_range(0..7, scope_ref.map(|x| x.as_str()).unwrap_or(""));
+			let scope_ref: Option<&Simple> = scope.scope.as_ref().map(|x| x.borrow());
+			let replacement = scope_ref.map(|x| x.as_str());
+			s.replace_range(0..6, replacement.unwrap_or("."));
 		} else if s.starts_with("@root/") {
-			s.replace_range(0..6, &mas.replacement_root_prefix());
+			s.replace_range(0..5, &scope.path_to_root());
 		} else if let Some(builtin) = s.strip_prefix("builtin:") {
 			// TODO rename @builtin/?
 			let mut owned_path = BUILTINS_ROOT.to_owned();
@@ -384,16 +390,27 @@ impl CPath {
 			if iter::once(Component::CurDir).eq(orig.components()) {
 				return Self::Cwd
 			}
+			let mut depth = 0;
 			for part in orig.components() {
 				match part {
-					Component::RootDir => ret.push(Component::RootDir),
+					Component::RootDir => {
+						ret.push(Component::RootDir);
+						depth = 0;
+					},
 					Component::CurDir => (),
 					Component::ParentDir => {
-						if !ret.pop() {
+						if depth > 0 {
+							let popped = ret.pop();
+							assert!(popped == true);
+						} else {
 							ret.push("..");
 						}
+						depth -= 1;
 					},
-					Component::Normal(s) => ret.push(s),
+					Component::Normal(s) => {
+						ret.push(s);
+						depth += 1;
+					}
 					Component::Prefix(_) => todo!(),
 				}
 			}
@@ -413,6 +430,16 @@ impl CPath {
 		}
 	}
 	
+	pub fn push_simple(&mut self, other: &Simple) {
+		// Simples can just be concatenated
+		match self {
+			Self::P(ref mut p) => p.push(other.as_path()),
+			Self::Cwd => {
+				*self = other.0.to_owned();
+			}
+		}
+	}
+
 	pub fn join(&self, other: &CPath) -> Self {
 		match (self, other) {
 			(Self::Cwd, other) => other.to_owned(),
@@ -420,11 +447,9 @@ impl CPath {
 			(Self::P(p_self), Self::P(p_other)) => {
 				Self::P(match other.kind() {
 					Kind::Simple => {
-						// Simples can just be concatenated
-						let path: &Path = self.as_ref();
-						let mut buf = p_self.to_owned();
-						buf.push::<&Path>(p_other);
-						buf
+						let mut ret = p_self.to_owned();
+						ret.push(other.as_path());
+						ret
 					},
 
 					Kind::Absolute => {
@@ -582,6 +607,12 @@ impl Deref for Simple {
 	}
 }
 
+impl DerefMut for Simple {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.0
+	}
+}
+
 impl Into<PathBuf> for Simple {
 	fn into(self) -> PathBuf {
 		self.0.into()
@@ -645,13 +676,6 @@ pub enum Kind {
 	Absolute,
 }
 
-#[derive(Clone, Debug)]
-pub enum Virtual<T: Debug + Clone> {
-	Scope(T), // @scope/*
-	Root(T), // @root/*
-	Plain(T), // *
-}
-
 pub struct ResolveModule<'a> {
 	pub source_module: Option<&'a Unscoped>,
 	pub explicit_path: Option<Scoped<'a, &'a CPath>>,
@@ -673,17 +697,21 @@ mod test {
 	fn p(s: &str) -> CPath {
 		CPath::new_nonvirtual(s.to_owned())
 	}
-
-	fn p_virtual(s: &str, mount: Option<&str>, scope: Option<&str>) -> CPath {
-		let mas = Scope::new(
-			mount.map(|s| Cow::Owned(CPath::new_nonvirtual(s.to_owned()).into_simple().unwrap())),
-			scope.map(|s| Cow::Owned(CPath::new_nonvirtual(s.to_owned()).into_simple().unwrap())),
-		);
-		CPath::new(s.to_owned(), &mas)
+	
+	fn simple(s: &str) -> Simple {
+		CPath::new_nonvirtual(s.to_owned()).into_simple().unwrap()
 	}
 
-	fn s(s: &str) -> Scope {
-		Scope::owned(p(s).into_simple().unwrap())
+	fn p_virtual(s: &str, mount: Option<&str>, scope: Option<&str>) -> CPath {
+		let scope = Scope::new(
+			mount.map(|s| Cow::Owned(simple(s))),
+			scope.map(|s| Cow::Owned(simple(s))),
+		);
+		CPath::new(s.to_owned(), &scope)
+	}
+
+	fn mount(s: &str) -> Scope {
+		Scope::new(Some(Cow::Owned(simple(s))), None)
 	}
 
 	#[test]
@@ -698,12 +726,16 @@ mod test {
 
 		assert_eq!(p("../z").as_str(), "../z");
 		assert_eq!(p("../../z").as_str(), "../../z");
+		assert_eq!(p("./../../z").as_str(), "../../z");
 		assert_eq!(p("../z").kind(), Kind::External);
 		assert_eq!(p("builtin:x"), p(&format!("{}/ambl_builtin_x.wasm", BUILTINS_ROOT.display())));
 	}
 
 	#[test]
 	fn test_virtualisation() {
+		assert_eq!(mount("x/y").path_to_root(), "./../..");
+		assert_eq!(Scope::new(None, None).path_to_root(), ".");
+
 		assert_eq!(p_virtual("@scope/x", None, None), p("x"));
 		assert_eq!(p_virtual("@scope/x", Some("mount"), Some("scope")), p("scope/x"));
 		assert_eq!(p_virtual("@scope/../x", Some("mount"), Some("some/internal/scope")), p("some/internal/x"));
@@ -711,13 +743,21 @@ mod test {
 		assert_eq!(p_virtual("@root/x", None, None), p("x"));
 		assert_eq!(p_virtual("@root/../x", None, None), p("../x"));
 		assert_eq!(p_virtual("@root/../x", None, Some("scope")), p("../x"));
-		assert_eq!(p_virtual("@root/../x", Some("subdir"), Some("scope")), p("x"));
+		
+		// @root undoes the effect of a mount
+		assert_eq!(p_virtual("@root/x", Some("subdir"), None), p("../x"));
+		assert_eq!(p_virtual("@root/../x", Some("subdir"), Some("scope")), p("../../x"));
 		assert_eq!(p_virtual("@root/x", Some("nested/subdir"), Some("scope")), p("../../x"));
+		
+		let mut scope_mut = Scope::root();
+		scope_mut.push_mount(&p("mnt").into_simple().unwrap());
+		assert_eq!(CPath::new("@root/x".to_owned(), &scope_mut), p("../x"));
+
 	}
 
 	#[test]
 	fn test_join() {
-		let scope = Scope::owned(p("x/y").into_simple().unwrap());
+		let scope = mount("x/y");
 		let join = |s: &str| Unscoped::from_string(s.to_owned(), &scope);
 		assert_eq!(join("foo/bar").0, p("x/y/foo/bar"));
 		assert_eq!(join("../z").0, p("x/z"));

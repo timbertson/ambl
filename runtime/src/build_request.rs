@@ -1,6 +1,7 @@
 use ambl_common::rule::EnvLookup;
 use log::*;
 use ambl_common::build::{FileSelection, FilesetDependency};
+use std::fmt;
 use std::{collections::HashMap, fs, time::UNIX_EPOCH, io, borrow::Borrow, fmt::Display, path::{Path, PathBuf}};
 
 use anyhow::*;
@@ -22,7 +23,7 @@ pub enum BuildRequest {
 	EnvKeys(String),
 	EnvLookup(EnvLookup),
 	Fileset(ResolvedFilesetDependency),
-	Execute(GenCommand<String>),
+	Execute(ResolvedCommand),
 	Universe,
 }
 
@@ -48,7 +49,7 @@ impl BuildRequest {
 				Self::Fileset(ResolvedFilesetDependency{ root, dirs, files })
 			},
 			DependencyRequest::Execute(v) => {
-				Self::Execute(v.into())
+				Self::Execute(ResolvedCommand::new(v.into(), scope.clone()))
 			},
 			DependencyRequest::Universe => Self::Universe,
 		})
@@ -80,6 +81,26 @@ impl<'a> ResolvedFnSpec<'a> {
 			full_module,
 			config,
 		})
+	}
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ResolvedCommand {
+	pub scope: Scope<'static>,
+	pub cmd: GenCommand<Unscoped>,
+}
+impl ResolvedCommand {
+	pub fn new(cmd_str: GenCommand<String>, scope: Scope<'static>) -> Self {
+		let cmd = cmd_str.convert(|s| {
+			Unscoped::from_string(s, &scope)
+		});
+		Self { scope, cmd }
+	}
+}
+
+impl fmt::Debug for ResolvedCommand {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		self.cmd.fmt(f)
 	}
 }
 
