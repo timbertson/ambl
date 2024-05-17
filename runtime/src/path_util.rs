@@ -23,7 +23,7 @@ Simple paths are just a series of path component, with no `..`
 
 # Usage:
 
-Scopes are represented as a Simple path from the project root.
+Mounts are represented as a Simple path from the project root.
 File dependencies can be any kind.
 */
 
@@ -102,7 +102,7 @@ pub fn lexists<P: AsRef<Path>>(p: P) -> Result<bool> {
 }
 
 lazy_static::lazy_static! {
-	static ref ROOT_SCOPE: Scope<'static> = Scope {
+	static ref ROOT_EMBED: Embed<'static> = Embed {
 		mount: None,
 		scope: None,
 		mount_depth: 0
@@ -117,13 +117,13 @@ lazy_static::lazy_static! {
  * inherit the scope unless you explicitly join e.g. `@scope/foo`.
  */
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
-pub struct Scope<'a> {
+pub struct Embed<'a> {
 	pub mount: Option<Cow<'a, Simple>>,
 	pub scope: Option<Cow<'a, Simple>>,
 	mount_depth: usize
 }
 
-impl<'a> Scope<'a> {
+impl<'a> Embed<'a> {
 	pub fn new(mount: Option<Cow<'a, Simple>>, scope: Option<Cow<'a, Simple>>) -> Self {
 		let mut ret = Self { mount, scope, mount_depth: 0 };
 		ret.set_mount_depth();
@@ -137,12 +137,12 @@ impl<'a> Scope<'a> {
 		}).unwrap_or(0);
 	}
 
-	pub fn root() -> Scope<'static> {
-		ROOT_SCOPE.clone()
+	pub fn root() -> Embed<'static> {
+		ROOT_EMBED.clone()
 	}
 
-	pub fn static_root() -> &'static Scope<'static> {
-		&ROOT_SCOPE
+	pub fn static_root() -> &'static Embed<'static> {
+		&ROOT_EMBED
 	}
 
 	pub fn path_to_root(&self) -> String {
@@ -160,8 +160,8 @@ impl<'a> Scope<'a> {
 	}
 
 	// Always expensive, removes all lifetime limits
-	pub fn clone(&self) -> Scope<'static> {
-		Scope {
+	pub fn clone(&self) -> Embed<'static> {
+		Embed {
 			mount: self.mount.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())),
 			scope: self.scope.as_ref().map(|cow| Cow::Owned(cow.clone().into_owned())),
 			mount_depth: self.mount_depth
@@ -178,12 +178,12 @@ impl<'a> Scope<'a> {
 	}
 	
 	// adding a mount removes the scope
-	pub fn push_mount(&mut self, scope: &Simple) {
+	pub fn push_mount(&mut self, mount: &Simple) {
 		self.scope = None;
 		match self.mount.as_mut() {
-			Some(existing) => existing.to_mut().push_simple(scope),
+			Some(existing) => existing.to_mut().push_simple(mount),
 			None => {
-				self.mount = Some(Cow::Owned(scope.to_owned()));
+				self.mount = Some(Cow::Owned(mount.to_owned()));
 			}
 		}
 		self.set_mount_depth();
@@ -196,47 +196,47 @@ impl<'a> Scope<'a> {
 }
 
 #[derive(Debug)]
-pub struct Scoped<'a, T> {
-	pub scope: Scope<'a>,
+pub struct Embedded<'a, T> {
+	pub embed: Embed<'a>,
 	pub value: T,
 }
 
-impl<'a, T> Scoped<'a, T> {
-	pub fn new(scope: Scope<'a>, value: T) -> Self {
-		Self { scope: scope.clone(), value }
+impl<'a, T> Embedded<'a, T> {
+	pub fn new(embed: Embed<'a>, value: T) -> Self {
+		Self { embed: embed.clone(), value }
 	}
 
 	pub fn root(value: T) -> Self {
-		Self { scope: Scope::root(), value }
+		Self { embed: Embed::root(), value }
 	}
 
-	pub fn replace_value<R>(self, value: R) -> Scoped<'a, R> {
-		Scoped { scope: self.scope, value }
+	pub fn replace_value<R>(self, value: R) -> Embedded<'a, R> {
+		Embedded { embed: self.embed, value }
 	}
 	
-	pub fn with_value<R>(&'a self, value: R) -> Scoped<'a, R> {
-		let Scoped { scope, value: _ } = self;
-		Scoped::new(scope.clone(), value)
+	pub fn with_value<R>(&'a self, value: R) -> Embedded<'a, R> {
+		let Embedded { embed, value: _ } = self;
+		Embedded::new(embed.clone(), value)
 	}
 	
-	pub fn map<R, F: FnOnce(T) -> R>(self, f: F) -> Scoped<'a, R> {
-		let Scoped { scope, value } = self;
-		Scoped { scope, value: f(value) }
+	pub fn map<R, F: FnOnce(T) -> R>(self, f: F) -> Embedded<'a, R> {
+		let Embedded { embed, value } = self;
+		Embedded { embed, value: f(value) }
 	}
 
-	pub fn map_ref<R, F: FnOnce(&T) -> R>(&'a self, f: F) -> Scoped<'a, R> {
-		let Scoped { scope, value } = self;
-		Scoped { scope: scope.clone(), value: f(&value) }
+	pub fn map_ref<R, F: FnOnce(&T) -> R>(&'a self, f: F) -> Embedded<'a, R> {
+		let Embedded { embed, value } = self;
+		Embedded { embed: embed.clone(), value: f(&value) }
 	}
 
-	pub fn as_ref(&'a self) -> Scoped<'a, &T> {
-		Scoped { scope: self.scope.clone(), value: &self.value }
+	pub fn as_ref(&'a self) -> Embedded<'a, &T> {
+		Embedded { embed: self.embed.clone(), value: &self.value }
 	}
 }
 
-impl<'a, T: Display> Display for Scoped<'a, T> {
+impl<'a, T: Display> Display for Embedded<'a, T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		if let Some(mount) = self.scope.mount.as_ref() {
+		if let Some(mount) = self.embed.mount.as_ref() {
 			Display::fmt(&mount, f)?;
 			write!(f, "/")?;
 		}
@@ -244,26 +244,26 @@ impl<'a, T: Display> Display for Scoped<'a, T> {
 	}
 }
 
-impl<'a> Scoped<'a, Simple> {
-	// flatten a scoped simple into a single simple
+impl<'a> Embedded<'a, Simple> {
+	// flatten an embedded simple into a single simple
 	pub fn flatten(&self) -> Simple {
-		match self.scope.mount {
+		match self.embed.mount {
 			None => self.value.to_owned(),
-			Some(ref scope) => Simple(scope.0.join(&self.value)),
+			Some(ref mount) => Simple(mount.0.join(&self.value)),
 		}
 	}
 }
 
-impl <'a, C: Clone> Clone for Scoped<'a, C> {
+impl <'a, C: Clone> Clone for Embedded<'a, C> {
 	fn clone(&self) -> Self {
-		Self { scope: self.scope.clone(), value: self.value.clone() }
+		Self { embed: self.embed.clone(), value: self.value.clone() }
 	}
 }
 
 // a "canonical" PathBuf which is:
 // - always a valid string
 // - normalized, i.e. contains no trailing `/`, and no internal `../` (but may start with one or more ../ segments)
-// - has virtual path segments resolved (i.e. a leading @scope or @root)
+// - has virtual path segments resolved (i.e. a leading @embed or @root)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum CPath {
 	P(PathBuf),
@@ -291,8 +291,8 @@ lazy_static::lazy_static!{
 }
 
 impl CPath {
-	pub fn new(s: String, scope: &Scope) -> Self {
-		Self::canonicalize(s, scope)
+	pub fn new(s: String, embed: &Embed) -> Self {
+		Self::canonicalize(s, embed)
 	}
 
 	pub fn from_path_nonvirtual<P: AsRef<Path>>(p: P) -> Result<Self> {
@@ -304,10 +304,10 @@ impl CPath {
 	
 	// To be used only when we know the path can't contain virtual
 	// prefixes, e.g loaded from serialization or we're concatenating
-	// two cpaths. Mistaken use of this function will silently drop @scope
+	// two cpaths. Mistaken use of this function will silently drop @embed
 	// and @mount prefixes
 	pub fn new_nonvirtual(s: String) -> Self {
-		Self::canonicalize(s, &Scope::root())
+		Self::canonicalize(s, &Embed::root())
 	}
 
 	pub fn as_path(&self) -> &Path {
@@ -367,14 +367,14 @@ impl CPath {
 		}
 	}
 
-	fn canonicalize(mut s: String, scope: &Scope) -> Self {
+	fn canonicalize(mut s: String, embed: &Embed) -> Self {
 		// first thing, resolve virtualization
 		if s.starts_with("@scope/") {
-			let scope_ref: Option<&Simple> = scope.scope.as_ref().map(|x| x.borrow());
+			let scope_ref: Option<&Simple> = embed.scope.as_ref().map(|x| x.borrow());
 			let replacement = scope_ref.map(|x| x.as_str());
 			s.replace_range(0..6, replacement.unwrap_or("."));
 		} else if s.starts_with("@root/") {
-			s.replace_range(0..5, &scope.path_to_root());
+			s.replace_range(0..5, &embed.path_to_root());
 		} else if let Some(builtin) = s.strip_prefix("builtin:") {
 			// TODO rename @builtin/?
 			let mut owned_path = BUILTINS_ROOT.to_owned();
@@ -521,32 +521,32 @@ impl AsRef<str> for CPath {
 	}
 }
 
-// Small wrapper for declaring that a path is relative to the project root, and does not need a scope
+// Small wrapper for declaring that a path is relative to the project root, and does not need a embed
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Unscoped(pub CPath);
+pub struct Unembedded(pub CPath);
 
-impl Unscoped {
-	// merge a scope and a CPath into a single path
-	pub fn from(path: CPath, scope: &Scope) -> Unscoped {
-		Unscoped(match scope.mount {
+impl Unembedded {
+	// merge a embed and a CPath into a single path
+	pub fn from(path: CPath, embed: &Embed) -> Unembedded {
+		Unembedded(match embed.mount {
 			None => path,
-			Some(ref scope) => scope.join(path.as_ref()),
+			Some(ref mount) => mount.join(path.as_ref()),
 		})
 	}
 
-	pub fn from_ref(path: &CPath, scope: &Scope) -> Unscoped {
-		Unscoped(match scope.mount {
+	pub fn from_ref(path: &CPath, embed: &Embed) -> Unembedded {
+		Unembedded(match embed.mount {
 			None => path.to_owned(),
-			Some(ref scope) => scope.join(path),
+			Some(ref mount) => mount.join(path),
 		})
 	}
 
-	pub fn from_string(path: String, scope: &Scope) -> Unscoped {
-		Self::from(CPath::new(path, scope), scope)
+	pub fn from_string(path: String, embed: &Embed) -> Unembedded {
+		Self::from(CPath::new(path, embed), embed)
 	}
 
-	pub fn from_scoped<P: AsRef<CPath>>(path: &Scoped<P>) -> Unscoped {
-		Self::from_ref(&path.value.as_ref(), &path.scope)
+	pub fn from_embedded<P: AsRef<CPath>>(path: &Embedded<P>) -> Unembedded {
+		Self::from_ref(&path.value.as_ref(), &path.embed)
 	}
 	
 	pub fn as_path(&self) -> &Path {
@@ -554,19 +554,19 @@ impl Unscoped {
 	}
 }
 
-impl Display for Unscoped {
+impl Display for Unembedded {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		Display::fmt(&self.0, f)
 	}
 }
 
-impl AsRef<Path> for Unscoped {
+impl AsRef<Path> for Unembedded {
 	fn as_ref(&self) -> &Path {
 		self.0.as_path()
 	}
 }
 
-impl Into<PathBuf> for Unscoped {
+impl Into<PathBuf> for Unembedded {
 	fn into(self) -> PathBuf {
 		self.0.into()
 	}
@@ -582,8 +582,8 @@ impl Simple {
 		s.strip_prefix(prefix).and_then(|s| s.strip_prefix("/"))
 	}
 	
-	pub fn try_from(s: String, scope: &Scope) -> Result<Self> {
-		let c = CPath::new(s, scope);
+	pub fn try_from(s: String, embed: &Embed) -> Result<Self> {
+		let c = CPath::new(s, embed);
 		if c.kind() == Kind::Simple {
 			Ok(Self(c))
 		} else {
@@ -619,9 +619,9 @@ impl Into<PathBuf> for Simple {
 	}
 }
 
-impl Into<Unscoped> for Simple {
-	fn into(self) -> Unscoped {
-		Unscoped(self.0)
+impl Into<Unembedded> for Simple {
+	fn into(self) -> Unembedded {
+		Unembedded(self.0)
 	}
 }
 
@@ -666,7 +666,7 @@ impl Deref for Absolute {
 // #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 // pub enum FileReference {
 // 	Target(Simple),
-// 	File(Unscoped),
+// 	File(Unembedded),
 // }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -677,14 +677,14 @@ pub enum Kind {
 }
 
 pub struct ResolveModule<'a> {
-	pub source_module: Option<&'a Unscoped>,
-	pub explicit_path: Option<Scoped<'a, &'a CPath>>,
+	pub source_module: Option<&'a Unembedded>,
+	pub explicit_path: Option<Embedded<'a, &'a CPath>>,
 }
 impl<'a> ResolveModule<'a> {
-	pub fn resolve(self) -> Result<Unscoped> {
+	pub fn resolve(self) -> Result<Unembedded> {
 		self.explicit_path
 			.as_ref()
-			.map(Unscoped::from_scoped)
+			.map(Unembedded::from_embedded)
 			.or_else(|| self.source_module.map(|p| p.to_owned()))
 			.ok_or_else(||anyhow!("Received a WasmCall with no module specified, and no implicit module"))
 	}
@@ -703,15 +703,15 @@ mod test {
 	}
 
 	fn p_virtual(s: &str, mount: Option<&str>, scope: Option<&str>) -> CPath {
-		let scope = Scope::new(
+		let embed = Embed::new(
 			mount.map(|s| Cow::Owned(simple(s))),
 			scope.map(|s| Cow::Owned(simple(s))),
 		);
-		CPath::new(s.to_owned(), &scope)
+		CPath::new(s.to_owned(), &embed)
 	}
 
-	fn mount(s: &str) -> Scope {
-		Scope::new(Some(Cow::Owned(simple(s))), None)
+	fn mount(s: &str) -> Embed {
+		Embed::new(Some(Cow::Owned(simple(s))), None)
 	}
 
 	#[test]
@@ -734,7 +734,7 @@ mod test {
 	#[test]
 	fn test_virtualisation() {
 		assert_eq!(mount("x/y").path_to_root(), "./../..");
-		assert_eq!(Scope::new(None, None).path_to_root(), ".");
+		assert_eq!(Embed::new(None, None).path_to_root(), ".");
 
 		assert_eq!(p_virtual("@scope/x", None, None), p("x"));
 		assert_eq!(p_virtual("@scope/x", Some("mount"), Some("scope")), p("scope/x"));
@@ -749,16 +749,16 @@ mod test {
 		assert_eq!(p_virtual("@root/../x", Some("subdir"), Some("scope")), p("../../x"));
 		assert_eq!(p_virtual("@root/x", Some("nested/subdir"), Some("scope")), p("../../x"));
 		
-		let mut scope_mut = Scope::root();
-		scope_mut.push_mount(&p("mnt").into_simple().unwrap());
-		assert_eq!(CPath::new("@root/x".to_owned(), &scope_mut), p("../x"));
+		let mut embed_mut = Embed::root();
+		embed_mut.push_mount(&p("mnt").into_simple().unwrap());
+		assert_eq!(CPath::new("@root/x".to_owned(), &embed_mut), p("../x"));
 
 	}
 
 	#[test]
 	fn test_join() {
-		let scope = mount("x/y");
-		let join = |s: &str| Unscoped::from_string(s.to_owned(), &scope);
+		let embed = mount("x/y");
+		let join = |s: &str| Unembedded::from_string(s.to_owned(), &embed);
 		assert_eq!(join("foo/bar").0, p("x/y/foo/bar"));
 		assert_eq!(join("../z").0, p("x/z"));
 		assert_eq!(join("../../../z").0, p("../z"));

@@ -7,7 +7,7 @@ use serial_test::serial;
 use anyhow::*;
 use crate::build::{Forced, BuildReason};
 use crate::build_request::BuildRequest;
-use crate::path_util::Scope;
+use crate::path_util::Embed;
 use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::Project};
 use ambl_common::{rule::dsl::*, build::{DependencyRequest}};
 use super::util::*;
@@ -327,7 +327,7 @@ fn test_force_rebuild() -> Result<()> {
 		});
 
 		let req = DependencyRequest::FileDependency("a".to_owned());
-		let build_request = BuildRequest::from(req.to_owned(), None, &Scope::root())?;
+		let build_request = BuildRequest::from(req.to_owned(), None, &Embed::root())?;
 		let reason = BuildReason::Explicit(Forced(true));
 		p.build_full(&build_request, &reason)?;
 		p.build_full(&build_request, &reason)?;

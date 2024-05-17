@@ -9,15 +9,15 @@ use serde::{Serialize, de::DeserializeOwned, Deserialize};
 use ambl_common::{build::{DependencyRequest, InvokeResponse, Command, GenCommand}, rule::{FunctionSpec, Config}};
 
 use crate::project::{ProjectRef, Project, ProjectHandle};
-use crate::path_util::{Simple, Scope, Scoped, CPath, Unscoped, ResolveModule};
+use crate::path_util::{Simple, Embed, Embedded, CPath, Unembedded, ResolveModule};
 use crate::module::BuildModule;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 // Like DependencyRequest but with all variants fully resolved
-// (i.e. relative to project root, not to whatever scope the request came from)
+// (i.e. relative to project root, not to whatever embed the request came from)
 pub enum BuildRequest {
-	FileDependency(Unscoped),
-	FileExistence(Unscoped),
+	FileDependency(Unembedded),
+	FileExistence(Unembedded),
 	WasmCall(ResolvedFnSpec<'static>),
 	EnvVar(String),
 	EnvKeys(String),
@@ -28,28 +28,28 @@ pub enum BuildRequest {
 }
 
 impl BuildRequest {
-	pub fn from<'a>(req: DependencyRequest, source_module: Option<&Unscoped>, scope: &'a Scope<'a>) -> Result<Self> {
+	pub fn from<'a>(req: DependencyRequest, source_module: Option<&Unembedded>, embed: &'a Embed<'a>) -> Result<Self> {
 		Ok(match req {
 			DependencyRequest::FileDependency(path) => {
-				let path = Unscoped::from_string(path, scope);
+				let path = Unembedded::from_string(path, embed);
 				Self::FileDependency(path)
 			},
 			DependencyRequest::FileExistence(path) => {
-				let path = Unscoped::from_string(path, scope);
+				let path = Unembedded::from_string(path, embed);
 				Self::FileExistence(path)
 			},
 			DependencyRequest::WasmCall(v) =>
-				Self::WasmCall(ResolvedFnSpec::from_explicit_fn_name(v, source_module, scope.clone())?),
+				Self::WasmCall(ResolvedFnSpec::from_explicit_fn_name(v, source_module, embed.clone())?),
 			DependencyRequest::EnvVar(v) => Self::EnvVar(v),
 			DependencyRequest::EnvKeys(v) => Self::EnvKeys(v),
 			DependencyRequest::EnvLookup(v) => Self::EnvLookup(v),
 			DependencyRequest::Fileset(v) => {
 				let FilesetDependency { root, dirs, files } = v;
-				let root = Unscoped::from_string(root, scope);
+				let root = Unembedded::from_string(root, embed);
 				Self::Fileset(ResolvedFilesetDependency{ root, dirs, files })
 			},
 			DependencyRequest::Execute(v) => {
-				Self::Execute(ResolvedCommand::new(v.into(), scope.clone()))
+				Self::Execute(ResolvedCommand::new(v.into(), embed.clone()))
 			},
 			DependencyRequest::Universe => Self::Universe,
 		})
@@ -60,23 +60,23 @@ impl BuildRequest {
 pub struct ResolvedFnSpec<'a> {
 	pub fn_name: String,
 	// we track the full path from the project, since that's how modules are keyed
-	pub full_module: Unscoped,
-	// but we also track the scope of this call, since that affects
+	pub full_module: Unembedded,
+	// but we also track the embed of this call, since that affects
 	// the results
-	pub scope: Scope<'a>,
+	pub embed: Embed<'a>,
 	pub config: Config,
 }
 
 impl<'a> ResolvedFnSpec<'a> {
-	pub fn from_explicit_fn_name(f: FunctionSpec, source_module: Option<&Unscoped>, scope: Scope<'a>) -> Result<Self> {
+	pub fn from_explicit_fn_name(f: FunctionSpec, source_module: Option<&Unembedded>, embed: Embed<'a>) -> Result<Self> {
 		let FunctionSpec { fn_name, module, config } = f;
-		let explicit_cpath = module.map(|m| CPath::new(m, &scope));
+		let explicit_cpath = module.map(|m| CPath::new(m, &embed));
 		let full_module = ResolveModule {
 			source_module,
-			explicit_path: explicit_cpath.as_ref().map(|p| Scoped::new(scope.copy(), p)),
+			explicit_path: explicit_cpath.as_ref().map(|p| Embedded::new(embed.copy(), p)),
 		}.resolve().with_context(|| format!("resolving call to function {}", &fn_name))?;
 		Ok(Self {
-			scope,
+			embed,
 			fn_name,
 			full_module,
 			config,
@@ -86,15 +86,15 @@ impl<'a> ResolvedFnSpec<'a> {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ResolvedCommand {
-	pub scope: Scope<'static>,
-	pub cmd: GenCommand<Unscoped>,
+	pub embed: Embed<'static>,
+	pub cmd: GenCommand<Unembedded>,
 }
 impl ResolvedCommand {
-	pub fn new(cmd_str: GenCommand<String>, scope: Scope<'static>) -> Self {
+	pub fn new(cmd_str: GenCommand<String>, embed: Embed<'static>) -> Self {
 		let cmd = cmd_str.convert(|s| {
-			Unscoped::from_string(s, &scope)
+			Unembedded::from_string(s, &embed)
 		});
-		Self { scope, cmd }
+		Self { embed, cmd }
 	}
 }
 
@@ -107,7 +107,7 @@ impl fmt::Debug for ResolvedCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ResolvedFilesetDependency {
-	pub root: Unscoped,
+	pub root: Unembedded,
 	pub dirs: Vec<FileSelection>,
 	pub files: Vec<FileSelection>,
 }

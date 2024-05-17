@@ -74,7 +74,7 @@ pub fn should_include(filename: &str, rules: &Vec<FileSelectionGlob>) -> bool {
 
 #[cfg(test)]
 mod test {
-	use crate::path_util::{CPath, Unscoped};
+	use crate::path_util::{CPath, Unembedded};
 
 use super::*;
 	use FileSelection::*;
@@ -87,7 +87,7 @@ use ambl_common::rule::dsl::*;
 	fn globs(f: FilesetDependency) -> Vec<FileSelectionGlob> {
 		let FilesetDependency { root, dirs, files } = f;
 		let res = ResolvedFilesetDependency {
-			root: Unscoped(CPath::new_nonvirtual(root)),
+			root: Unembedded(CPath::new_nonvirtual(root)),
 			dirs,
 			files,
 		};

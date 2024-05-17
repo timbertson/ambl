@@ -21,7 +21,7 @@ use crate::persist::{PersistFile, BuildResult, BuildResultWithDeps, FileStat, Mt
 use crate::module::BuildModule;
 use crate::sync::{Mutexed, MutexHandle};
 use crate::err::result_block;
-use crate::path_util::{Scoped, Scope, CPath, Unscoped};
+use crate::path_util::{Embedded, Embed, CPath, Unembedded};
 use crate::invoke;
 use crate::ui::{Ui, Writer};
 
@@ -75,7 +75,7 @@ pub struct TestModule<'a> {
 	pub scope: Option<String>,
 	pub mount: Option<String>,
 	pub project: &'a TestProject<'a>,
-	module_path: Unscoped,
+	module_path: Unembedded,
 	_rules: Vec<Rule>,
 	rule_fn: Option<fn(&TestModule<'a>, &BaseCtx) -> Result<Vec<Rule>>>,
 	builders: Arc<HashMap<String, BuilderFn>>,
@@ -90,7 +90,7 @@ impl<'a> TestModule<'a> {
 		Self {
 			// NOTE: these get replaced by set_name below
 			name: "".to_owned(),
-			module_path: Unscoped(CPath::new_nonvirtual("".to_owned())),
+			module_path: Unembedded(CPath::new_nonvirtual("".to_owned())),
 
 			project,
 			scope: Default::default(),
@@ -115,7 +115,7 @@ impl<'a> TestModule<'a> {
 
 	pub fn set_name<S: ToString>(mut self, v: S) -> Self {
 		self.name = v.to_string();
-		self.module_path = Unscoped(CPath::new_nonvirtual(v.to_string()));
+		self.module_path = Unembedded(CPath::new_nonvirtual(v.to_string()));
 		self
 	}
 
@@ -155,7 +155,7 @@ impl<'a> TestModule<'a> {
 impl<'a> BuildModule for TestModule<'a> {
 	type Compiled = Self;
 
-	fn compile(engine: &Engine, path: &Unscoped) -> Result<Self::Compiled> {
+	fn compile(engine: &Engine, path: &Unembedded) -> Result<Self::Compiled> {
 		panic!("compilation requested for module {}", path)
 	}
 
@@ -166,7 +166,7 @@ impl<'a> BuildModule for TestModule<'a> {
 	fn build(&mut self, implicits: &Implicits, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<String> {
 		if f.fn_name == "get_rules" {
 			let mut ctx: BaseCtx = serde_json::from_str(&arg.json_string()?)?;
-			TestInvoker::wrap(self.project, implicits, &self.module_path, &f.scope, &mut ctx, |ctx| {
+			TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
 				self.rules(ctx)
 			})
 		} else {
@@ -181,12 +181,12 @@ impl<'a> BuildModule for TestModule<'a> {
 				let token = ctx.token;
 				debug!("running builder for {} with token {:?}", path, token);
 
-				TestInvoker::wrap(self.project, implicits, &self.module_path, &f.scope, &mut ctx, |ctx| {
+				TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
 					f_impl(self.project, &*ctx)
 				})
 			} else if let Some(f_impl) = self.anon_fns.get(fn_name) {
 				let mut ctx: BaseCtx = serde_json::from_str(&arg.json_string()?)?;
-				TestInvoker::wrap(self.project, implicits, &self.module_path, &f.scope, &mut ctx, |ctx| {
+				TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
 					f_impl(self.project, &*ctx)
 				})
 			} else {
@@ -201,7 +201,7 @@ impl<'a> BuildModule for TestModule<'a> {
 #[derive(Clone, Copy)]
 struct BuildState<'a, 'b, 'c> {
 	project: &'a TestProject<'a>,
-	module: &'b Unscoped,
+	module: &'b Unembedded,
 	target_context: &'c TargetContext,
 }
 
@@ -219,15 +219,15 @@ impl TestInvoker {
 	fn wrap<'a, 'b, 'c, R: Serialize, C: AsRef<BaseCtx> + AsMut<BaseCtx>, F: FnOnce(&C) -> Result<R>>(
 		project: &'a TestProject<'a>,
 		implicits: &'b Implicits,
-		module: &'b Unscoped,
-		scope: &'c Scope,
+		module: &'b Unembedded,
+		embed: &'c Embed,
 		ctx: &mut C,
 		f: F
 	) -> Result<String> {
 		let ctx_mut = ctx.as_mut();
 		let token = ActiveBuildToken::from_raw(ctx_mut.token);
 		ctx_mut._override_invoker(Box::new(TestInvoker { token }));
-		let target_context = TargetContext { scope: scope.clone(), implicits: implicits.clone() };
+		let target_context = TargetContext { embed: embed.clone(), implicits: implicits.clone() };
 		
 		let state = BuildState {
 			module,
@@ -420,7 +420,7 @@ impl<'a> TestProject<'a> {
 		p.inject_module(&full_path, v);
 		// mark the module file as fresh to avoid loading a real .wasm file
 		p.inject_cache(
-			BuildRequest::FileDependency(Unscoped(CPath::new_nonvirtual(full_path))),
+			BuildRequest::FileDependency(Unembedded(CPath::new_nonvirtual(full_path))),
 			BuildResultWithDeps::simple(BuildResult::File(FAKE_FILE.clone()))
 		).expect("inject_module");
 		drop(p);
@@ -435,7 +435,7 @@ impl<'a> TestProject<'a> {
 			checksum: PersistChecksum::Disabled,
 		};
 		p.inject_cache(
-			BuildRequest::FileDependency(Unscoped(CPath::new_nonvirtual(v.into()))),
+			BuildRequest::FileDependency(Unembedded(CPath::new_nonvirtual(v.into()))),
 			BuildResultWithDeps::simple(BuildResult::File(stat))
 		).expect("touch_fake");
 		drop(p);
@@ -455,7 +455,7 @@ impl<'a> TestProject<'a> {
 	}
 
 	pub fn build_dep(&self, req: &DependencyRequest) -> Result<InvokeResponse> {
-		let build_request = BuildRequest::from(req.to_owned(), None, &Scope::root())?;
+		let build_request = BuildRequest::from(req.to_owned(), None, &Embed::root())?;
 		self.build_full(&build_request, &BuildReason::Explicit(Forced(false)))
 	}
 
@@ -474,9 +474,9 @@ impl<'a> TestProject<'a> {
 	}
 
 	fn invoke_full(&self, req: &Invoke) -> Result<InvokeResponse> {
-		let module = Unscoped(CPath::new_nonvirtual("_fake_root_module".to_owned()));
+		let module = Unembedded(CPath::new_nonvirtual("_fake_root_module".to_owned()));
 		let target_context = TargetContext {
-			scope: Scope::root(),
+			embed: Embed::root(),
 			implicits: Default::default(),
 		};
 		let result = invoke::perform(self.lock(), &target_context, &module, self.token, req.to_owned())

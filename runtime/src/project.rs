@@ -27,7 +27,7 @@ use crate::build::{BuildCache, BuildReason, BuildResponse};
 use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
 use crate::ctx::Ctx;
 use crate::{err::*, path_util, fileset, ui};
-use crate::path_util::{Absolute, CPath, ResolveModule, Scope, Scoped, Simple, Unscoped};
+use crate::path_util::{Absolute, CPath, ResolveModule, Embed, Embedded, Simple, Unembedded};
 use crate::persist::*;
 use crate::module::*;
 use crate::sandbox::Sandbox;
@@ -68,14 +68,14 @@ enum TargetVisitResult<'a> {
 
 enum NestedVisitResult<'a, C> {
 	Ignore,
-	Traverse(&'a Scope<'a>, C)
+	Traverse(&'a Embed<'a>, C)
 }
 
 trait TargetVisitor<'a> {
 	type Ctx: Copy;
 	// TODO ctx at end?
-	fn visit_target(ctx: Self::Ctx, scope: &'a Scope, target: &'a Target) -> TargetVisitResult<'a>;
-	fn visit_nested(ctx: Self::Ctx, scope: &'a Scope, nested: &'a Nested) -> NestedVisitResult<'a, Self::Ctx>;
+	fn visit_target(ctx: Self::Ctx, embed: &'a Embed, target: &'a Target) -> TargetVisitResult<'a>;
+	fn visit_nested(ctx: Self::Ctx, embed: &'a Embed, nested: &'a Nested) -> NestedVisitResult<'a, Self::Ctx>;
 	
 	// TODO why is this lifetime different?
 	fn should_include<'b, I: ContainsPath>(ctx: Self::Ctx, include: &'b I) -> bool;
@@ -85,13 +85,13 @@ struct ListTargetsVisitor {
 }
 
 impl ListTargetsVisitor {
-	fn print_target_name(scope: &Scope, name: &str) {
+	fn print_target_name(embed: &Embed, name: &str) {
 		print!("  ");
-		if let Some(mount) = scope.mount.as_ref() {
+		if let Some(mount) = embed.mount.as_ref() {
 			print!("{}/", mount);
 		}
-		if let Some(scope) = scope.scope.as_ref() {
-			print!("{}/", scope);
+		if let Some(embed) = embed.scope.as_ref() {
+			print!("{}/", embed);
 		}
 		println!("{}", name);
 	}
@@ -108,36 +108,36 @@ impl<'a> TargetVisitor<'a> for ListTargetsVisitor {
 		}
 	}
 
-	fn visit_target(ctx: Self::Ctx, scope: &'a Scope, target: &'a Target) -> TargetVisitResult<'a> {
+	fn visit_target(ctx: Self::Ctx, embed: &'a Embed, target: &'a Target) -> TargetVisitResult<'a> {
 		if let Some(name) = ctx {
-			match FindTargetVisitor::visit_target(name, scope, target) {
-				TargetVisitResult::Return(name) => Self::print_target_name(scope, name),
+			match FindTargetVisitor::visit_target(name, embed, target) {
+				TargetVisitResult::Return(name) => Self::print_target_name(embed, name),
 				TargetVisitResult::Continue => (),
 			}
 		} else {
 			for name in target.names.iter() {
-				Self::print_target_name(scope, name);
+				Self::print_target_name(embed, name);
 			}
 		}
 		TargetVisitResult::Continue
 	}
 
-	fn visit_nested(ctx: Self::Ctx, scope: &'a Scope, nested: &'a Nested) -> NestedVisitResult<'a, Self::Ctx> {
+	fn visit_nested(ctx: Self::Ctx, embed: &'a Embed, nested: &'a Nested) -> NestedVisitResult<'a, Self::Ctx> {
 		use NestedVisitResult::*;
 		if let Some(name) = ctx {
-			match FindTargetVisitor::visit_nested(name, scope, nested) {
+			match FindTargetVisitor::visit_nested(name, embed, nested) {
 				Ignore => Ignore,
-				Traverse(scope, ctx) => {
+				Traverse(embed, ctx) => {
 					let ctx = if ctx.is_empty() {
 						None
 					} else {
 						Some(ctx)
 					};
-					Traverse(scope, ctx)
+					Traverse(embed, ctx)
 				},
 			}
 		} else {
-			Traverse(&nested.absolute_scope, None)
+			Traverse(&nested.absolute_embed, None)
 		}
 	}
 }
@@ -153,7 +153,7 @@ impl<'a> TargetVisitor<'a> for FindTargetVisitor {
 		include.contains_path(name)
 	}
 
-	fn visit_target(name: &'a str, scope: &'a Scope, target: &'a Target) -> TargetVisitResult<'a> {
+	fn visit_target(name: &'a str, embed: &'a Embed, target: &'a Target) -> TargetVisitResult<'a> {
 		if target.names.iter().any(|n| n == name) {
 			TargetVisitResult::Return(name)
 		} else {
@@ -161,9 +161,9 @@ impl<'a> TargetVisitor<'a> for FindTargetVisitor {
 		}
 	}
 
-	fn visit_nested(name: &'a str, scope: &'a Scope, nested: &'a Nested) -> NestedVisitResult<'a, &'a str> {
-		if let Some((scope, name)) = nested.projection(name) {
-			NestedVisitResult::Traverse(scope, name)
+	fn visit_nested(name: &'a str, embed: &'a Embed, nested: &'a Nested) -> NestedVisitResult<'a, &'a str> {
+		if let Some((embed, name)) = nested.projection(name) {
+			NestedVisitResult::Traverse(embed, name)
 		} else {
 			NestedVisitResult::Ignore
 		}
@@ -180,9 +180,9 @@ struct TargetIter<'a, 'b, M: BuildModule> {
 	project: ProjectMutex<'a, M>,
 	implicits: &'b Implicits,
 	rule: &'b ProjectRule,
-	scope: &'b Scope<'b>,
+	embed: &'b Embed<'b>,
 	// filter: F,
-	source_module: Option<&'b Unscoped>,
+	source_module: Option<&'b Unembedded>,
 	state: RuleChain<'a>,
 }
 
@@ -190,29 +190,29 @@ struct TargetIter<'a, 'b, M: BuildModule> {
 pub struct Nested {
 	rules: Vec<ProjectRule>,
 	relative_mount: Option<Simple>,
-	absolute_scope: Scope<'static>,
-	module_path: Option<Unscoped>,
+	absolute_embed: Embed<'static>,
+	module_path: Option<Unembedded>,
 	implicits: Implicits,
 }
 
 impl Nested {
-	fn projection<'a>(&'a self, name: &'a str) -> Option<(&'a Scope<'static>, &'a str)> {
+	fn projection<'a>(&'a self, name: &'a str) -> Option<(&'a Embed<'static>, &'a str)> {
 		match self.relative_mount.as_ref() {
 			Some(sub) => {
 				sub.projected(name).map(|new_name| {
-					(&self.absolute_scope, new_name)
+					(&self.absolute_embed, new_name)
 				})
 			},
 			
-			// If there's no scope, any name could be found within
-			None => Some((&self.absolute_scope, name)),
+			// If there's no embed, any name could be found within
+			None => Some((&self.absolute_embed, name)),
 		}
 	}
 }
 
 #[derive(Clone, Debug)]
 // just like Include but the paths are typed
-pub struct ScopedInclude {
+pub struct EmbeddedInclude {
 	pub path: Option<CPath>,
 	pub fn_name: String,
 	pub relative_scope: Option<Simple>,
@@ -220,7 +220,7 @@ pub struct ScopedInclude {
 }
 
 #[derive(Clone, Debug)]
-pub struct ScopedMount {
+pub struct EmbeddedMount {
 	pub path: Simple,
 }
 
@@ -228,13 +228,13 @@ trait ContainsPath {
 	fn contains_path(&self, name: &str) -> bool;
 }
 
-impl ContainsPath for ScopedInclude {
+impl ContainsPath for EmbeddedInclude {
 	fn contains_path(&self, name: &str) -> bool {
-		self.relative_scope.as_ref().map(|scope| scope.projected(name).is_some()).unwrap_or(true)
+		self.relative_scope.as_ref().map(|embed| embed.projected(name).is_some()).unwrap_or(true)
 	}
 }
 
-impl ContainsPath for ScopedMount {
+impl ContainsPath for EmbeddedMount {
 	fn contains_path(&self, name: &str) -> bool {
 		self.path.projected(name).is_some()
 	}
@@ -250,7 +250,7 @@ pub enum ProjectRule {
 }
 
 impl ProjectRule {
-	pub fn collate_raw_rules(mut implicits: Implicits, scope: &Scope, rules: Vec<Rule>) -> Result<(Implicits, Vec<ProjectRule>)> {
+	pub fn collate_raw_rules(mut implicits: Implicits, embed: &Embed, rules: Vec<Rule>) -> Result<(Implicits, Vec<ProjectRule>)> {
 			// merge implicits with any new options present in rules
 			let non_config_rules = rules.into_iter()
 				.filter_map(|rule| {
@@ -267,7 +267,7 @@ impl ProjectRule {
 
 			let project_rules = non_config_rules.into_iter()
 					.map(|rule| {
-						ProjectRule::from_rule(rule, scope)
+						ProjectRule::from_rule(rule, embed)
 					})
 					.collect::<Result<Vec<ProjectRule>>>()?;
 			Ok((implicits, project_rules))
@@ -276,14 +276,14 @@ impl ProjectRule {
 
 #[derive(Clone, Debug)]
 pub enum IncludeOrMount {
-	Include(ScopedInclude),
-	Mount(ScopedMount),
+	Include(EmbeddedInclude),
+	Mount(EmbeddedMount),
 }
 
 impl IncludeOrMount {
 	fn relative_mount(&self) -> Option<&Simple> {
 		match self {
-			// includes don't have mounts, only scopes
+			// includes don't have mounts, only embeds
 			IncludeOrMount::Include(x) => None,
 			IncludeOrMount::Mount(x) => Some(&x.path),
 		}
@@ -398,23 +398,23 @@ enum NonConfigRule {
 }
 
 impl ProjectRule {
-	fn from_rule(rule: NonConfigRule, base_scope: &Scope) -> Result<Self> {
+	fn from_rule(rule: NonConfigRule, base_embed: &Embed) -> Result<Self> {
 		match rule {
 			NonConfigRule::Target(v) => Ok(ProjectRule::Target(v)),
 			NonConfigRule::Include(spec) => {
 				let relative_scope = match spec.get_scope() {
 					None => None,
-					Some(rel) => Some(Simple::try_from(rel.to_owned(), base_scope)?),
+					Some(rel) => Some(Simple::try_from(rel.to_owned(), base_embed)?),
 				};
-				let path = spec.get_module().to_owned().map(|m| CPath::new(m, base_scope));
+				let path = spec.get_module().to_owned().map(|m| CPath::new(m, base_embed));
 				let config = spec.get_config().to_owned();
 				let fn_name = spec.get_fn_name().as_deref().unwrap_or("get_rules").to_owned();
-				let include = IncludeOrMount::Include(ScopedInclude { path, relative_scope, config, fn_name });
+				let include = IncludeOrMount::Include(EmbeddedInclude { path, relative_scope, config, fn_name });
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(include))))
 			},
 			NonConfigRule::Mount(spec) => {
-				let path = Simple::try_from(spec.get_path().to_owned(), base_scope)?;
-				let mount = IncludeOrMount::Mount(ScopedMount { path });
+				let path = Simple::try_from(spec.get_path().to_owned(), base_embed)?;
+				let mount = IncludeOrMount::Mount(EmbeddedMount { path });
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(mount))))
 			},
 		}
@@ -423,7 +423,7 @@ impl ProjectRule {
 
 pub struct ModuleCache<M> {
 	pub engine: Engine,
-	pub modules: HashMap<Unscoped, M>,
+	pub modules: HashMap<Unembedded, M>,
 }
 
 impl<M> ModuleCache<M> {
@@ -459,7 +459,7 @@ impl<M: BuildModule> Project<M> {
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
 			self_ref: None,
-			root_rule: Arc::new(ProjectRule::from_rule(NonConfigRule::Include(dsl::module("ambl.yaml").into()), Scope::static_root())?),
+			root_rule: Arc::new(ProjectRule::from_rule(NonConfigRule::Include(dsl::module("ambl.yaml").into()), Embed::static_root())?),
 			writer,
 		});
 
@@ -474,7 +474,7 @@ impl<M: BuildModule> Project<M> {
 	fn load_module_inner<'a>(
 		project: ProjectMutex<'a, M>,
 		implicits: &Implicits,
-		requested_path: &Unscoped,
+		requested_path: &Unembedded,
 		reason: &BuildReason
 	) -> Result<ProjectMutexPair<'a, M, M>> {
 		// First, build the module file itself and register it as a dependency.
@@ -482,10 +482,10 @@ impl<M: BuildModule> Project<M> {
 		let (mut project, module_built) = Self::build(project, implicits, &file_dependency, reason)?;
 
 		// If the module was a target, use the output path not the target name
-		let full_path_owned: Unscoped;
+		let full_path_owned: Unembedded;
 		let mut full_path = requested_path;
 		if let Some(target) = module_built.as_target() {
-			full_path_owned = project.dest_path(&Scoped::root(target.to_owned()))?;
+			full_path_owned = project.dest_path(&Embedded::root(target.to_owned()))?;
 			full_path = &full_path_owned;
 		}
 		debug!("Loading module {:?} for {:?}", full_path, reason);
@@ -519,7 +519,7 @@ impl<M: BuildModule> Project<M> {
 	pub fn load_yaml_rules<'a>(
 		project: ProjectMutex<'a, M>,
 		implicits: &Implicits,
-		path: &Unscoped,
+		path: &Unembedded,
 		reason: &BuildReason
 	) -> Result<ProjectMutexPair<'a, M, Vec<Rule>>> {
 		debug!("Loading YAML rules {:?} for {:?}", path, reason);
@@ -535,9 +535,9 @@ impl<M: BuildModule> Project<M> {
 		Ok((project, rules))
 	}
 	
-	fn within_scope<'a>(name: &'a str, scope: &'a Option<String>) -> Option<&'a str> {
-		match scope {
-			Some(scope) => name.strip_prefix(scope).and_then(|s| s.strip_prefix("/")),
+	fn within_embed<'a>(name: &'a str, embed: &'a Option<String>) -> Option<&'a str> {
+		match embed {
+			Some(embed) => name.strip_prefix(embed).and_then(|s| s.strip_prefix("/")),
 			None => Some(name)
 		}
 	}
@@ -554,27 +554,27 @@ impl<M: BuildModule> Project<M> {
 		project: ProjectMutex<'a, M>,
 		implicits: &'b Implicits,
 		rule: &'b ProjectRule,
-		scope: &'b Scope<'b>,
-		source_module: Option<&Unscoped>,
+		embed: &'b Embed<'b>,
+		source_module: Option<&Unembedded>,
 		ctx: V::Ctx,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget<'b>>>> {
 		match rule {
 			ProjectRule::Target(target) => {
-				match V::visit_target(ctx, scope, target) {
+				match V::visit_target(ctx, embed, target) {
 					TargetVisitResult::Return(name) => result_block(|| {
-						let rel_name = CPath::new(name.to_owned(), scope).into_simple()?;
+						let rel_name = CPath::new(name.to_owned(), embed).into_simple()?;
 						let module_cpath = target.build.module.as_ref().map(|m| {
-							CPath::new(m.to_owned(), scope)
+							CPath::new(m.to_owned(), embed)
 						});
 						let full_module = ResolveModule {
 							source_module,
-							explicit_path: module_cpath.as_ref().map(|p| Scoped::new(scope.copy(), p)),
+							explicit_path: module_cpath.as_ref().map(|p| Embedded::new(embed.copy(), p)),
 						}.resolve()?;
 						Ok((project, Some(FoundTarget {
 							rel_name,
 							implicits,
 							build: ResolvedFnSpec {
-								scope: scope.copy(),
+								embed: embed.copy(),
 								fn_name: target.build.fn_name.to_owned(),
 								full_module,
 								config: target.build.config.clone(),
@@ -586,7 +586,7 @@ impl<M: BuildModule> Project<M> {
 				}
 			},
 			ProjectRule::Mutable(rule_ref) => {
-				return Self::visit_importable_rule::<V>(project, implicits, rule_ref, scope, source_module, ctx);
+				return Self::visit_importable_rule::<V>(project, implicits, rule_ref, embed, source_module, ctx);
 			},
 		}
 	}
@@ -595,8 +595,8 @@ impl<M: BuildModule> Project<M> {
 		mut project: ProjectMutex<'a, M>,
 		parent_implicits: &'b Implicits,
 		rule_ref: &'b RwRef< MutableRule>,
-		scope: &'b Scope<'b>,
-		source_module: Option<&Unscoped>,
+		embed: &'b Embed<'b>,
+		source_module: Option<&Unembedded>,
 		ctx: V::Ctx,
 	) -> Result<ProjectMutexPair<'a, M, Option<FoundTarget<'b>>>> {
 		let mut handle = rule_ref.handle();
@@ -613,12 +613,12 @@ impl<M: BuildModule> Project<M> {
 				// So we can unsafely cast it to a plain reference with the same lifetime as rule_ref
 				let nested = unsafe { std::mem::transmute::<&'_ Nested, &'b Nested>(nested) };
 
-				match V::visit_nested(ctx, scope, nested) {
+				match V::visit_nested(ctx, embed, nested) {
 					NestedVisitResult::Ignore => (),
-					NestedVisitResult::Traverse(scope, ctx) => {
+					NestedVisitResult::Traverse(embed, ctx) => {
 						for rule in nested.rules.iter() {
 							let (project_ret, target) = Self::expand_and_visit_rule::<V>(
-								project, &nested.implicits, rule, scope, nested.module_path.as_ref(), ctx
+								project, &nested.implicits, rule, embed, nested.module_path.as_ref(), ctx
 							)?;
 							project = project_ret;
 							if target.is_some() {
@@ -634,7 +634,7 @@ impl<M: BuildModule> Project<M> {
 				if V::should_include(ctx, embedded) {
 					// release borrow of rule
 					let embedded = embedded.to_owned();
-					debug!("Loading embedded {:?} (scope {:?})", &embedded, scope);
+					debug!("Loading embedded {:?} (embed {:?})", &embedded, embed);
 					let mut handle = readable.unlock();
 
 					result_block(|| {
@@ -646,16 +646,16 @@ impl<M: BuildModule> Project<M> {
 						// the wasm module path (only set when loading a WASM module)
 						let mut wasm_module_path = None;
 						
-						// the scope used when evaluating functions from this module
+						// the embed used when evaluating functions from this module
 						// (mutated in both IncludeOrMount branches)
-						let mut module_scope = scope.clone();
+						let mut module_embed = embed.clone();
 						
 						let rules = match &embedded {
 							IncludeOrMount::Include(include) => {
-								module_scope.set_scope(include.relative_scope.clone());
+								module_embed.set_scope(include.relative_scope.clone());
 
 								let explicit_path = include.path.as_ref()
-									.map(|cpath| Scoped::new(scope.copy(), cpath));
+									.map(|cpath| Embedded::new(embed.copy(), cpath));
 								let module_path = ResolveModule {
 									explicit_path,
 									source_module,
@@ -663,7 +663,7 @@ impl<M: BuildModule> Project<M> {
 
 								let config = &include.config;
 								let request = BuildRequest::WasmCall(ResolvedFnSpec {
-									scope: module_scope.clone(),
+									embed: module_embed.clone(),
 									fn_name: include.fn_name.to_owned(),
 									full_module: module_path.clone(),
 									config: config.to_owned(),
@@ -687,7 +687,7 @@ impl<M: BuildModule> Project<M> {
 								// An include's scope is applied directly to Targets - all other rules
 								// (includes, mounts) only receive scoping if they explicitly
 								// use @scope/*
-								if let Some(rule_scope) = module_scope.scope.as_ref() {
+								if let Some(rule_scope) = module_embed.scope.as_ref() {
 									for rule in rules.iter_mut() {
 										match rule {
 											Rule::Target(t) => {
@@ -704,10 +704,10 @@ impl<M: BuildModule> Project<M> {
 							},
 
 							IncludeOrMount::Mount(mount) => {
-								module_scope.push_mount(&mount.path);
+								module_embed.push_mount(&mount.path);
 
 								let simple_yaml_path = mount.path.join(&CPath::new_nonvirtual("ambl.yaml".to_owned()));
-								let module_path = Unscoped::from_scoped(&Scoped::new(scope.copy(), &simple_yaml_path));
+								let module_path = Unembedded::from_embedded(&Embedded::new(embed.copy(), &simple_yaml_path));
 								let (project_ret, rules) = Self::load_yaml_rules(
 									project,
 									parent_implicits,
@@ -722,13 +722,13 @@ impl<M: BuildModule> Project<M> {
 
 						handle.with_write(|writeable| {
 							let (implicits, project_rules) = ProjectRule::collate_raw_rules(
-								parent_implicits.clone(), &module_scope, rules)?;
+								parent_implicits.clone(), &module_embed, rules)?;
 							let nested = MutableRule::Nested(Nested {
 								implicits,
 								module_path: wasm_module_path,
 								rules: project_rules,
 								relative_mount: embedded.relative_mount().cloned(),
-								absolute_scope: module_scope,
+								absolute_embed: module_embed,
 							});
 							debug!("Import produced these rules: {:?}", &nested);
 							*writeable = nested;
@@ -736,7 +736,7 @@ impl<M: BuildModule> Project<M> {
 						})?;
 
 						// reevaluate after replacing, this will drop into the Rule::Nested branch
-						Self::visit_importable_rule::<V>(project, parent_implicits, rule_ref, scope, source_module, ctx)
+						Self::visit_importable_rule::<V>(project, parent_implicits, rule_ref, embed, source_module, ctx)
 					}).with_context(|| format!("loading embedded {:?}", &embedded))
 				} else {
 					debug!("Skipping irrelevant embed: {:?}", &embedded);
@@ -755,7 +755,7 @@ impl<M: BuildModule> Project<M> {
 			project,
 			&DEFAULT_IMPLICITS, // we don't inherit implicits, since it doesn't matter where a given target was built from
 			root_rule,
-			Scope::static_root(),
+			Embed::static_root(),
 			None,
 			name.as_str(),
 		)?;
@@ -773,7 +773,7 @@ impl<M: BuildModule> Project<M> {
 			project,
 			&DEFAULT_IMPLICITS,
 			&root_rule,
-			Scope::static_root(),
+			Embed::static_root(),
 			None,
 			prefix,
 		)?;
@@ -834,8 +834,8 @@ impl<M: BuildModule> Project<M> {
 					// I need a type annotation, but I don't want to specify the lifetimes x_x
 						let mut project: Mutexed<Project<M>> = project;
 						let persist = if let Some(found_target) = &found_target {
-							let name_scoped = Scoped::new(found_target.build.scope.copy(), found_target.rel_name.to_owned());
-							println!("# {}", &name_scoped);
+							let name_embedded = Embedded::new(found_target.build.embed.copy(), found_target.rel_name.to_owned());
+							println!("# {}", &name_embedded);
 							let child_reason = BuildReason::Dependency(build_token);
 
 							let (project_ret, mut wasm_module) = Self::load_module_inner(
@@ -845,7 +845,7 @@ impl<M: BuildModule> Project<M> {
 								&child_reason)?;
 							project = project_ret;
 							
-							let tmp_path: PathBuf = project.tmp_path(&name_scoped)?.into();
+							let tmp_path: PathBuf = project.tmp_path(&name_embedded)?.into();
 							path_util::rm_rf_and_ensure_parent(&tmp_path)?;
 
 							project.unlocked_block(|project_handle| {
@@ -866,7 +866,7 @@ impl<M: BuildModule> Project<M> {
 								Ok(())
 							})?;
 						
-							let dest_path: PathBuf = project.dest_path(&name_scoped)?.into();
+							let dest_path: PathBuf = project.dest_path(&name_embedded)?.into();
 							path_util::rm_rf_and_ensure_parent(&dest_path)?;
 							match path_util::lstat_opt::<&Path>(tmp_path.as_ref())? {
 								Some(_) => {
@@ -874,7 +874,7 @@ impl<M: BuildModule> Project<M> {
 									fs::rename(&tmp_path, &dest_path)?;
 								},
 								None => {
-									return Err(anyhow!("Builder for {:?} didn't produce an output file. Use `ctx.empty_dest()` if this is intentional", &name_scoped))?;
+									return Err(anyhow!("Builder for {:?} didn't produce an output file. Use `ctx.empty_dest()` if this is intentional", &name_embedded))?;
 								},
 							}
 							let deps = project.collect_deps(build_token)?;
@@ -883,7 +883,7 @@ impl<M: BuildModule> Project<M> {
 									found_target.implicits.to_owned(),
 									BuildResult::File(PersistFile::from_path(
 										&dest_path,
-										Some(name_scoped.flatten()),
+										Some(name_embedded.flatten()),
 										deps.checksum
 									)?)
 								),
@@ -1112,18 +1112,18 @@ impl<M: BuildModule> Project<M> {
 		&self.writer
 	}
 	
-	fn _internal_path(&self, base: &str, name: &Scoped<Simple>) -> Result<Unscoped> {
+	fn _internal_path(&self, base: &str, name: &Embedded<Simple>) -> Result<Unembedded> {
 		let mut ret: PathBuf = PathBuf::from(".ambl");
 		ret.push(base);
-		ret.push(Unscoped::from_scoped(name).0);
-		Ok(Unscoped(CPath::from_path_nonvirtual(ret)?))
+		ret.push(Unembedded::from_embedded(name).0);
+		Ok(Unembedded(CPath::from_path_nonvirtual(ret)?))
 	}
 
-	pub fn tmp_path(&self, name: &Scoped<Simple>) -> Result<Unscoped> {
+	pub fn tmp_path(&self, name: &Embedded<Simple>) -> Result<Unembedded> {
 		self._internal_path("tmp", name)
 	}
 
-	pub fn dest_path(&self, name: &Scoped<Simple>) -> Result<Unscoped> {
+	pub fn dest_path(&self, name: &Embedded<Simple>) -> Result<Unembedded> {
 		self._internal_path("out", name)
 	}
 
@@ -1134,14 +1134,14 @@ impl<M: BuildModule> Project<M> {
 
 	#[cfg(test)]
 	pub fn replace_rules(&mut self, rules: Vec<Rule>) {
-		let scope = Scope::root();
+		let embed = Embed::root();
 		debug!("replacing root rules: {:?}", &rules);
-		let (implicits, project_rules) = ProjectRule::collate_raw_rules(Default::default(), &scope, rules).unwrap();
+		let (implicits, project_rules) = ProjectRule::collate_raw_rules(Default::default(), &embed, rules).unwrap();
 		self.root_rule = Arc::new(ProjectRule::Mutable(RwRef::new(MutableRule::Nested(Nested {
 			implicits,
 			rules: project_rules,
 			relative_mount: None,
-			absolute_scope: scope,
+			absolute_embed: embed,
 			module_path: None,
 		}))));
 	}
@@ -1155,7 +1155,7 @@ impl<M: BuildModule> Project<M> {
 	pub fn inject_module<K: ToString>(&mut self, k: K, v: M::Compiled) {
 		let s = k.to_string();
 		warn!("injecting module: {}", &s);
-		let module_path = Unscoped(CPath::new_nonvirtual(s.to_string()));
+		let module_path = Unembedded(CPath::new_nonvirtual(s.to_string()));
 		self.module_cache.modules.insert(module_path, v);
 	}
 
@@ -1168,7 +1168,7 @@ impl<M: BuildModule> Project<M> {
 
 #[derive(Debug)]
 pub struct FoundTarget<'a> {
-	pub rel_name: Simple, // the name relative to the build's scope
+	pub rel_name: Simple, // the name relative to the build's embed
 	pub build: ResolvedFnSpec<'a>,
 	pub implicits: &'a Implicits,
 }

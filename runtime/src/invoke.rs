@@ -10,7 +10,7 @@ use crate::build::{BuildReason, BuildResponse, TargetContext};
 use crate::build_request::BuildRequest;
 use crate::err::result_block;
 use crate::module::BuildModule;
-use crate::path_util::{lexists, Unscoped, CPath, Scope, Simple, Scoped, self, string_of_pathbuf};
+use crate::path_util::{lexists, Unembedded, CPath, Embed, Simple, Embedded, self, string_of_pathbuf};
 use crate::persist::BuildResult;
 use crate::project::{Project, ActiveBuildToken, ProjectMutex, ProjectMutexPair, Implicits};
 use crate::sync::MutexHandle;
@@ -18,7 +18,7 @@ use crate::sync::MutexHandle;
 pub fn perform<'a, M: BuildModule>(
 	project: ProjectMutex<'a, M>,
 	target_context: &TargetContext,
-	module_path: &Unscoped,
+	module_path: &Unembedded,
 	token: ActiveBuildToken,
 	request: Invoke,
 ) -> Result<InvokeResponse> {
@@ -27,7 +27,7 @@ pub fn perform<'a, M: BuildModule>(
 			crate::debug::shell_on_failure(perform_invoke(project, target_context, module_path, token, &action))
 		},
 		Invoke::Dependency(request) => {
-			let build_request = BuildRequest::from(request, Some(module_path), &target_context.scope)?;
+			let build_request = BuildRequest::from(request, Some(module_path), &target_context.embed)?;
 			let (project, persist) = Project::build(project, &target_context.implicits, &build_request, &BuildReason::Dependency(token))?;
 			persist.into_response()
 		},
@@ -39,14 +39,14 @@ pub fn perform<'a, M: BuildModule>(
 fn perform_invoke<M: BuildModule>(
 	mut project: ProjectMutex<M>,
 	target_context: &TargetContext,
-	module_path: &Unscoped,
+	module_path: &Unembedded,
 	token: ActiveBuildToken,
 	action: &InvokeAction,
 ) -> Result<InvokeResponse> {
 	result_block(|| {
-		let scope = &target_context.scope;
+		let embed = &target_context.embed;
 		let dest_tmp = |project: &Project<M>, target: &String| {
-			let target = Scoped::new(scope.copy(), Simple::try_from(target.to_owned(), scope)?);
+			let target = Embedded::new(embed.copy(), Simple::try_from(target.to_owned(), embed)?);
 			Project::tmp_path(project, &target)
 		};
 		match action {
@@ -107,34 +107,34 @@ fn perform_invoke<M: BuildModule>(
 fn built_source_path<'a, M: BuildModule>(
 	mut project: ProjectMutex<'a, M>,
 	target_context: &TargetContext,
-	module_path: &Unscoped,
+	module_path: &Unembedded,
 	token: ActiveBuildToken,
 	src: &FileSource,
 	suffix: Option<&str>
 )
 	-> Result<ProjectMutexPair<'a, M, PathBuf>>
 {
-	let scope = &target_context.scope;
+	let embed = &target_context.embed;
 	let mut src = match src {
 		FileSource::Target(path) => {
 			let request = DependencyRequest::FileDependency(path.to_owned());
-			let build_request = BuildRequest::from(request, Some(module_path), scope)?;
+			let build_request = BuildRequest::from(request, Some(module_path), embed)?;
 			let (project_ret, persist) = Project::build(project, &target_context.implicits, &build_request, &BuildReason::Dependency(token))?;
 			project = project_ret;
 			let target = match persist.result.result {
 				BuildResult::File(t) => t.target,
 				_ => None,
 			};
-			let unscoped = match target {
-				Some(t) => project.dest_path(&Scoped::root(t))?,
-				None => Unscoped::from_string(path.to_owned(), scope),
+			let unembedded = match target {
+				Some(t) => project.dest_path(&Embedded::root(t))?,
+				None => Unembedded::from_string(path.to_owned(), embed),
 			};
-			unscoped.0.into()
+			unembedded.0.into()
 		},
 		FileSource::Tempdir(tempdir) => {
 			let temp_root: &Path = project.get_tempdir(token, *tempdir)?;
 			let mut ret = PathBuf::from(temp_root);
-			scope.push_mount_to(&mut ret);
+			embed.push_mount_to(&mut ret);
 			ret
 		}
 	};

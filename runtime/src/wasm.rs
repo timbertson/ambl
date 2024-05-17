@@ -16,15 +16,15 @@ use wasmtime::AsContextMut;
 use crate::build::{BuildReason, TargetContext};
 use crate::ctx::*;
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
-use crate::path_util::{Scope, self};
+use crate::path_util::{Embed, self};
 use crate::project::{Implicits, FoundTarget};
-use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::BuildModule, path_util::{Scoped, CPath, Unscoped}, err::result_block, invoke};
+use crate::{sync::{RwLockReadRef, RwLockWriteRef}, project::{Project, ProjectRef, ProjectHandle, ActiveBuildToken}, persist::PersistFile, module::BuildModule, path_util::{Embedded, CPath, Unembedded}, err::result_block, invoke};
 
 bindgen!("builder");
 
 pub struct StoreInner {
 	name: String,
-	path: Unscoped,
+	path: Unembedded,
 	project: ProjectRef<WasmModule>,
 	target_contexts: HashMap<ActiveBuildToken, TargetContext>,
 }
@@ -36,7 +36,7 @@ pub struct WasmModule {
 
 #[derive(Clone)]
 pub struct Compiled {
-	path: Unscoped,
+	path: Unembedded,
 	component: Component,
 }
 
@@ -58,7 +58,7 @@ impl BuilderImports for StoreInner {
 			let TaggedInvoke { token, request } = request;
 			let token = ActiveBuildToken::from_raw(token);
 			let target_context = self.target_contexts.get(&token)
-				.ok_or_else(|| anyhow!("invoke called without an active scope; this should be impossible"))?;
+				.ok_or_else(|| anyhow!("invoke called without an active embed; this should be impossible"))?;
 			let project = project_handle.lock("ambl_invoke")?;
 			invoke::perform(project, target_context, &self.path, token, request)
 		})();
@@ -70,7 +70,7 @@ impl BuilderImports for StoreInner {
 impl BuildModule for WasmModule {
 	type Compiled = Compiled;
 
-	fn compile(engine: &Engine, path: &Unscoped) -> Result<Compiled> {
+	fn compile(engine: &Engine, path: &Unembedded) -> Result<Compiled> {
 		let raw_path = &path.0;
 		debug!("Compiling {}", raw_path);
 		let component = Component::from_file(&engine, raw_path)?;
@@ -112,7 +112,7 @@ impl BuildModule for WasmModule {
 		let json_string = arg.json_string()?;
 		let state = self.store.data_mut();
 
-		// We wrap every call by inserting the scope + options into the store. This
+		// We wrap every call by inserting the embed + options into the store. This
 		// lets us access these implicit params within `invoke`
 		let token = ActiveBuildToken::from_raw(arg.token());
 
@@ -120,7 +120,7 @@ impl BuildModule for WasmModule {
 			Entry::Occupied(_) => false,
 			Entry::Vacant(entry) => {
 				entry.insert(TargetContext {
-					scope: f.scope.clone(),
+					embed: f.embed.clone(),
 					implicits: implicits.clone(),
 				});
 				true

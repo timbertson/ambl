@@ -15,7 +15,7 @@ When receiving this in ambl, we use the token to augment the request with intern
 
 Before passing to project::build, we use this information to resolve dependency requests into `BuildRequest` objects, which:
 
- - contain `Unscoped` paths instead of plain strings (i.e. paths which are already resolved against the scope, making them relative to the project root)
+ - contain `Unembedded` paths instead of plain strings (i.e. paths which are already resolved against the scope, making them relative to the project root)
  - always contain a module path for function calls
 
 Internally, the thing we persist is slightly different. Namely, the `FileDependency` variant of a request contains the desired return type (nothing, file contents, file presence). But the DependencyKey type strips this information, since it doesn't affect the underlying file / target, only the return value from the dependency call.

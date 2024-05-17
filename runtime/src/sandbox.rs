@@ -20,7 +20,7 @@ use crate::build_request::{BuildRequest, ResolvedCommand};
 use crate::persist::{DepSet, BuildResult};
 use crate::project::{Project, ProjectMutexPair, ProjectSandbox, Implicits};
 use crate::sync::{Mutexed, MutexHandle};
-use crate::path_util::{lexists, Absolute, CPath, External, Scope, Scoped, Simple, Unscoped};
+use crate::path_util::{lexists, Absolute, CPath, External, Embed, Embedded, Simple, Unembedded};
 use crate::err::result_block;
 use crate::module::BuildModule;
 use crate::{DependencyRequest, ui};
@@ -41,9 +41,9 @@ impl Sandbox {
 		}).with_context(|| format!("Installing symlink {:?} (in root {:?})", rel, roots.tmp))
 	}
 	
-	fn auto_promote(roots: &Roots, paths: Vec<&Unscoped>) -> Result<()> {
-		for unscoped_path in paths {
-			let rel_path = &unscoped_path.0;
+	fn auto_promote(roots: &Roots, paths: Vec<&Unembedded>) -> Result<()> {
+		for unembedded_path in paths {
+			let rel_path = &unembedded_path.0;
 			result_block(|| {
 				let tmp_path = roots.tmp.join(rel_path);
 				if lexists(tmp_path.as_path())? {
@@ -61,8 +61,8 @@ impl Sandbox {
 
 	fn share_path<'a, 'b>(
 		roots: & Roots,
-		auto_promote: &mut Vec<&'b Unscoped>,
-		source: &'a ImpureShare<Unscoped>
+		auto_promote: &mut Vec<&'b Unembedded>,
+		source: &'a ImpureShare<Unembedded>
 	) -> Result<()>
 		// source path reference must live at least as long as the
 		// references we store in auto_promote
@@ -123,8 +123,8 @@ impl Sandbox {
 						BuildResult::File(file) => {
 							if let Some(output) = file.target.to_owned() {
 								// don't use `target`, use the shadow path within .ambl/out/`target`
-								let unscoped = project.dest_path(&Scoped::root(output))?;
-								let simple = unscoped.0.into_simple()?;
+								let unembedded = project.dest_path(&Embedded::root(output))?;
+								let simple = unembedded.0.into_simple()?;
 								debug!("Adding target to sandbox: {} ({})", &rel, &simple);
 								dest.insert(rel, Some(simple));
 							} else {
@@ -175,7 +175,7 @@ impl Sandbox {
 				.context("initializing command sandbox")?;
 		}
 		
-		let ResolvedCommand { scope, cmd } = command;
+		let ResolvedCommand { embed, cmd } = command;
 		let GenCommand { exe, args, env, env_inherit, output, input, impure_share_paths } = cmd;
 
 		let mut cmd = Command::new(&exe.0.as_path());
@@ -294,11 +294,11 @@ impl Sandbox {
 
 				// TODO: figure out how an explicitly passed in cwd would interact
 				// with mount path
-				let cwd: Absolute = match scope.mount.as_ref() {
-					Some(scope) => roots.tmp.join(scope.as_ref()),
+				let cwd: Absolute = match embed.mount.as_ref() {
+					Some(mount) => roots.tmp.join(mount.as_ref()),
 					None => roots.tmp.clone(),
 				};
-				debug!("cwd = {}, scope = {:?}", cwd.as_path().display(), scope);
+				debug!("cwd = {}, embed = {:?}", cwd.as_path().display(), embed);
 
 				std::fs::create_dir_all(&cwd)?;
 				cmd.current_dir(&cwd);
@@ -306,13 +306,13 @@ impl Sandbox {
 				{ // install @scope in cwd. Note this is a literal @scope symlink,
 					// so that uninterpreted raw string paths will work within the command
 					let scope_link = cwd.join(&CPath::new_nonvirtual("@scope".to_owned()));
-					Self::_link(scope_link, scope.scope.as_ref().map(|simple| simple.as_path())
+					Self::_link(scope_link, embed.scope.as_ref().map(|simple| simple.as_path())
 						.unwrap_or(CPath::Cwd.as_ref()))?;
 				}
 
 				{ // install @root in cwd, as a sequence of `..` components
 					let root_link = cwd.join(&CPath::new_nonvirtual("@root".to_owned()));
-					Self::_link(root_link, scope.path_to_root())?;
+					Self::_link(root_link, embed.path_to_root())?;
 				}
 
 				{ // install .ambl/tmp at the project root, so the command can populate the output path
@@ -323,7 +323,7 @@ impl Sandbox {
 				}
 
 				debug!("Installing {} symlinks to impure_shared_paths", impure_share_paths.len());
-				let mut auto_promote_paths: Vec<&Unscoped> = Vec::new();
+				let mut auto_promote_paths: Vec<&Unembedded> = Vec::new();
 				for path in impure_share_paths {
 					Self::share_path(&roots, &mut auto_promote_paths, path)?;
 				}

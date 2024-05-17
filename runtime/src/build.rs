@@ -6,7 +6,7 @@ use anyhow::*;
 
 use crate::build_request::BuildRequest;
 use crate::module::BuildModule;
-use crate::path_util::{Scoped, Scope, Simple};
+use crate::path_util::{Embedded, Embed, Simple};
 use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile, BuildRecord};
 use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken, Implicits, HasImplicits};
 use crate::sync::{Mutexed, MutexRef};
@@ -35,7 +35,7 @@ impl BuildReason {
 }
 
 pub struct TargetContext {
-	pub scope: Scope<'static>,
+	pub embed: Embed<'static>,
 	pub implicits: Implicits,
 }
 

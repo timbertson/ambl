@@ -8,12 +8,12 @@ use wasmtime::Engine;
 use crate::build_request::ResolvedFnSpec;
 use crate::ctx::Ctx;
 use crate::project::{FoundTarget, Implicits};
-use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef}, persist::PersistFile, path_util::{CPath, Unscoped}};
+use crate::{project::{ActiveBuildToken, ProjectHandle, ProjectRef}, persist::PersistFile, path_util::{CPath, Unembedded}};
 
 pub trait BuildModule : Sized {
 	type Compiled: ToOwned;
 
-	fn compile(engine: &Engine, path: &Unscoped) -> Result<Self::Compiled>;
+	fn compile(engine: &Engine, path: &Unembedded) -> Result<Self::Compiled>;
 	
 	fn load(engine: &Engine, module: &Self::Compiled, project: ProjectRef<Self>) -> Result<Self>;
 

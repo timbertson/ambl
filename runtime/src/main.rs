@@ -25,7 +25,7 @@ use log::*;
 
 use anyhow::*;
 use wasmtime::*;
-use path_util::{CPath, Unscoped};
+use path_util::{CPath, Unembedded};
 use build_request::BuildRequest;
 use project::{Project, ModuleCache, Implicits};
 use build::BuildReason;
@@ -62,7 +62,7 @@ fn main() -> Result<()> {
 			}
 		} else {
 			for arg in args {
-				let path = Unscoped(CPath::new_nonvirtual(arg.to_owned()));
+				let path = Unembedded(CPath::new_nonvirtual(arg.to_owned()));
 				let request = BuildRequest::FileDependency(path);
 				let reason = BuildReason::Explicit(Forced(cli.force));
 				let (project_ret, _) = Project::build(project_mutexed, &Implicits::default_static(), &request, &reason)?;

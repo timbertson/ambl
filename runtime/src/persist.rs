@@ -11,7 +11,7 @@ use ambl_common::{build::{DependencyRequest, InvokeResponse, Command, GenCommand
 
 use crate::build_request::{ResolvedFnSpec, ResolvedFilesetDependency, BuildRequest};
 use crate::project::{ProjectRef, Project, ProjectHandle, Implicits};
-use crate::path_util::{Simple, Scoped, CPath, Unscoped, ResolveModule, self};
+use crate::path_util::{Simple, Embedded, CPath, Unembedded, ResolveModule, self};
 use crate::module::BuildModule;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
