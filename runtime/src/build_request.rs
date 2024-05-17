@@ -1,3 +1,4 @@
+use ambl_api::ImpureShare;
 use ambl_common::rule::EnvLookup;
 use log::*;
 use ambl_common::build::{FileSelection, FilesetDependency};
@@ -85,15 +86,59 @@ impl<'a> ResolvedFnSpec<'a> {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum Exe {
+	FromPath(String),
+	Local(Unembedded),
+}
+
+impl Display for Exe {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Exe::FromPath(p) => Display::fmt(p, f),
+			Exe::Local(p) => Display::fmt(p, f),
+		}
+	}
+}
+
+impl fmt::Debug for Exe {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			Exe::FromPath(p) => fmt::Debug::fmt(p, f),
+			Exe::Local(p) => fmt::Debug::fmt(p, f),
+		}
+	}
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ResolvedCommand {
 	pub embed: Embed<'static>,
-	pub cmd: GenCommand<Unembedded>,
+	pub cmd: GenCommand<Exe, Unembedded>,
 }
+
 impl ResolvedCommand {
-	pub fn new(cmd_str: GenCommand<String>, embed: Embed<'static>) -> Self {
-		let cmd = cmd_str.convert(|s| {
-			Unembedded::from_string(s, &embed)
-		});
+	pub fn new(cmd_str: GenCommand<String, String>, embed: Embed<'static>) -> Self {
+		let string_to_path = |s| Unembedded::from_string(s, &embed);
+		let GenCommand { exe, args, env, env_inherit, impure_share_paths, output, input } = cmd_str;
+
+		// use `./` for exes in the current directory
+		let exe = if exe.contains('/') {
+			Exe::Local(string_to_path(exe))
+		} else {
+			Exe::FromPath(exe)
+		};
+
+		let impure_share_paths : Vec<ImpureShare<Unembedded>> = impure_share_paths
+			.into_iter()
+			.map(|impure_share| impure_share.map(&string_to_path))
+			.collect();
+
+		let cmd = GenCommand {
+			exe, args, env,
+			env_inherit,
+			impure_share_paths,
+			output, input,
+		};
+
 		Self { embed, cmd }
 	}
 }

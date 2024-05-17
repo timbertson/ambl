@@ -5,7 +5,7 @@ use anyhow::*;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 
 use crate::ffi::*;
-use crate::build::{Command, CopyFile, DependencyRequest, FileSource, FilesetDependency, GenCommand, Invoke, InvokeAction, InvokeResponse, ReadFile, Stdout, TaggedInvoke, WriteDest};
+use crate::build::{Command, CopyFile, DependencyRequest, FileSource, FilesetDependency, Invoke, InvokeAction, InvokeResponse, ReadFile, Stdout, TaggedInvoke, WriteDest};
 use crate::rule::EnvLookup;
 
 fn ignore_result<T>(r: Result<T>) -> Result<()> {
@@ -115,19 +115,6 @@ impl BaseCtx {
 
 	pub fn run_output_bytes(&self, cmd: Command) -> Result<Vec<u8>> {
 		self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::Return)))?.into_bytes()
-	}
-
-	pub fn cmd_from_path<S: Into<String>>(&self, exe: S) -> Result<Command> {
-		let exe = self.lookup_exe(exe)?;
-		Ok(Command::from(GenCommand::<String> {
-			exe: exe.into(),
-			args: Default::default(),
-			env: Default::default(),
-			env_inherit: Default::default(),
-			impure_share_paths: Default::default(),
-			output: Default::default(),
-			input: Default::default(),
-		}))
 	}
 
 	pub fn lookup_exe<S: Into<String>>(&self, find: S) -> Result<String> {

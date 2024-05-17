@@ -208,13 +208,13 @@ impl<T> ImpureShare<T> {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct GenCommand<Path> {
-	pub exe: Path,
+pub struct GenCommand<ExePath, FilePath> {
+	pub exe: ExePath,
 	pub args: Vec<String>,
 	// pub cwd: Option<Path>, // Disabled until there's a plan to support sane scope / mount handling with a custom CWD
 	pub env: BTreeMap<String, String>,
 	pub env_inherit: BTreeSet<String>,
-	pub impure_share_paths: Vec<ImpureShare<Path>>,
+	pub impure_share_paths: Vec<ImpureShare<FilePath>>,
 
 	pub output: Stdio,
 	pub input: Stdin,
@@ -231,7 +231,7 @@ pub struct GenCommand<Path> {
 }
 
 // Suppress most noise at the default log level, as this struct often appears in error traces
-impl <T: Debug> Debug for GenCommand<T> {
+impl <T: Debug, T2: Debug> Debug for GenCommand<T, T2> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let mut out = f.debug_struct("Command");
 		out
@@ -250,29 +250,10 @@ impl <T: Debug> Debug for GenCommand<T> {
 	}
 }
 
-impl<T> GenCommand<T> {
-	pub fn convert<R, F: Fn(T) -> R>(self, f: F) -> GenCommand<R> {
-		let Self { exe, args, env, env_inherit, impure_share_paths, output, input } = self;
-		let impure_share_paths : Vec<ImpureShare<R>> = impure_share_paths
-			.into_iter()
-			.map(|impure_share| impure_share.map(&f))
-			.collect();
-		GenCommand {
-			exe: f(exe),
-			args,
-			env,
-			env_inherit,
-			impure_share_paths,
-			output,
-			input,
-		}
-	}
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct Command(GenCommand<String>);
+pub struct Command(GenCommand<String, String>);
 impl Deref for Command {
-	type Target = GenCommand<String>;
+	type Target = GenCommand<String, String>;
 
 	fn deref(&self) -> &Self::Target {
 		&self.0
@@ -356,14 +337,14 @@ impl Command {
 	}
 }
 
-impl From<GenCommand<String>> for Command {
-	fn from(c: GenCommand<String>) -> Self {
+impl From<GenCommand<String, String>> for Command {
+	fn from(c: GenCommand<String, String>) -> Self {
 		Self(c)
 	}
 }
 
-impl Into<GenCommand<String>> for Command {
-	fn into(self) -> GenCommand<String> {
+impl Into<GenCommand<String, String>> for Command {
+	fn into(self) -> GenCommand<String, String> {
 		self.0
 	}
 }

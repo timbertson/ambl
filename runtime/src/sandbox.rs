@@ -1,3 +1,4 @@
+use ambl_api::EnvLookup;
 use log::*;
 use os_pipe::{PipeReader, PipeWriter};
 use tempdir::TempDir;
@@ -16,7 +17,7 @@ use anyhow::*;
 use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare};
 
 use crate::build::BuildReason;
-use crate::build_request::{BuildRequest, ResolvedCommand};
+use crate::build_request::{BuildRequest, Exe, ResolvedCommand};
 use crate::persist::{DepSet, BuildResult};
 use crate::project::{Project, ProjectMutexPair, ProjectSandbox, Implicits};
 use crate::sync::{Mutexed, MutexHandle};
@@ -177,8 +178,17 @@ impl Sandbox {
 		
 		let ResolvedCommand { embed, cmd } = command;
 		let GenCommand { exe, args, env, env_inherit, output, input, impure_share_paths } = cmd;
-
-		let mut cmd = Command::new(&exe.0.as_path());
+		
+		let mut cmd = match exe {
+			Exe::FromPath(p) => {
+				let request = BuildRequest::EnvLookup(EnvLookup { key: "PATH".to_owned(), find: p.to_owned() });
+				let (project_ret, value) = Project::<M>::build(project, implicits, &request, reason)?;
+				project = project_ret;
+				let full_path = value.into_response()?.into_string_opt()?.ok_or_else(|| anyhow!("{} not found on $PATH", p))?;
+				Command::new(full_path)
+			},
+			Exe::Local(p) => Command::new(p.as_path()),
+		};
 
 		cmd.env_clear();
 		

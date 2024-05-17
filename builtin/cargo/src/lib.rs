@@ -38,7 +38,7 @@ pub mod build {
 
 	fn raw_cargo(c: &BaseCtx) -> Result<Command> {
 		minimal_cargo_files(c)?;
-		c.cmd_from_path("cargo")
+		Ok(cmd("cargo"))
 	}
 
 	fn minimal_cargo_files(c: &BaseCtx) -> Result<()> {

@@ -359,7 +359,7 @@ pub mod dsl {
 	}
 
 	pub fn cmd<S: Into<String>>(exe: S) -> Command {
-		Command::from(GenCommand::<String> {
+		Command::from(GenCommand::<String, String> {
 			exe: exe.into(),
 			args: Default::default(),
 			env: Default::default(),

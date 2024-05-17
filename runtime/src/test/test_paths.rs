@@ -47,7 +47,7 @@ fn test_virtual_paths() -> Result<()> {
 			p.record(ctx.read_file("@root/file")?);
 			
 			ctx.write_dest(
-				ctx.run_output(ctx.cmd_from_path("bash")?.arg("-uxc")
+				ctx.run_output(cmd("bash").arg("-uxc")
 					.arg("ls -1 ../; cat file; cat @scope/file; cat @root/file")
 					.stderr(Stderr::Merge))?
 			)

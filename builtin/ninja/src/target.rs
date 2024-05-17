@@ -167,7 +167,7 @@ pub fn execute(ctx: TargetCtx) -> Result<()> {
 
 	// TODO should we be splicing this?
 	let bash_command = eval::evaluate(bindings, &UnownedValue::reference("command"))?;
-	ctx.run(ctx.cmd_from_path("bash")?.arg("-euxc").arg(String::from_utf8(bash_command)?))?;
+	ctx.run(cmd("bash").arg("-euxc").arg(String::from_utf8(bash_command)?))?;
 	Ok(())
 	// ctx.write_dest("TEST")
 }
