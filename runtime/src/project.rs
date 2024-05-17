@@ -216,7 +216,7 @@ pub struct ScopedInclude {
 	pub path: Option<CPath>,
 	pub fn_name: String,
 	pub relative_scope: Option<Simple>,
-	pub config: IncludeConfig // TODO
+	pub config: rule::Config
 }
 
 #[derive(Clone, Debug)]
@@ -238,12 +238,6 @@ impl ContainsPath for ScopedMount {
 	fn contains_path(&self, name: &str) -> bool {
 		self.path.projected(name).is_some()
 	}
-}
-
-#[derive(Clone, Debug)]
-pub enum IncludeConfig {
-	YAML,
-	WASM(ambl_common::rule::Config)
 }
 
 // superset of Rule with the addition of Nested, which
@@ -413,7 +407,7 @@ impl ProjectRule {
 					Some(rel) => Some(Simple::try_from(rel.to_owned(), base_scope)?),
 				};
 				let path = spec.get_module().to_owned().map(|m| CPath::new(m, base_scope));
-				let config = IncludeConfig::WASM(spec.get_config().to_owned());
+				let config = spec.get_config().to_owned();
 				let fn_name = spec.get_fn_name().as_deref().unwrap_or("get_rules").to_owned();
 				let include = IncludeOrMount::Include(ScopedInclude { path, relative_scope, config, fn_name });
 				Ok(ProjectRule::Mutable(RwRef::new(MutableRule::Include(include))))
@@ -667,61 +661,48 @@ impl<M: BuildModule> Project<M> {
 									source_module,
 								}.resolve()?;
 
-								match include.config {
-									IncludeConfig::YAML => {
-										let (project_ret, rules) = Self::load_yaml_rules(
-											project,
-											parent_implicits,
-											&module_path,
-											&BuildReason::Import
-										).context("loading YAML rules")?;
-										project = project_ret;
-										rules
+								let config = &include.config;
+								let request = BuildRequest::WasmCall(ResolvedFnSpec {
+									scope: module_scope.clone(),
+									fn_name: include.fn_name.to_owned(),
+									full_module: module_path.clone(),
+									config: config.to_owned(),
+								});
+								wasm_module_path = Some(module_path);
+
+								let (project_ret, persist_dep) = Project::build(project,
+									parent_implicits,
+									&request,
+									&BuildReason::Import)?;
+
+								let mut rules: Vec<Rule> = match persist_dep.result.result {
+									BuildResult::Wasm(jvalue) => serde_json::from_value(jvalue.to_owned())
+										.with_context(|| format!("Deserializing JSON as a list of Rules:\n```\n{}\n```", &jvalue))?,
+									other => {
+										return Err(anyhow!("Unexpected wasm call response: {:?}", other));
 									},
+								};
+								project = project_ret;
 
-									IncludeConfig::WASM(ref config) => {
-										let request = BuildRequest::WasmCall(ResolvedFnSpec {
-											scope: module_scope.clone(),
-											fn_name: include.fn_name.to_owned(),
-											full_module: module_path.clone(),
-											config: config.to_owned(),
-										});
-										wasm_module_path = Some(module_path);
-
-										let (project_ret, persist_dep) = Project::build(project,
-											parent_implicits,
-											&request,
-											&BuildReason::Import)?;
-
-										let mut rules: Vec<Rule> = match persist_dep.result.result {
-											BuildResult::Wasm(jvalue) => serde_json::from_value(jvalue.to_owned())
-												.with_context(|| format!("Deserializing JSON as a list of Rules:\n```\n{}\n```", &jvalue))?,
-											other => {
-												return Err(anyhow!("Unexpected wasm call response: {:?}", other));
-											},
-										};
-										project = project_ret;
-
-										// An include's scope is applied directly to Targets - all other rules
-										// (includes, mounts) only receive scoping if they explicitly
-										// use @scope/*
-										if let Some(rule_scope) = module_scope.scope.as_ref() {
-											for rule in rules.iter_mut() {
-												match rule {
-													Rule::Target(t) => {
-														let prefix = format!("{}/", rule_scope.as_str());
-														for name in t.names.iter_mut() {
-															name.insert_str(0, &prefix);
-														}
-													}
-													_ => (),
+								// An include's scope is applied directly to Targets - all other rules
+								// (includes, mounts) only receive scoping if they explicitly
+								// use @scope/*
+								if let Some(rule_scope) = module_scope.scope.as_ref() {
+									for rule in rules.iter_mut() {
+										match rule {
+											Rule::Target(t) => {
+												let prefix = format!("{}/", rule_scope.as_str());
+												for name in t.names.iter_mut() {
+													name.insert_str(0, &prefix);
 												}
 											}
+											_ => (),
 										}
-										rules
-									},
+									}
 								}
+								rules
 							},
+
 							IncludeOrMount::Mount(mount) => {
 								module_scope.push_mount(&mount.path);
 

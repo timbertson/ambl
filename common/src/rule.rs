@@ -5,9 +5,6 @@ use std::marker::PhantomData;
 
 use crate::ctx::BaseCtx;
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum IncludeMode { YAML, WASM }
-
 // Newtype wrapper so we can implement Hash for it
 #[repr(transparent)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
