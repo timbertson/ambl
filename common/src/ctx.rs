@@ -77,6 +77,15 @@ impl BaseCtx {
 		ignore_result(self.invoke_dep(DependencyRequest::FileDependency(path.into())))
 	}
 
+	pub fn build_all<S: IntoIterator<Item=String>>(&self, paths: S) -> Result<()> {
+		// TODO this API is present for parallelism opportunity, but parallelism hasn't
+		// been implemented yet
+		for path in paths.into_iter() {
+			ignore_result(self.invoke_dep(DependencyRequest::FileDependency(path.into())))?
+		}
+		Ok(())
+	}
+
 	pub fn exists<S: Into<String>>(&self, path: S) -> Result<bool> {
 		self.invoke_dep(DependencyRequest::FileExistence(path.into())).map(|ret| match ret {
 			InvokeResponse::Bool(b) => b,

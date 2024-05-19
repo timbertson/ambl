@@ -120,6 +120,8 @@ impl<'a> From<&'a ninja::Rule<'a>> for OwnedRule {
 pub struct TargetConfig {
 	pub bindings: HashMap<String, OwnedValue>,
 	pub rule: OwnedRule,
+	pub inputs: Vec<String>,
+	pub implicit_inputs: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -142,7 +144,7 @@ impl<'a> Lookup for RuleBindings<'a> {
 		self.config.bindings.lookup(key).or_else(||
 			self.config.rule.bindings.lookup(key).or_else(|| {
 				match key {
-					"in" => Some(Ok(LookupResult::Simple("TODO".to_owned()))),
+					"in" => Some(Ok(LookupResult::Simple(self.config.inputs.join(" ")))),
 					"out" => Some(Ok(LookupResult::Simple(self.ctx.dest_path_str().to_owned()))),
 					_ => None,
 				}
@@ -159,6 +161,9 @@ pub fn execute(ctx: TargetCtx) -> Result<()> {
 		ctx: &ctx,
 	};
 	info!("config: {:?}", config);
+
+	ctx.build_all(config.inputs.clone())?;
+	ctx.build_all(config.implicit_inputs.clone())?;
 
 	// TODO should we be splicing this?
 	let bash_command = eval::evaluate(bindings, &UnownedValue::reference("command"))?;

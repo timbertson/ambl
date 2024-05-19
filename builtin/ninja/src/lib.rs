@@ -3,8 +3,7 @@ mod eval;
 
 #[ambl_api::export]
 pub mod build {
-	use std::collections::HashMap;
-	use std::default::Default;
+	use std::collections::{BTreeMap, HashMap};
 	use ninja_build_syntax as ninja;
 
 	use anyhow::{anyhow, *};
@@ -72,32 +71,69 @@ use crate::target::{TargetConfig, UnownedValue};
 		let ninja_rules = NinjaRules::parse(&file_contents)?;
 		info!("{:?}", &ninja_rules);
 		
-		let mut result = Vec::new();
 		let builder: FunctionSpec = target_fn!(execute).into();
-		// let mut targets: Vec<TargetConfig> = Default::default();
-		// let bindings = eval::leaf(&ninja_rules.bindings);
+
+		let eval_static = |val| {
+			Ok(String::from_utf8(eval::evaluate(&ninja_rules.bindings, &UnownedValue::from(val))?)?)
+		};
+		
+		let mut target_map: BTreeMap<String, TargetConfig> = Default::default();
 
 		for build in ninja_rules.builds {
-			for output in build.outputs { // TODO inefficient to redo this work per output
-				let output_str = String::from_utf8(eval::evaluate(&ninja_rules.bindings, &UnownedValue::from(output))?)?;
-				let rule_name = build.rule.0;
+			let ninja::Build {
+				outputs,
+				implicit_outputs: _,
+				rule,
+				inputs,
+				implicit_inputs,
+				order_only_inputs,
+				bindings
+			} = build;
+
+			let inputs: Vec<String> = inputs.into_iter().map(eval_static).collect::<Result<_>>()?;
+			let implicit_inputs: Vec<String> =
+				implicit_inputs.into_iter().chain(order_only_inputs.into_iter())
+				.map(eval_static).collect::<Result<_>>()?;
+
+			for output in outputs { // TODO inefficient to redo this work per output
+				let output_str = eval_static(output)?;
+
+				let rule_name = rule.0;
 				let rule = ninja_rules.rules.get(rule_name).ok_or_else(|| anyhow!("can't find build rule {}", rule_name))?;
-				let mut bindings: HashMap<String, OwnedValue> = ninja_rules.bindings.iter()
+				let mut owned_bindings: HashMap<String, OwnedValue> = ninja_rules.bindings.iter()
 					.map(|(k,v)| (k.to_owned(), v.into()))
 					.collect(); // TODO inefficient, repeated each target. Prefer to partially evaluate?
 
 				// add bindings from this build declaration
-				for binding in build.bindings.iter() {
-					bindings.insert(binding.name.0.to_owned(), (&binding.value).into());
+				for binding in bindings.iter() {
+					owned_bindings.insert(binding.name.0.to_owned(), (&binding.value).into());
 				}
-
+				
 				let target_config = TargetConfig {
 					rule: rule.into(),
-					bindings: bindings,
+					bindings: owned_bindings,
+					inputs: inputs.clone(), implicit_inputs: implicit_inputs.clone()
 				};
-				result.push(target(output_str, builder.clone().config(target_config)?));
+				target_map.insert(output_str, target_config);
 			}
 		}
-		Ok(result)
+		
+		// now we've defined all the targets, add @scope prefixes to all internally-defined targets
+		let all_targets: Vec<String> = target_map.keys().cloned().collect();
+		let scope_defined_targets = |vec: &mut Vec<String>| {
+			for item in vec.iter_mut() {
+				if all_targets.contains(item) {
+					item.insert_str(0, "@scope/");
+				}
+			}
+		};
+		for config in target_map.values_mut() {
+			scope_defined_targets(&mut config.inputs);
+			scope_defined_targets(&mut config.implicit_inputs);
+		}
+		
+		target_map.into_iter().map(|(name, config)| {
+			Ok(target(name, builder.clone().config(config)?))
+		}).collect()
 	}
 }
