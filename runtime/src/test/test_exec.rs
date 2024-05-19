@@ -153,18 +153,24 @@ fn test_stdio() -> Result<()> {
 				.arg("echo out; echo >&2 err")
 				.stderr(Stderr::Merge)
 			)?;
-			
+			p.record(format!("merged: {}", merged_output));
+		
 			let stdout_only = c.run_output(cmd("bash").arg("-euc")
 				.arg("echo out; echo >&2 err")
 			)?;
+			p.record(format!("stdout: {}", stdout_only));
 
-			c.write_dest(format!("merged: {}, stdout: {}", merged_output, stdout_only))
+			c.run_output_to_dest(cmd("echo").arg("output"))
 		};
 
 		p.target_builder("target", builder);
 		let built_contents = p.build_file_contents("target")?;
 		
-		assert_eq!(built_contents, "merged: out\nerr, stdout: out");
+		assert_eq!(p.log(), vec!(
+			"merged: out\nerr",
+			"stdout: out",
+		));
+		assert_eq!(built_contents, "output\n");
 		
 		Ok(())
 	})
@@ -185,13 +191,13 @@ fn test_can_create_output() -> Result<()> {
 		};
 
 		p.target_builder("target", builder);
-		assert_eq!(p.build_file_contents("target")?, ".ambl/tmp/target\n");
+		assert_eq!(p.build_file_contents("target")?, "@root/.ambl/tmp/target\n");
 
 		p.target_builder("subdir/target", builder);
-		assert_eq!(p.build_file_contents("subdir/target")?, ".ambl/tmp/subdir/target\n");
+		assert_eq!(p.build_file_contents("subdir/target")?, "@root/.ambl/tmp/subdir/target\n");
 
 		p.target_builder_module(p.new_module().set_scope("scope"), "subdir/target", builder);
-		assert_eq!(p.build_file_contents("scope/subdir/target")?, ".ambl/tmp/scope/subdir/target\n");
+		assert_eq!(p.build_file_contents("scope/subdir/target")?, "@root/.ambl/tmp/scope/subdir/target\n");
 		
 		Ok(())
 	})

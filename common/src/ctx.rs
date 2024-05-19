@@ -176,10 +176,10 @@ mod pathbuf_serde {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TargetCtx {
-	target: String, // logical target name, relative to module root
+	target: String, // logical target name, relative to module mount
 
 	#[serde(with = "pathbuf_serde")]
-	dest: PathBuf, // physical file location, relative to CWD (or absolute?)
+	dest: PathBuf, // physical file location, relative to project root
 
 	#[serde(flatten)]
 	pub base: BaseCtx,
@@ -202,9 +202,12 @@ impl TargetCtx {
 	// convenience
 	pub fn dest_path_str(&self) -> &str { self.dest.to_str().expect("non-UTF8 path") }
 
+	pub fn run_output_to_dest(&self, cmd: Command) -> Result<()> {
+		self.invoke_dep(DependencyRequest::Execute(cmd.stdout(Stdout::WriteDest))).map(|_| ())
+	}
+
 	pub fn write_dest<C: Into<Vec<u8>>>(&self, contents: C) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
-			target: self.target.to_owned(),
 			contents: contents.into(),
 			replace: true,
 		})))
@@ -212,7 +215,6 @@ impl TargetCtx {
 
 	pub fn empty_dest(&self) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
-			target: self.target.to_owned(),
 			contents: vec!(),
 			replace: false,
 		})))
@@ -247,7 +249,6 @@ impl Tempdir {
 		ignore_result(ctx.invoke(Invoke::Action(InvokeAction::CopyFile(CopyFile {
 			source_root: crate::build::FileSource::Tempdir(*self),
 			source_suffix: path.into(),
-			dest_target: ctx.target().to_owned(),
 		}))))
 	}
 

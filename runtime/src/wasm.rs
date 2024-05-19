@@ -120,6 +120,10 @@ impl BuildModule for WasmModule {
 			Entry::Occupied(_) => false,
 			Entry::Vacant(entry) => {
 				entry.insert(TargetContext {
+					dest_tmp_path: match arg {
+						Ctx::Base(_) => None,
+						Ctx::Target(_, path) => Some(path.clone()),
+					},
 					embed: f.embed.clone(),
 					implicits: implicits.clone(),
 				});
@@ -131,7 +135,7 @@ impl BuildModule for WasmModule {
 
 		let result = match arg {
 			Ctx::Base(_) => self.bindings.call_rules(&mut self.store, &f.fn_name, &json_string),
-			Ctx::Target(_) => self.bindings.call_build(&mut self.store, &f.fn_name, &json_string),
+			Ctx::Target(_, _) => self.bindings.call_build(&mut self.store, &f.fn_name, &json_string),
 		};
 
 		if inserted {

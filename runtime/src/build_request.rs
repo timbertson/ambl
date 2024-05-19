@@ -1,4 +1,4 @@
-use ambl_api::ImpureShare;
+use ambl_api::{ImpureShare, Stderr, Stdio, Stdout};
 use ambl_common::rule::EnvLookup;
 use log::*;
 use ambl_common::build::{FileSelection, FilesetDependency};
@@ -12,6 +12,7 @@ use ambl_common::{build::{DependencyRequest, InvokeResponse, Command, GenCommand
 use crate::project::{ProjectRef, Project, ProjectHandle};
 use crate::path_util::{Simple, Embed, Embedded, CPath, Unembedded, ResolveModule};
 use crate::module::BuildModule;
+use crate::build::TargetContext;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 // Like DependencyRequest but with all variants fully resolved
@@ -29,7 +30,12 @@ pub enum BuildRequest {
 }
 
 impl BuildRequest {
-	pub fn from<'a>(req: DependencyRequest, source_module: Option<&Unembedded>, embed: &'a Embed<'a>) -> Result<Self> {
+	pub fn from(
+		req: DependencyRequest,
+		source_module: Option<&Unembedded>,
+		embed: &Embed,
+		dest_tmp_path: Option<&Unembedded>,
+	) -> Result<Self> {
 		Ok(match req {
 			DependencyRequest::FileDependency(path) => {
 				let path = Unembedded::from_string(path, embed);
@@ -50,7 +56,7 @@ impl BuildRequest {
 				Self::Fileset(ResolvedFilesetDependency{ root, dirs, files })
 			},
 			DependencyRequest::Execute(v) => {
-				Self::Execute(ResolvedCommand::new(v.into(), embed.clone()))
+				Self::Execute(ResolvedCommand::new(v.into(), embed.clone(), dest_tmp_path)?)
 			},
 			DependencyRequest::Universe => Self::Universe,
 		})
@@ -85,6 +91,37 @@ impl<'a> ResolvedFnSpec<'a> {
 	}
 }
 
+// like ambl_api::Stdout except WriteDest embeds the actual destination path
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ResolvedStdout {
+	Return,
+	Inherit,
+	WriteDest(Unembedded),
+	Ignore,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ResolvedStdio {
+	pub stdout: ResolvedStdout,
+	pub stderr: Stderr,
+}
+
+impl ResolvedStdio {
+	fn new(stdio: Stdio, dest_path: Option<&Unembedded>) -> Result<Self> {
+		let Stdio { stdout, stderr} = stdio;
+		let stdout = match stdout {
+			Stdout::WriteDest => {
+				let dest_path = dest_path.ok_or_else(|| anyhow!("WriteDest used outside a target"))?;
+				ResolvedStdout::WriteDest(dest_path.to_owned())
+			},
+			Stdout::Return => ResolvedStdout::Return,
+			Stdout::Inherit => ResolvedStdout::Inherit,
+			Stdout::Ignore => ResolvedStdout::Ignore,
+		};
+		Ok(Self { stdout, stderr })
+	}
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Exe {
 	FromPath(String),
@@ -112,11 +149,11 @@ impl fmt::Debug for Exe {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ResolvedCommand {
 	pub embed: Embed<'static>,
-	pub cmd: GenCommand<Exe, Unembedded>,
+	pub cmd: GenCommand<Exe, Unembedded, ResolvedStdio>,
 }
 
 impl ResolvedCommand {
-	pub fn new(cmd_str: GenCommand<String, String>, embed: Embed<'static>) -> Self {
+	pub fn new(cmd_str: GenCommand<String, String, Stdio>, embed: Embed<'static>, target_dest: Option<&Unembedded>) -> Result<Self> {
 		let string_to_path = |s| Unembedded::from_string(s, &embed);
 		let GenCommand { exe, args, env, env_inherit, impure_share_paths, output, input } = cmd_str;
 
@@ -126,6 +163,8 @@ impl ResolvedCommand {
 		} else {
 			Exe::FromPath(exe)
 		};
+
+		let output = ResolvedStdio::new(output, target_dest)?;
 
 		let impure_share_paths : Vec<ImpureShare<Unembedded>> = impure_share_paths
 			.into_iter()
@@ -139,7 +178,7 @@ impl ResolvedCommand {
 			output, input,
 		};
 
-		Self { embed, cmd }
+		Ok(Self { embed, cmd })
 	}
 }
 

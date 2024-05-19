@@ -845,15 +845,23 @@ impl<M: BuildModule> Project<M> {
 								&child_reason)?;
 							project = project_ret;
 							
-							let tmp_path: PathBuf = project.tmp_path(&name_embedded)?.into();
+							let tmp_path: Unembedded = project.tmp_path(&name_embedded)?;
 							path_util::rm_rf_and_ensure_parent(&tmp_path)?;
+							
+							// on the client side, we explicitly add a @root virtual prefix
+							// so that using the file path via ambl or within a command
+							// will resolve correctly.
+							let mut client_tmp_path = PathBuf::from("@root");
+							client_tmp_path.push(&tmp_path);
 
 							project.unlocked_block(|project_handle| {
-								let ctx = Ctx::Target(TargetCtx::new(
-									found_target.rel_name.as_str().to_owned(),
-									tmp_path.to_owned(),
-									found_target.build.config.0.to_owned(),
-									build_token.raw()));
+								let ctx = Ctx::Target(
+									TargetCtx::new(
+										found_target.rel_name.as_str().to_owned(),
+										client_tmp_path,
+										found_target.build.config.0.to_owned(),
+										build_token.raw()
+									), tmp_path.clone());
 
 								// TODO can we have a FunctionSpec with references?
 								debug!("calling {:?}", found_target.build);
@@ -868,7 +876,7 @@ impl<M: BuildModule> Project<M> {
 						
 							let dest_path: PathBuf = project.dest_path(&name_embedded)?.into();
 							path_util::rm_rf_and_ensure_parent(&dest_path)?;
-							match path_util::lstat_opt::<&Path>(tmp_path.as_ref())? {
+							match path_util::lstat_opt::<&Path>(tmp_path.as_path())? {
 								Some(_) => {
 									debug!("promoting temp path {:?} to {:?}", &tmp_path, &dest_path);
 									fs::rename(&tmp_path, &dest_path)?;
@@ -1135,7 +1143,7 @@ impl<M: BuildModule> Project<M> {
 	#[cfg(test)]
 	pub fn replace_rules(&mut self, rules: Vec<Rule>) {
 		let embed = Embed::root();
-		debug!("replacing root rules: {:?}", &rules);
+		debug!("replacing root rules with: {:?}", &rules);
 		let (implicits, project_rules) = ProjectRule::collate_raw_rules(Default::default(), &embed, rules).unwrap();
 		self.root_rule = Arc::new(ProjectRule::Mutable(RwRef::new(MutableRule::Nested(Nested {
 			implicits,

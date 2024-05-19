@@ -9,7 +9,7 @@ use crate::build::{Forced, BuildReason};
 use crate::build_request::BuildRequest;
 use crate::path_util::Embed;
 use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::Project};
-use ambl_common::{rule::dsl::*, build::{DependencyRequest}};
+use ambl_common::{rule::dsl::*, build::DependencyRequest};
 use super::util::*;
 
 use super::test_module::DEFAULT_BUILD_FN;
@@ -188,14 +188,12 @@ fn rebuild_on_transitive_dep_change() -> Result<()> {
 		p.target_builder("b", |p, c| {
 			let contents = c.read_file("a")?;
 			p.record("build b");
-			fs::write(c.dest_path(), format!("{} -> b", contents))?;
-			Ok(())
+			c.write_dest(format!("{} -> b", contents))
 		});
 		p.target_builder("c", |p, c| {
 			let contents = c.read_file("b")?;
 			p.record("build c");
-			fs::write(c.dest_path(), format!("{} -> c", contents))?;
-			Ok(())
+			c.write_dest(format!("{} -> c", contents))
 		});
 		p.write_file("a", "1")?;
 
@@ -220,7 +218,7 @@ fn rebuild_on_fileset_change() -> Result<()> {
 		p.target_builder("list", |p, c| {
 			let files: Vec<String> = c.list_fileset(fileset(".").include_files("*.txt"))?;
 			p.record("build");
-			fs::write(c.dest_path(), format!("{}", files.join("\n")))?;
+			c.write_dest(format!("{}", files.join("\n")))?;
 			Ok(())
 		});
 		p.write_file("a.txt", "1")?;
@@ -270,6 +268,7 @@ fn test_does_not_cache_target_failures() -> Result<()> {
 fn test_does_not_cache_wasm_call_failures() -> Result<()> {
 	TestProject::in_tempdir(|p: &TestProject| {
 		let module = p.new_module().wasm_fn("fn", |p, c| {
+			debug!("fn is being invoked");
 			if p.log().is_empty() {
 				p.record("fail");
 				Err(anyhow!("Initial failure"))
@@ -327,7 +326,7 @@ fn test_force_rebuild() -> Result<()> {
 		});
 
 		let req = DependencyRequest::FileDependency("a".to_owned());
-		let build_request = BuildRequest::from(req.to_owned(), None, &Embed::root())?;
+		let build_request = BuildRequest::from(req.to_owned(), None, &Embed::root(), None)?;
 		let reason = BuildReason::Explicit(Forced(true));
 		p.build_full(&build_request, &reason)?;
 		p.build_full(&build_request, &reason)?;

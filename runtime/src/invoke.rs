@@ -27,7 +27,7 @@ pub fn perform<'a, M: BuildModule>(
 			crate::debug::shell_on_failure(perform_invoke(project, target_context, module_path, token, &action))
 		},
 		Invoke::Dependency(request) => {
-			let build_request = BuildRequest::from(request, Some(module_path), &target_context.embed)?;
+			let build_request = BuildRequest::from(request, Some(module_path), &target_context.embed, target_context.dest_tmp_path.as_ref())?;
 			let (project, persist) = Project::build(project, &target_context.implicits, &build_request, &BuildReason::Dependency(token))?;
 			persist.into_response()
 		},
@@ -45,18 +45,10 @@ fn perform_invoke<M: BuildModule>(
 ) -> Result<InvokeResponse> {
 	result_block(|| {
 		let embed = &target_context.embed;
-		let dest_tmp = |project: &Project<M>, target: &String| {
-			let target = Embedded::new(embed.copy(), Simple::try_from(target.to_owned(), embed)?);
-			Project::tmp_path(project, &target)
-		};
 		match action {
 			InvokeAction::WriteDest(f) => {
-				let path = dest_tmp(&project, &f.target)?;
-				debug!("Writing output file {} for target {}", &path, &f.target);
-				let dest_pb = PathBuf::from(path.as_path());
-				if let Some(parent) = dest_pb.parent() {
-					fs::create_dir_all(parent)?;
-				}
+				let path = target_context.dest_tmp_path()?;
+				debug!("Writing output file {}", &path);
 				if !f.replace && lexists(path.as_path())? {
 					return Err(anyhow!("Attempted to replace existing file {}", &path))
 				}
@@ -78,13 +70,13 @@ fn perform_invoke<M: BuildModule>(
 
 			InvokeAction::CopyFile(f) => {
 				let (project, src) = built_source_path(project, target_context, module_path, token, &f.source_root, Some(&f.source_suffix))?;
-				let dest = dest_tmp(&project, &f.dest_target)?;
-				debug!("Copying file {} -> {}", src.display(), &dest);
+				let dest = target_context.dest_tmp_path()?;
+				debug!("Copying file {} -> {}", src.display(), dest);
 				if !lexists(&src)? {
 					return Err(anyhow!("Copy source doesn't exist: {}", src.display()));
 				};
 				fs::copy(&src, dest.as_path())
-					.with_context(|| format!("Copying file {} -> {}", src.display(), &dest))?;
+					.with_context(|| format!("Copying file {} -> {}", src.display(), dest))?;
 				Ok(InvokeResponse::Unit)
 			},
 
@@ -118,7 +110,7 @@ fn built_source_path<'a, M: BuildModule>(
 	let mut src = match src {
 		FileSource::Target(path) => {
 			let request = DependencyRequest::FileDependency(path.to_owned());
-			let build_request = BuildRequest::from(request, Some(module_path), embed)?;
+			let build_request = BuildRequest::from(request, Some(module_path), embed, target_context.dest_tmp_path.as_ref())?;
 			let (project_ret, persist) = Project::build(project, &target_context.implicits, &build_request, &BuildReason::Dependency(token))?;
 			project = project_ret;
 			let target = match persist.result.result {

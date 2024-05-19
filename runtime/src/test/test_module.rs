@@ -164,35 +164,49 @@ impl<'a> BuildModule for TestModule<'a> {
 	}
 
 	fn build(&mut self, implicits: &Implicits, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<String> {
-		if f.fn_name == "get_rules" {
-			let mut ctx: BaseCtx = serde_json::from_str(&arg.json_string()?)?;
-			TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
-				self.rules(ctx)
-			})
-		} else {
-			let serialized = arg.json_string()?;
-			let fn_name = &f.fn_name;
-			if let Some(f_impl) = self.builders.get(fn_name) {
+		let fn_name = &f.fn_name;
+		match arg {
+			Ctx::Base(base_ctx) => {
+				let ctx: BaseCtx = serde_json::from_str(&arg.json_string()?)?;
+				if fn_name == "get_rules" {
+					TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut Ctx::Base(ctx), |ctx| {
+						self.rules(ctx.into_base_mut())
+					})
+				} else if let Some(f_impl) = self.anon_fns.get(fn_name) {
+					TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut Ctx::Base(ctx), |ctx| {
+						f_impl(self.project, ctx.into_base_mut())
+					})
+				} else {
+					Err(anyhow!("No anon function defined: {}\nanons: {:?}",
+						fn_name, &self.anon_fns.keys()
+					))
+				}
+			},
+			Ctx::Target(target_ctx, tmp_dest_path) => {
+
 				// go to and from JSON so I can have an owned version (and avoid unsafe casts)
-				let mut ctx: TargetCtx = serde_json::from_slice(&serialized.as_bytes())
+				let serialized = arg.json_string()?;
+				let target_ctx: TargetCtx = serde_json::from_slice(&serialized.as_bytes())
 					.with_context(|| format!("deserializing {:?}", &serialized))?;
+				let target_name = target_ctx.target().to_owned();
+				let token = target_ctx.token;
+				let mut ctx = Ctx::Target(target_ctx, tmp_dest_path.clone());
 
-				let path = ctx.target();
-				let token = ctx.token;
-				debug!("running builder for {} with token {:?}", path, token);
+				if let Some(f_impl) = self.builders.get(fn_name) {
+					debug!("running builder for {} with token {:?}", target_name, token);
 
-				TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
-					f_impl(self.project, &*ctx)
-				})
-			} else if let Some(f_impl) = self.anon_fns.get(fn_name) {
-				let mut ctx: BaseCtx = serde_json::from_str(&arg.json_string()?)?;
-				TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
-					f_impl(self.project, &*ctx)
-				})
-			} else {
-				return Err(anyhow!("No builder / anon function defined: {}\nbuilders: {:?}, anons: {:?}",
-					fn_name, &self.builders.keys(), &self.anon_fns.keys()
-				));
+					TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
+						f_impl(self.project, ctx.into_target_mut()?)
+					})
+				} else if let Some(f_impl) = self.anon_fns.get(fn_name) {
+					TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
+						f_impl(self.project, ctx.into_target_mut()?)
+					})
+				} else {
+					Err(anyhow!("No builder / anon function defined: {}\nbuilders: {:?}, anons: {:?}",
+						fn_name, &self.builders.keys(), &self.anon_fns.keys()
+					))
+				}
 			}
 		}
 	}
@@ -216,18 +230,29 @@ struct TestInvoker {
 	token: ActiveBuildToken,
 }
 impl TestInvoker {
-	fn wrap<'a, 'b, 'c, R: Serialize, C: AsRef<BaseCtx> + AsMut<BaseCtx>, F: FnOnce(&C) -> Result<R>>(
+	fn wrap<'a, 'b, 'c, R: Serialize, F: FnOnce(&mut Ctx) -> Result<R>>(
 		project: &'a TestProject<'a>,
 		implicits: &'b Implicits,
 		module: &'b Unembedded,
 		embed: &'c Embed,
-		ctx: &mut C,
+		ctx: &mut Ctx,
 		f: F
 	) -> Result<String> {
-		let ctx_mut = ctx.as_mut();
-		let token = ActiveBuildToken::from_raw(ctx_mut.token);
-		ctx_mut._override_invoker(Box::new(TestInvoker { token }));
-		let target_context = TargetContext { embed: embed.clone(), implicits: implicits.clone() };
+		let token = ActiveBuildToken::from_raw(ctx.token());
+		
+		let invoker = Box::new(TestInvoker { token });
+		let mut dest_tmp_path = None;
+		match ctx {
+			Ctx::Base(ref mut ctx) => {
+				ctx._override_invoker(invoker);
+			},
+			Ctx::Target(ref mut ctx, path) => {
+				dest_tmp_path = Some(path.to_owned());
+				ctx.as_mut()._override_invoker(invoker);
+			},
+		}
+		
+		let target_context = TargetContext { embed: embed.clone(), implicits: implicits.clone(), dest_tmp_path };
 		
 		let state = BuildState {
 			module,
@@ -248,7 +273,7 @@ impl TestInvoker {
 		drop(map);
 
 		debug!("invoker::wrap({:?})", token);
-		let result = f(&*ctx);
+		let result = f(ctx);
 
 		let mut map = arc.lock().unwrap();
 		match old {
@@ -455,7 +480,7 @@ impl<'a> TestProject<'a> {
 	}
 
 	pub fn build_dep(&self, req: &DependencyRequest) -> Result<InvokeResponse> {
-		let build_request = BuildRequest::from(req.to_owned(), None, &Embed::root())?;
+		let build_request = BuildRequest::from(req.to_owned(), None, &Embed::root(), None)?;
 		self.build_full(&build_request, &BuildReason::Explicit(Forced(false)))
 	}
 
@@ -478,6 +503,7 @@ impl<'a> TestProject<'a> {
 		let target_context = TargetContext {
 			embed: Embed::root(),
 			implicits: Default::default(),
+			dest_tmp_path: None,
 		};
 		let result = invoke::perform(self.lock(), &target_context, &module, self.token, req.to_owned())
 			.with_context(|| format!("Building {:?}", req));

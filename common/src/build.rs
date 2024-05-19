@@ -208,7 +208,7 @@ impl<T> ImpureShare<T> {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct GenCommand<ExePath, FilePath> {
+pub struct GenCommand<ExePath, FilePath, Output> {
 	pub exe: ExePath,
 	pub args: Vec<String>,
 	// pub cwd: Option<Path>, // Disabled until there's a plan to support sane scope / mount handling with a custom CWD
@@ -216,7 +216,7 @@ pub struct GenCommand<ExePath, FilePath> {
 	pub env_inherit: BTreeSet<String>,
 	pub impure_share_paths: Vec<ImpureShare<FilePath>>,
 
-	pub output: Stdio,
+	pub output: Output,
 	pub input: Stdin,
 	// TODO add hermeticity by default, with an opt-out. Biggest challenge is being able to declare (transitive) available files,
 	// and being able to interop with non-managed files (e.g. nix executables).
@@ -231,7 +231,7 @@ pub struct GenCommand<ExePath, FilePath> {
 }
 
 // Suppress most noise at the default log level, as this struct often appears in error traces
-impl <T: Debug, T2: Debug> Debug for GenCommand<T, T2> {
+impl <T: Debug, T2: Debug, T3: Debug> Debug for GenCommand<T, T2, T3> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let mut out = f.debug_struct("Command");
 		out
@@ -251,9 +251,9 @@ impl <T: Debug, T2: Debug> Debug for GenCommand<T, T2> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct Command(GenCommand<String, String>);
+pub struct Command(GenCommand<String, String, Stdio>);
 impl Deref for Command {
-	type Target = GenCommand<String, String>;
+	type Target = GenCommand<String, String, Stdio>;
 
 	fn deref(&self) -> &Self::Target {
 		&self.0
@@ -337,14 +337,14 @@ impl Command {
 	}
 }
 
-impl From<GenCommand<String, String>> for Command {
-	fn from(c: GenCommand<String, String>) -> Self {
+impl From<GenCommand<String, String, Stdio>> for Command {
+	fn from(c: GenCommand<String, String, Stdio>) -> Self {
 		Self(c)
 	}
 }
 
-impl Into<GenCommand<String, String>> for Command {
-	fn into(self) -> GenCommand<String, String> {
+impl Into<GenCommand<String, String, Stdio>> for Command {
+	fn into(self) -> GenCommand<String, String, Stdio> {
 		self.0
 	}
 }
@@ -368,6 +368,7 @@ impl Default for Stdio {
 pub enum Stdout {
 	Return,
 	Inherit,
+	WriteDest,
 	Ignore,
 }
 impl Default for Stdout {
@@ -423,7 +424,6 @@ pub enum InvokeAction {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WriteDest {
-	pub target: String,
 	pub contents: Vec<u8>,
 	pub replace: bool,
 }
@@ -432,7 +432,6 @@ pub struct WriteDest {
 pub struct CopyFile {
 	pub source_root: FileSource,
 	pub source_suffix: String,
-	pub dest_target: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

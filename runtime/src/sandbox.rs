@@ -5,6 +5,7 @@ use tempdir::TempDir;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs::File;
 use std::io::{Read, Stdin, self, Write, BufRead, BufReader};
 use std::os::fd::FromRawFd;
 use std::path::Path;
@@ -14,10 +15,10 @@ use std::thread::{JoinHandle, Thread, self};
 use std::{process::{self, Command, Stdio}, env::current_dir, os::unix::fs::symlink, path::PathBuf, fs, collections::HashSet};
 
 use anyhow::*;
-use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare};
+use ambl_common::build::{self, GenCommand, InvokeResponse, ChecksumConfig, ImpureShare, Stderr};
 
 use crate::build::BuildReason;
-use crate::build_request::{BuildRequest, Exe, ResolvedCommand};
+use crate::build_request::{BuildRequest, Exe, ResolvedCommand, ResolvedStdout as Stdout};
 use crate::persist::{DepSet, BuildResult};
 use crate::project::{Project, ProjectMutexPair, ProjectSandbox, Implicits};
 use crate::sync::{Mutexed, MutexHandle};
@@ -257,10 +258,12 @@ impl Sandbox {
 				build::Stdin::Null => Stdio::null(),
 			});
 			
-			use build::{Stdout, Stderr};
 			
 
+			// capture for return
 			let mut capture_pipe = None;
+			
+			// proxy (to the real stderr/stdout, but going via the ui writer)
 			let mut proxy_pipe = None;
 			
 			let writeable_end = |store: &mut Option<(PipeReader, PipeWriter)>| {
@@ -276,6 +279,7 @@ impl Sandbox {
 
 			cmd.stdout(match output.stdout {
 				Stdout::Return => writeable_end(&mut capture_pipe)?.into(),
+				Stdout::WriteDest(_) => writeable_end(&mut capture_pipe)?.into(),
 				Stdout::Inherit => writeable_end(&mut proxy_pipe)?.into(),
 				Stdout::Ignore => Stdio::null(),
 			});
@@ -285,6 +289,7 @@ impl Sandbox {
 				(Stderr::Merge, Stdout::Inherit) | (Stderr::Inherit, Stdout::Inherit) =>
 					writeable_end(&mut proxy_pipe)?.into(),
 
+				(Stderr::Merge, Stdout::WriteDest(_)) => writeable_end(&mut capture_pipe)?.into(),
 				(Stderr::Merge, Stdout::Return) => writeable_end(&mut capture_pipe)?.into(),
 				(Stderr::Merge, Stdout::Ignore) | (Stderr::Ignore, _) => Stdio::null(),
 
@@ -358,10 +363,22 @@ impl Sandbox {
 				let response = match capture_pipe.take() {
 					Some((mut reader, writer)) => {
 						drop(writer);
-						let mut s: Vec<u8> = Vec::new();
-						reader.read_to_end(&mut s)?;
-						drop(reader);
-						InvokeResponse::Bytes(s)
+						match &output.stdout {
+							Stdout::Return => {
+								let mut s: Vec<u8> = Vec::new();
+								reader.read_to_end(&mut s)?;
+								drop(reader);
+								InvokeResponse::Bytes(s)
+							},
+							Stdout::WriteDest(path) => {
+								result_block(|| {
+									let mut dest = File::create(path)?;
+									Ok(io::copy(&mut reader, &mut dest)?)
+								}).with_context(|| format!("writing {}", path.as_path().display()))?;
+								InvokeResponse::Unit
+							},
+							Stdout::Inherit | Stdout::Ignore => panic!("unreachable"),
+						}
 					},
 					None => InvokeResponse::Unit,
 				};

@@ -323,7 +323,7 @@ impl Module {
 }
 
 pub mod dsl {
-	use crate::build::{Command, GenCommand, FilesetDependency};
+use crate::build::{Command, FilesetDependency, GenCommand, Stdio};
 	use super::*;
 
 	// Rule builder functions. Strictly these are just part of the API,
@@ -359,7 +359,7 @@ pub mod dsl {
 	}
 
 	pub fn cmd<S: Into<String>>(exe: S) -> Command {
-		Command::from(GenCommand::<String, String> {
+		Command::from(GenCommand::<String, String, Stdio> {
 			exe: exe.into(),
 			args: Default::default(),
 			env: Default::default(),

@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 
 use ambl_common::build::InvokeResponse;
 use log::*;
@@ -6,7 +7,7 @@ use anyhow::*;
 
 use crate::build_request::BuildRequest;
 use crate::module::BuildModule;
-use crate::path_util::{Embedded, Embed, Simple};
+use crate::path_util::{Embed, Embedded, Simple, Unembedded};
 use crate::persist::{BuildResult, BuildResultWithDeps, DepSet, Cached, PersistFile, BuildRecord};
 use crate::project::{ProjectMutex, ProjectMutexPair, Project, ActiveBuildToken, Implicits, HasImplicits};
 use crate::sync::{Mutexed, MutexRef};
@@ -35,8 +36,16 @@ impl BuildReason {
 }
 
 pub struct TargetContext {
+	pub dest_tmp_path: Option<Unembedded>,
 	pub embed: Embed<'static>,
 	pub implicits: Implicits,
+}
+
+impl TargetContext {
+	pub fn dest_tmp_path(&self) -> Result<&Unembedded> {
+		self.dest_tmp_path.as_ref()
+			.ok_or_else(|| anyhow!("dest_tmp_path not defined (not a target?)"))
+	}
 }
 
 pub struct BuildCache;
