@@ -244,7 +244,6 @@ impl ContainsPath for EmbeddedMount {
 // tracks the results of expanding an Include.
 #[derive(Clone, Debug)]
 pub enum ProjectRule {
-	// Immutable types
 	Target(Target),
 	Mutable(RwRef<MutableRule>),
 }
@@ -278,6 +277,7 @@ impl ProjectRule {
 pub enum IncludeOrMount {
 	Include(EmbeddedInclude),
 	Mount(EmbeddedMount),
+	Root, // only used internally as the root rule to delegate to .ambl.yaml
 }
 
 impl IncludeOrMount {
@@ -286,6 +286,7 @@ impl IncludeOrMount {
 			// includes don't have mounts, only embeds
 			IncludeOrMount::Include(x) => None,
 			IncludeOrMount::Mount(x) => Some(&x.path),
+			IncludeOrMount::Root => None,
 		}
 	}
 }
@@ -295,6 +296,7 @@ impl ContainsPath for IncludeOrMount {
 		match self {
 			IncludeOrMount::Include(x) => x.contains_path(name),
 			IncludeOrMount::Mount(x) => x.contains_path(name),
+			IncludeOrMount::Root => true,
 		}
 	}
 }
@@ -303,7 +305,6 @@ impl ContainsPath for IncludeOrMount {
 // from initial -> loading -> loaded
 #[derive(Clone, Debug)]
 pub enum MutableRule {
-	// TODO: an Include and a Mount share most of their logic. Merge?
 	Include(IncludeOrMount), // before loading
 	Nested(Nested), // after loading
 	Loading(), // during loading.
@@ -459,7 +460,7 @@ impl<M: BuildModule> Project<M> {
 			active_tasks: Default::default(),
 			module_cache: ModuleCache::new(),
 			self_ref: None,
-			root_rule: Arc::new(ProjectRule::from_rule(NonConfigRule::Include(dsl::module("ambl.yaml").into()), Embed::static_root())?),
+			root_rule: Arc::new(ProjectRule::Mutable(RwRef::new(MutableRule::Include(IncludeOrMount::Root)))),
 			writer,
 		});
 
@@ -708,6 +709,18 @@ impl<M: BuildModule> Project<M> {
 
 								let simple_yaml_path = mount.path.join(&CPath::new_nonvirtual("ambl.yaml".to_owned()));
 								let module_path = Unembedded::from_embedded(&Embedded::new(embed.copy(), &simple_yaml_path));
+								let (project_ret, rules) = Self::load_yaml_rules(
+									project,
+									parent_implicits,
+									&module_path,
+									&BuildReason::Import
+								).context("loading YAML rules")?;
+								project = project_ret;
+								rules
+							},
+
+							IncludeOrMount::Root => {
+								let module_path = Unembedded::from_string("ambl.yaml".to_owned(), &Embed::root());
 								let (project_ret, rules) = Self::load_yaml_rules(
 									project,
 									parent_implicits,

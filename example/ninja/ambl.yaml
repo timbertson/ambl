@@ -3,9 +3,5 @@
     module: ninja/test
  
 - include:
-    mode: WASM # TODO
     module: builtin:ninja
     scope: ninja
-    config:
-      # TODO: scope seems to interact awkwardly with paths...
-      ninja_path: ../build.ninja

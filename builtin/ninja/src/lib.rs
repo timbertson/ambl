@@ -70,7 +70,7 @@ use crate::target::{TargetConfig, UnownedValue};
 		let config = ctx.parse_config::<Config>()?;
 		let file_contents = ctx.read_file_bytes(&config.ninja_path)?;
 		let ninja_rules = NinjaRules::parse(&file_contents)?;
-		warn!("{:?}", &ninja_rules);
+		info!("{:?}", &ninja_rules);
 		
 		let mut result = Vec::new();
 		let builder: FunctionSpec = target_fn!(execute).into();

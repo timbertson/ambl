@@ -143,12 +143,7 @@ impl<'a> Lookup for RuleBindings<'a> {
 			self.config.rule.bindings.lookup(key).or_else(|| {
 				match key {
 					"in" => Some(Ok(LookupResult::Simple("TODO".to_owned()))),
-					"out" => {
-						let dest_path = self.ctx.dest_path_str();
-						// TODO: remove when paths.md is fully implemented
-						let hack_path = format!("@root/{}", dest_path);
-						Some(Ok(LookupResult::Simple(hack_path)))
-					},
+					"out" => Some(Ok(LookupResult::Simple(self.ctx.dest_path_str().to_owned()))),
 					_ => None,
 				}
 			})
@@ -163,11 +158,10 @@ pub fn execute(ctx: TargetCtx) -> Result<()> {
 		config: &config,
 		ctx: &ctx,
 	};
-	warn!("config: {:?}", config);
+	info!("config: {:?}", config);
 
 	// TODO should we be splicing this?
 	let bash_command = eval::evaluate(bindings, &UnownedValue::reference("command"))?;
 	ctx.run(cmd("bash").arg("-euxc").arg(String::from_utf8(bash_command)?))?;
 	Ok(())
-	// ctx.write_dest("TEST")
 }

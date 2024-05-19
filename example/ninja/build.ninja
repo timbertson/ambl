@@ -1,5 +1,12 @@
+cflags = -Wall
+
+rule concat
+  command = grep '^' $in > $out
+
 rule echo
   command = echo $greeting > $out
 
 build trivial: echo
   greeting = "hello"
+
+build build: concat input1 trivial
