@@ -5,6 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use ambl_common::{rule::{Target, Rule, FunctionSpec, Config}, ctx::BaseCtx};
 use wasmtime::Engine;
 
+use crate::build::OutputMode;
 use crate::build_request::ResolvedFnSpec;
 use crate::ctx::Ctx;
 use crate::project::{FoundTarget, Implicits};
@@ -20,6 +21,7 @@ pub trait BuildModule : Sized {
 	fn build(
 		&mut self,
 		implicits: &Implicits,
+		output_mode: Option<OutputMode>,
 		f: &ResolvedFnSpec,
 		arg: &Ctx,
 		_unlocked_evidence: &ProjectHandle<Self>

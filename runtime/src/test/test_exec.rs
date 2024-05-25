@@ -8,7 +8,7 @@ use serial_test::serial;
 use anyhow::*;
 use crate::build::TargetContext;
 use crate::{module::*, test::test_module::{TestModule, TestProject, Log}, project::Project};
-use ambl_common::{rule::dsl::*, build::{DependencyRequest}};
+use ambl_common::{rule::dsl::*, build::DependencyRequest};
 use super::util::*;
 
 use super::test_module::DEFAULT_BUILD_FN;

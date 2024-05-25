@@ -23,7 +23,7 @@ use ambl_common::ffi::ResultFFI;
 use ambl_common::rule::{*, self};
 use wasmtime::*;
 
-use crate::build::{BuildCache, BuildReason, BuildResponse};
+use crate::build::{BuildCache, BuildReason, BuildResponse, OutputMode};
 use crate::build_request::{BuildRequest, ResolvedFnSpec, ResolvedFilesetDependency};
 use crate::ctx::Ctx;
 use crate::{err::*, path_util, fileset, ui};
@@ -156,6 +156,12 @@ impl<'a> TargetVisitor<'a> for FindTargetVisitor {
 	fn visit_target(name: &'a str, embed: &'a Embed, target: &'a Target) -> TargetVisitResult<'a> {
 		if target.names.iter().any(|n| n == name) {
 			TargetVisitResult::Return(name)
+		} else if target.outputs.iter().any(|n| n == name) {
+			if let Some(first_name) = target.names.iter().next() {
+				TargetVisitResult::Return(name)
+			} else {
+				TargetVisitResult::Continue
+			}
 		} else {
 			TargetVisitResult::Continue
 		}
@@ -571,9 +577,21 @@ impl<M: BuildModule> Project<M> {
 							source_module,
 							explicit_path: module_cpath.as_ref().map(|p| Embedded::new(embed.copy(), p)),
 						}.resolve()?;
+
+						// if outputs is set, make sure it includes the default output name
+						let mut outputs = target.outputs.to_owned();
+						if !outputs.is_empty() {
+							let default_output_name = path_util::str_of_os(
+								rel_name.as_path().file_name().ok_or_else(|| anyhow!("default_output_name"))?);
+							if !outputs.iter().any(|s| s == default_output_name) {
+								outputs.push(default_output_name.to_owned());
+							}
+						}
+
 						Ok((project, Some(FoundTarget {
 							rel_name,
 							implicits,
+							outputs,
 							build: ResolvedFnSpec {
 								embed: embed.copy(),
 								fn_name: target.build.fn_name.to_owned(),
@@ -880,36 +898,62 @@ impl<M: BuildModule> Project<M> {
 								debug!("calling {:?}", found_target.build);
 								
 								result_block(|| {
-									let bytes = wasm_module.build(&found_target.implicits, &found_target.build, &ctx, project_handle)?;
+									let output_mode = OutputMode::from_outputs(&found_target.outputs);
+									let bytes = wasm_module.build(&found_target.implicits, Some(output_mode), &found_target.build, &ctx, project_handle)?;
 									let _: () = ResultFFI::deserialize(&bytes)?;
 									Ok(())
 								}).with_context(|| format!("calling {:?}", found_target.build))?;
 								Ok(())
 							})?;
-						
-							let dest_path: PathBuf = project.dest_path(&name_embedded)?.into();
-							path_util::rm_rf_and_ensure_parent(&dest_path)?;
-							match path_util::lstat_opt::<&Path>(tmp_path.as_path())? {
-								Some(_) => {
-									debug!("promoting temp path {:?} to {:?}", &tmp_path, &dest_path);
-									fs::rename(&tmp_path, &dest_path)?;
-								},
-								None => {
-									return Err(anyhow!("Builder for {:?} didn't produce an output file. Use `ctx.empty_dest()` if this is intentional", &name_embedded))?;
-								},
-							}
+							
+							// capture the build result before moving outputs, so we can capture them all:
 							let deps = project.collect_deps(build_token)?;
-							BuildResultWithDeps {
+							let build_result = BuildResultWithDeps {
 								record: BuildRecord::new(
 									found_target.implicits.to_owned(),
 									BuildResult::File(PersistFile::from_path(
-										&dest_path,
+										&tmp_path,
 										Some(name_embedded.flatten()),
 										deps.checksum
 									)?)
 								),
 								deps: Some(deps),
+							};
+							
+							let no_output_file = || {
+								Err(anyhow!("Builder for {:?} didn't produce an output file. Use `ctx.empty_dest()` if this is intentional", &name_embedded))
+							};
+						
+							if !found_target.outputs.is_empty() {
+								// for simplicity the target must produce:
+								// <name>/name
+								// <name>/output2
+								// So we move .tmp/prefix/name/<output> into .out/prefix/<output>
+								let target_dest_path = project.dest_path(&name_embedded)?;
+								let dest_dir = target_dest_path.as_path().parent().ok_or_else(|| anyhow!("parent"))?;
+
+								// TODO: if the target doesn't produce the default name, that should be fatal
+								for output_name in found_target.outputs.iter() {
+									let output_tmp = tmp_path.as_path().join(output_name);
+									let output_dest = dest_dir.join(output_name);
+									if !Self::promote_from_tmp_to_dest(&output_tmp, &output_dest)? {
+										if output_dest == target_dest_path.as_path() {
+											return no_output_file();
+										} else {
+											// other outputs are optional, at least until we support declared optional outputs
+											info!("Builder for {:?} didn't produce an output file called `{}`.", &name_embedded, output_name);
+										}
+									}
+								}
+							} else {
+								// treat `name` as the only output
+								let dest_path: PathBuf = project.dest_path(&name_embedded)?.into();
+								if !Self::promote_from_tmp_to_dest(&tmp_path, &dest_path)? {
+									return no_output_file();
+								}
 							}
+
+							build_result
 						} else {
 							debug!("Treating dependency as a plain file: {:?}", &request);
 							match reason {
@@ -970,7 +1014,7 @@ impl<M: BuildModule> Project<M> {
 
 					let result: serde_json::Value = project.unlocked_block(|project_handle| {
 						let ctx = Ctx::Base(BaseCtx::new(spec.config.value().to_owned(), build_token.raw()));
-						let bytes = wasm_module.build(implicits, spec, &ctx, &project_handle)?;
+						let bytes = wasm_module.build(implicits, None, spec, &ctx, &project_handle)?;
 						let result = ResultFFI::deserialize(&bytes)?;
 						debug!("jvalue from wasm call: {:?}", &result);
 						Ok(result)
@@ -1086,6 +1130,23 @@ impl<M: BuildModule> Project<M> {
 			.ok_or_else(||anyhow!("No such build token"))
 			.and_then(|x| x.get_tempdir(tempdir))
 	}
+	
+	#[must_use]
+	fn promote_from_tmp_to_dest<A: AsRef<Path>, B: AsRef<Path>>(tmp: A, dest: B) -> Result<bool> {
+		let tmp = tmp.as_ref();
+		let dest = dest.as_ref();
+		path_util::rm_rf_and_ensure_parent(dest)?;
+		match path_util::lstat_opt(tmp)? {
+			Some(_) => {
+				debug!("promoting temp path {:?} to {:?}", tmp, dest);
+				fs::rename(tmp, dest)?;
+				Ok(true)
+			},
+			None => {
+				Ok(false)
+			},
+		}
+	}
 
 	// we just built something as requested, register it as a dependency on the parent target
 	fn register_dependency(&mut self, parent: Option<ActiveBuildToken>, key: BuildRequest, result: BuildRecord) -> Result<()> {
@@ -1190,6 +1251,7 @@ impl<M: BuildModule> Project<M> {
 #[derive(Debug)]
 pub struct FoundTarget<'a> {
 	pub rel_name: Simple, // the name relative to the build's embed
+	pub outputs: Vec<String>,
 	pub build: ResolvedFnSpec<'a>,
 	pub implicits: &'a Implicits,
 }

@@ -217,6 +217,15 @@ impl TargetCtx {
 
 	pub fn write_dest<C: Into<Vec<u8>>>(&self, contents: C) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
+			output_name: Default::default(),
+			contents: contents.into(),
+			replace: true,
+		})))
+	}
+	
+	pub fn write_named_output<S: Into<String>, C: Into<Vec<u8>>>(&self, name: S, contents: C) -> Result<()> {
+		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
+			output_name: Some(name.into()),
 			contents: contents.into(),
 			replace: true,
 		})))
@@ -224,6 +233,7 @@ impl TargetCtx {
 
 	pub fn empty_dest(&self) -> Result<()> {
 		ignore_result(self.invoke_action(InvokeAction::WriteDest(WriteDest {
+			output_name: Default::default(),
 			contents: vec!(),
 			replace: false,
 		})))

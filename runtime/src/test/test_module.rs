@@ -1,6 +1,7 @@
 use ambl_common::build::{InvokeAction, ReadFile, FileSource};
 use ambl_common::ffi::ResultFFI;
 use log::*;
+use superconsole::output;
 use std::fs::OpenOptions;
 use std::os::unix;
 use std::{ops::{Deref, DerefMut}, path::PathBuf};
@@ -13,7 +14,7 @@ use tempdir::TempDir;
 use ambl_common::{rule::{Target, Rule, dsl, FunctionSpec}, build::{DependencyRequest, InvokeResponse, Invoke}, ctx::{TargetCtx, Invoker, BaseCtx}};
 use wasmtime::Engine;
 
-use crate::build::{BuildReason, TargetContext, Forced};
+use crate::build::{BuildReason, Forced, OutputMode, TargetContext};
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
 use crate::ctx::Ctx;
 use crate::project::{ActiveBuildToken, ProjectHandle, ProjectRef, Project, Implicits};
@@ -163,17 +164,17 @@ impl<'a> BuildModule for TestModule<'a> {
 		Ok(module.to_owned())
 	}
 
-	fn build(&mut self, implicits: &Implicits, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<String> {
+	fn build(&mut self, implicits: &Implicits, output_mode: Option<OutputMode>, f: &ResolvedFnSpec, arg: &Ctx, _unlocked_evidence: &ProjectHandle<Self>) -> Result<String> {
 		let fn_name = &f.fn_name;
 		match arg {
 			Ctx::Base(base_ctx) => {
 				let ctx: BaseCtx = serde_json::from_str(&arg.json_string()?)?;
 				if fn_name == "get_rules" {
-					TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut Ctx::Base(ctx), |ctx| {
+					TestInvoker::wrap(self.project, implicits, output_mode, &self.module_path, &f.embed, &mut Ctx::Base(ctx), |ctx| {
 						self.rules(ctx.into_base_mut())
 					})
 				} else if let Some(f_impl) = self.anon_fns.get(fn_name) {
-					TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut Ctx::Base(ctx), |ctx| {
+					TestInvoker::wrap(self.project, implicits, output_mode, &self.module_path, &f.embed, &mut Ctx::Base(ctx), |ctx| {
 						f_impl(self.project, ctx.into_base_mut())
 					})
 				} else {
@@ -195,11 +196,11 @@ impl<'a> BuildModule for TestModule<'a> {
 				if let Some(f_impl) = self.builders.get(fn_name) {
 					debug!("running builder for {} with token {:?}", target_name, token);
 
-					TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
+					TestInvoker::wrap(self.project, implicits, output_mode, &self.module_path, &f.embed, &mut ctx, |ctx| {
 						f_impl(self.project, ctx.into_target_mut()?)
 					})
 				} else if let Some(f_impl) = self.anon_fns.get(fn_name) {
-					TestInvoker::wrap(self.project, implicits, &self.module_path, &f.embed, &mut ctx, |ctx| {
+					TestInvoker::wrap(self.project, implicits, output_mode, &self.module_path, &f.embed, &mut ctx, |ctx| {
 						f_impl(self.project, ctx.into_target_mut()?)
 					})
 				} else {
@@ -233,6 +234,7 @@ impl TestInvoker {
 	fn wrap<'a, 'b, 'c, R: Serialize, F: FnOnce(&mut Ctx) -> Result<R>>(
 		project: &'a TestProject<'a>,
 		implicits: &'b Implicits,
+		output_mode: Option<OutputMode>,
 		module: &'b Unembedded,
 		embed: &'c Embed,
 		ctx: &mut Ctx,
@@ -252,7 +254,12 @@ impl TestInvoker {
 			},
 		}
 		
-		let target_context = TargetContext { embed: embed.clone(), implicits: implicits.clone(), dest_tmp_path };
+		let target_context = TargetContext {
+			embed: embed.clone(),
+			implicits: implicits.clone(),
+			output_mode,
+			dest_tmp_path
+		};
 		
 		let state = BuildState {
 			module,
@@ -323,15 +330,10 @@ impl<'a> TestProject<'a> {
 		let mut p = self.lock();
 		let rules = self.rules.lock().unwrap();
 		p.replace_rules(rules.clone());
-
-		p.cache_mut().invalidate_if(|dep| {
-			match dep.record.result {
-				BuildResult::File(ref f) if f == &FAKE_FILE => false,
-				_ => true,
-			}
-		});
+		drop(p);
+		self.invalidate_cache();
 	}
-
+	
 	fn new() -> Result<Self> {
 		let root = TempDir::new("ambltest")?;
 		let ui = Ui::test();
@@ -388,6 +390,18 @@ impl<'a> TestProject<'a> {
 		let m = self.new_module().builder(f);
 		self
 			.inject_rule(dsl::target(&target_name, dsl::module(&m.name).function(DEFAULT_BUILD_FN)))
+			.inject_module(m)
+	}
+
+	pub fn target_builder_with_outputs<S: ToString, S2: ToString>
+		(&'a self, target_name: S, outputs: Vec<S2>, f: BuilderFn) -> &Self
+	{
+		let target_name = target_name.to_string();
+		let m = self.new_module().builder(f);
+		let target = Target::new(&target_name, dsl::module(&m.name).function(DEFAULT_BUILD_FN))
+			.with_outputs(outputs.into_iter().map(|s| s.to_string()));
+		self
+			.inject_rule(dsl::rule(target))
 			.inject_module(m)
 	}
 
@@ -467,6 +481,16 @@ impl<'a> TestProject<'a> {
 		self
 	}
 
+	pub fn invalidate_cache(&self) {
+		let mut p = self.lock();
+		p.cache_mut().invalidate_if(|dep| {
+			match dep.record.result {
+				BuildResult::File(ref f) if f == &FAKE_FILE => false,
+				_ => true,
+			}
+		});
+	}
+
 	pub fn build_file(&self, f: &str) -> Result<&Self> {
 		self.build_dep(&DependencyRequest::FileDependency(f.into()))?;
 		Ok(self)
@@ -503,6 +527,7 @@ impl<'a> TestProject<'a> {
 		let target_context = TargetContext {
 			embed: Embed::root(),
 			implicits: Default::default(),
+			output_mode: None,
 			dest_tmp_path: None,
 		};
 		let result = invoke::perform(self.lock(), &target_context, &module, self.token, req.to_owned())

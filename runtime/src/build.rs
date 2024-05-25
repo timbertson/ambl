@@ -35,10 +35,24 @@ impl BuildReason {
 	}
 }
 
+#[derive(Clone, Copy)]
+pub enum OutputMode { Single, Multiple }
+
+impl OutputMode {
+	pub fn from_outputs(outputs: &Vec<String>) -> Self {
+		if outputs.is_empty() {
+			OutputMode::Single
+		} else {
+			OutputMode::Multiple
+		}
+	}
+}
+
 pub struct TargetContext {
 	pub dest_tmp_path: Option<Unembedded>,
 	pub embed: Embed<'static>,
 	pub implicits: Implicits,
+	pub output_mode: Option<OutputMode>,
 }
 
 impl TargetContext {

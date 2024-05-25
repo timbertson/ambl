@@ -41,6 +41,7 @@ pub struct SymlinkStat {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FileStat {
 	File(Mtime),
+	Dir(Mtime),
 	Symlink(SymlinkStat),
 }
 
@@ -52,8 +53,13 @@ pub struct PersistFile {
 }
 
 impl PersistFile {
-	fn compute_checksum(p: &Path) -> Result<Checksum> {
-		Ok(Checksum(crc32fast::hash(&fs::read(p)?)))
+	fn compute_checksum(p: &Path, lstat: &fs::Metadata) -> Result<PersistChecksum> {
+	// TODO enable checksum of directories
+		if lstat.is_dir() {
+			Ok(PersistChecksum::Disabled)
+		} else {
+			Ok(PersistChecksum::File(Checksum(crc32fast::hash(&fs::read(p)?))))
+		}
 	}
 	
 	pub fn from_path<P: AsRef<Path>>(p: P, target: Option<Simple>, checksum_config: ChecksumConfig) -> Result<Self> {
@@ -84,13 +90,15 @@ impl PersistFile {
 							(file_stat, trivial_checksum)
 						},
 					}
+				} else if lstat.is_dir() {
+					(FileStat::Dir(Mtime::from_stat(&lstat)?), trivial_checksum)
 				} else {
 					(FileStat::File(Mtime::from_stat(&lstat)?), trivial_checksum)
 				};
 
 				let checksum = match trivial_checksum {
 					Some(c) => c,
-					None => PersistChecksum::File(Self::compute_checksum(p)?),
+					None => Self::compute_checksum(p, &lstat)?,
 				};
 
 				Ok(Self {

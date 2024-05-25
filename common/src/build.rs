@@ -425,6 +425,7 @@ pub enum InvokeAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WriteDest {
 	pub contents: Vec<u8>,
+	pub output_name: Option<String>,
 	pub replace: bool,
 }
 

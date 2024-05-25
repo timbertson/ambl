@@ -236,9 +236,32 @@ pub enum Rule {
 pub struct Target {
 	// TODO deserializer which accepts `name` shorthand
 	pub names: Vec<String>,
+	
+	// a target may have named outputs, typically used for multi-output targets
+	pub outputs: Vec<String>,
 
 	#[serde(flatten)]
 	pub build: FunctionSpec,
+}
+
+impl Target {
+	pub fn new<S: Into<String>, F: Into<FunctionSpec>>(s: S, entrypoint: F) -> Self {
+		Self {
+			names: vec!(s.into()),
+			outputs: Default::default(),
+			build: entrypoint.into(),
+		}
+	}
+	
+	pub fn output<S: Into<String>>(mut self, s: S) -> Self {
+		self.outputs.push(s.into());
+		self
+	}
+
+	pub fn with_outputs<S: IntoIterator<Item=String>>(mut self, s: S) -> Self {
+		self.outputs.extend(s.into_iter());
+		self
+	}
 }
 
 impl Into<Rule> for Target {
@@ -331,6 +354,7 @@ use crate::build::{Command, FilesetDependency, GenCommand, Stdio};
 	pub fn target<S: Into<String>, F: Into<FunctionSpec>>(s: S, entrypoint: F) -> Rule {
 		Rule::Target(Target {
 			names: vec!(s.into()),
+			outputs: Default::default(),
 			build: entrypoint.into(),
 		})
 	}
@@ -338,6 +362,7 @@ use crate::build::{Command, FilesetDependency, GenCommand, Stdio};
 	pub fn targets<S: Into<String>, F: Into<FunctionSpec>>(s: Vec<S>, entrypoint: FunctionSpec) -> Rule {
 		Rule::Target(Target {
 			names: s.into_iter().map(|s| s.into()).collect(),
+			outputs: Default::default(),
 			build: entrypoint.into(),
 		})
 	}

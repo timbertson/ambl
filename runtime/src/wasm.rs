@@ -13,7 +13,7 @@ use wasmtime::{Config, Engine, Store};
 use wasmtime::component::*;
 use wasmtime::AsContextMut;
 
-use crate::build::{BuildReason, TargetContext};
+use crate::build::{BuildReason, OutputMode, TargetContext};
 use crate::ctx::*;
 use crate::build_request::{ResolvedFnSpec, BuildRequest};
 use crate::path_util::{Embed, self};
@@ -104,6 +104,7 @@ impl BuildModule for WasmModule {
 	fn build(
 		&mut self,
 		implicits: &Implicits,
+		output_mode: Option<OutputMode>,
 		f: &ResolvedFnSpec,
 		arg: &Ctx,
 		_unlocked_evidence: &ProjectHandle<Self>
@@ -126,6 +127,7 @@ impl BuildModule for WasmModule {
 					},
 					embed: f.embed.clone(),
 					implicits: implicits.clone(),
+					output_mode,
 				});
 				true
 			}

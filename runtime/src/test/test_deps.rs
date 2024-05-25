@@ -335,3 +335,33 @@ fn test_force_rebuild() -> Result<()> {
 		Ok(())
 	})
 }
+
+
+#[test]
+#[serial]
+fn test_multi_output() -> Result<()> {
+	TestProject::in_tempdir(|p: &TestProject| {
+		p.target_builder_with_outputs("multi", vec!("foo", "bar", "baz"),|p, c| {
+			p.record("built");
+			c.write_dest("default contents")?;
+			c.write_named_output("foo", "foo contents")?;
+			c.write_named_output("bar", "bar contents")?;
+			Ok(())
+		});
+
+		p.build_dep(&DependencyRequest::FileDependency("multi".to_owned()))?;
+		eq!(p.log(), vec!("built"));
+		
+		eq!(p.read_file(".ambl/out/multi")?, "default contents");
+		eq!(p.read_file(".ambl/out/foo")?, "foo contents");
+		eq!(p.read_file(".ambl/out/bar")?, "bar contents");
+		
+		p.invalidate_cache();
+
+		// a dependency built by any other output name is just as sweet
+		p.build_dep(&DependencyRequest::FileDependency("foo".to_owned()))?;
+		eq!(p.log(), vec!("built", "built"));
+
+		Ok(())
+	})
+}
