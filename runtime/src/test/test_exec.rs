@@ -202,3 +202,33 @@ fn test_can_create_output() -> Result<()> {
 		Ok(())
 	})
 }
+
+
+#[test]
+#[serial]
+fn test_can_create_multiple_outputs() -> Result<()> {
+	TestProject::in_tempdir(|p| {
+		let builder = |p: &TestProject, c: &TargetCtx| {
+			c.run(cmd("bash").arg("-euc")
+				.arg(r##"
+					dest="$1"
+					mkdir -p "$dest"
+					echo default > "$dest/target"
+					echo foo_out > "$dest/foo"
+					echo bar_out > "$dest/bar"
+				"##).arg("--").arg(c.dest_path_str())
+				.stderr(Stderr::Merge)
+			)?;
+			Ok(())
+		};
+
+		p.target_builder_with_outputs("target", vec!("foo", "bar", "baz"), builder);
+		p.build_file("target")?;
+
+		eq!(p.read_file(".ambl/out/target")?, "default");
+		eq!(p.read_file(".ambl/out/foo")?, "foo_out");
+		eq!(p.read_file(".ambl/out/bar")?, "bar_out");
+
+		Ok(())
+	})
+}
