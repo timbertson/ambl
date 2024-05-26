@@ -212,7 +212,6 @@ fn test_can_create_multiple_outputs() -> Result<()> {
 			c.run(cmd("bash").arg("-euc")
 				.arg(r##"
 					dest="$1"
-					mkdir -p "$dest"
 					echo default > "$dest/target"
 					echo foo_out > "$dest/foo"
 					echo bar_out > "$dest/bar"

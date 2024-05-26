@@ -61,7 +61,6 @@ fn perform_invoke<M: BuildModule>(
 						let output_name = output_name.clone()
 							.or_else(|| path.file_name().map(|name| path_util::str_of_os(name).to_owned()))
 							.ok_or_else(|| anyhow!("couldn't get default output name for multi-output target"))?;
-						path_util::fsopt(&path, fs::create_dir_all(&path))?;
 						path.push(output_name);
 					},
 					None | Some(OutputMode::Single) => {

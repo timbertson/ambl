@@ -122,6 +122,7 @@ pub struct TargetConfig {
 	pub rule: OwnedRule,
 	pub inputs: Vec<String>,
 	pub implicit_inputs: Vec<String>,
+	pub named_outputs: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -145,7 +146,17 @@ impl<'a> Lookup for RuleBindings<'a> {
 			self.config.rule.bindings.lookup(key).or_else(|| {
 				match key {
 					"in" => Some(Ok(LookupResult::Simple(self.config.inputs.join(" ")))),
-					"out" => Some(Ok(LookupResult::Simple(self.ctx.dest_path_str().to_owned()))),
+					"out" => {
+						let result = match self.config.named_outputs {
+							None => self.ctx.dest_path_str().to_owned(),
+							Some(ref outputs) => {
+								// for multi outputs, nest them within dest_path/*
+								let base = self.ctx.dest_path_str();
+								outputs.iter().map(|name| format!("{}/{}", base, name)).collect::<Vec<_>>().join(" ")
+							}
+						};
+						Some(Ok(LookupResult::Simple(result)))
+					},
 					_ => None,
 				}
 			})
@@ -165,7 +176,7 @@ pub fn execute(ctx: TargetCtx) -> Result<()> {
 	ctx.build_all(config.inputs.clone())?;
 	ctx.build_all(config.implicit_inputs.clone())?;
 
-	// TODO should we be splicing this?
+	// TODO should we be splicing this into an array instead of an eval string?
 	let bash_command = eval::evaluate(bindings, &UnownedValue::reference("command"))?;
 	ctx.run(cmd("bash").arg("-euxc").arg(String::from_utf8(bash_command)?))?;
 	Ok(())

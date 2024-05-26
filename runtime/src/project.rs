@@ -862,7 +862,7 @@ impl<M: BuildModule> Project<M> {
 
 				let do_build = |project, found_target: &Option<FoundTarget>, build_token| {
 					result_block(|| {
-					// I need a type annotation, but I don't want to specify the lifetimes x_x
+						// I need a type annotation, but I don't want to specify the lifetimes x_x
 						let mut project: Mutexed<Project<M>> = project;
 						let persist = if let Some(found_target) = &found_target {
 							let name_embedded = Embedded::new(found_target.build.embed.copy(), found_target.rel_name.to_owned());
@@ -878,7 +878,7 @@ impl<M: BuildModule> Project<M> {
 							
 							let tmp_path: Unembedded = project.tmp_path(&name_embedded)?;
 							path_util::rm_rf_and_ensure_parent(&tmp_path)?;
-							
+
 							// on the client side, we explicitly add a @root virtual prefix
 							// so that using the file path via ambl or within a command
 							// will resolve correctly.
@@ -886,6 +886,11 @@ impl<M: BuildModule> Project<M> {
 							client_tmp_path.push(&tmp_path);
 
 							project.unlocked_block(|project_handle| {
+								let output_mode = OutputMode::from_outputs(&found_target.outputs);
+								if output_mode == OutputMode::Multiple {
+									path_util::fsopt(&tmp_path, fs::create_dir(&tmp_path))?;
+								}
+
 								let ctx = Ctx::Target(
 									TargetCtx::new(
 										found_target.rel_name.as_str().to_owned(),
@@ -898,7 +903,6 @@ impl<M: BuildModule> Project<M> {
 								debug!("calling {:?}", found_target.build);
 								
 								result_block(|| {
-									let output_mode = OutputMode::from_outputs(&found_target.outputs);
 									let bytes = wasm_module.build(&found_target.implicits, Some(output_mode), &found_target.build, &ctx, project_handle)?;
 									let _: () = ResultFFI::deserialize(&bytes)?;
 									Ok(())

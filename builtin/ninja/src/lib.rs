@@ -95,9 +95,8 @@ use crate::target::{TargetConfig, UnownedValue};
 				implicit_inputs.into_iter().chain(order_only_inputs.into_iter())
 				.map(eval_static).collect::<Result<_>>()?;
 
-			for output in outputs { // TODO inefficient to redo this work per output
-				let output_str = eval_static(output)?;
-
+			let outputs: Vec<String> = outputs.into_iter().map(eval_static).collect::<Result<_>>()?;
+			if let Some(name) = outputs.iter().next().cloned() {
 				let rule_name = rule.0;
 				let rule = ninja_rules.rules.get(rule_name).ok_or_else(|| anyhow!("can't find build rule {}", rule_name))?;
 				let mut owned_bindings: HashMap<String, OwnedValue> = ninja_rules.bindings.iter()
@@ -112,9 +111,14 @@ use crate::target::{TargetConfig, UnownedValue};
 				let target_config = TargetConfig {
 					rule: rule.into(),
 					bindings: owned_bindings,
-					inputs: inputs.clone(), implicit_inputs: implicit_inputs.clone()
+					inputs: inputs.clone(), implicit_inputs: implicit_inputs.clone(),
+					named_outputs: if outputs.len() > 1 {
+						Some(outputs)
+					} else {
+						None
+					},
 				};
-				target_map.insert(output_str, target_config);
+				target_map.insert(name, target_config);
 			}
 		}
 		
@@ -133,7 +137,13 @@ use crate::target::{TargetConfig, UnownedValue};
 		}
 		
 		target_map.into_iter().map(|(name, config)| {
-			Ok(target(name, builder.clone().config(config)?))
+			let outputs = config.named_outputs.clone();
+			let target = Target::new(name, builder.clone().config(config)?);
+			let target = match outputs {
+				None => target,
+				Some(outputs) => target.with_outputs(outputs),
+			};
+			Ok(rule(target))
 		}).collect()
 	}
 }

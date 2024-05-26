@@ -35,7 +35,7 @@ impl BuildReason {
 	}
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode { Single, Multiple }
 
 impl OutputMode {
